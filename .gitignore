@@ -1,0 +1,17 @@
+# Binaries (root level only)
+/gpu-agent
+/gpu-agent.exe
+/gpu-agent-*
+
+# Go
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
