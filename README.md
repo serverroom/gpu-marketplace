@@ -27,6 +27,24 @@ irm https://raw.githubusercontent.com/serverroom/gpu-marketplace/main/scripts/in
 curl -sSL https://raw.githubusercontent.com/serverroom/gpu-marketplace/main/scripts/install-mac.sh | sudo bash
 ```
 
+## Verifying Downloads
+
+Every release publishes a `checksums.txt` (SHA-256) alongside the binaries. The
+install scripts automatically verify the downloaded `gpu-agent` binary against it
+and abort (deleting the file) if it doesn't match.
+
+If a release has no `checksums.txt`, verification is skipped with a warning. Set
+`GPU_AGENT_REQUIRE_CHECKSUM=1` before running an installer to turn a missing
+checksum into a hard failure instead.
+
+To verify a manual download yourself, grab the binary and `checksums.txt` from the
+[Releases](https://github.com/serverroom/gpu-marketplace/releases) page, then:
+
+```bash
+sha256sum  --ignore-missing -c checksums.txt   # Linux
+shasum -a 256 --ignore-missing -c checksums.txt # macOS
+```
+
 ## Manual Setup
 
 ### Prerequisites
@@ -128,7 +146,7 @@ Provider (behind NAT)              Hub Servers (5 locations)
 ## Building from Source
 
 ```bash
-# Requires Go 1.22+
+# Requires Go 1.26+ (see go.mod)
 go build -o gpu-agent ./cmd/gpu-agent/
 
 # Cross-compile for Linux
@@ -137,6 +155,21 @@ GOOS=linux GOARCH=amd64 go build -o gpu-agent-linux-amd64 ./cmd/gpu-agent/
 # Cross-compile for macOS ARM
 GOOS=darwin GOARCH=arm64 go build -o gpu-agent-darwin-arm64 ./cmd/gpu-agent/
 ```
+
+## Releasing
+
+Releases are built automatically by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+Push a version tag and the workflow cross-compiles every supported OS/arch, generates
+`checksums.txt`, and publishes a GitHub Release with all assets:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The asset names it produces (`gpu-agent-<os>-<arch>[.exe]`) match exactly what the
+install scripts download and verify, so a tagged release is all that's needed to ship
+an update.
 
 ## Hub Setup (Internal)
 
