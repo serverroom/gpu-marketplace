@@ -5,18 +5,45 @@ $ErrorActionPreference = "Stop"
 $REPO = "serverroom/gpu-marketplace"
 $INSTALL_DIR = "$env:ProgramFiles\gpu-agent"
 $CONFIG_DIR = "$env:ProgramData\gpu-agent"
+$SCRIPT_URL = "https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1"
 
 Write-Host "===============================" -ForegroundColor Cyan
 Write-Host " GPU Marketplace Agent Installer" -ForegroundColor Cyan
 Write-Host "===============================" -ForegroundColor Cyan
 Write-Host ""
 
-# Check admin privileges
+# Check admin privileges — self-elevate if needed.
+#
+# IMPORTANT: this script is meant to be run via `irm ... | iex`, which executes
+# in the *caller's* session scope. A bare `exit` would therefore terminate the
+# entire PowerShell window. So on the non-admin path we open a fresh elevated
+# window and `return` instead.
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Host "Error: This script must be run as Administrator." -ForegroundColor Red
-    Write-Host "Right-click PowerShell and select 'Run as Administrator'."
-    exit 1
+    Write-Host "This installer needs Administrator rights to:" -ForegroundColor Yellow
+    Write-Host "  - install WireGuard" -ForegroundColor Yellow
+    Write-Host "  - write to '$INSTALL_DIR'" -ForegroundColor Yellow
+    Write-Host "  - edit the system PATH" -ForegroundColor Yellow
+    Write-Host "  - register the 'GPU Marketplace Agent' Windows service" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Requesting elevation - please approve the UAC prompt..." -ForegroundColor Yellow
+
+    $elevatedCommand = "irm $SCRIPT_URL | iex"
+    try {
+        Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList @(
+            "-NoExit",
+            "-ExecutionPolicy", "Bypass",
+            "-Command", $elevatedCommand
+        )
+        Write-Host "An elevated window has been opened to continue the install." -ForegroundColor Green
+    } catch {
+        Write-Host ""
+        Write-Host "Elevation was cancelled. To install, open PowerShell with" -ForegroundColor Red
+        Write-Host "'Run as administrator' and run:" -ForegroundColor Red
+        Write-Host "  irm $SCRIPT_URL | iex" -ForegroundColor White
+    }
+    # `return`, not `exit`: this keeps the caller's window open under `irm | iex`.
+    return
 }
 
 # Detect architecture
@@ -25,8 +52,8 @@ $goarch = switch ($arch) {
     "X64"   { "amd64" }
     "Arm64" { "arm64" }
     default {
-        Write-Host "Unsupported architecture: $arch" -ForegroundColor Red
-        exit 1
+        # `throw` (not `exit`) so the host window survives under `irm | iex`.
+        throw "Unsupported architecture: $arch"
     }
 }
 Write-Host "Detected architecture: $arch ($goarch)"
@@ -45,7 +72,7 @@ function Install-WireGuard {
         choco install wireguard -y
     } else {
         Write-Host "Downloading WireGuard installer..."
-        $wgInstaller = "$env:TEMP\wireguard-installer.msi"
+        $wgInstaller = "$env:TEMP\wireguard-installer.exe"
         Invoke-WebRequest -Uri "https://download.wireguard.com/windows-client/wireguard-installer.exe" -OutFile $wgInstaller
         Start-Process -FilePath $wgInstaller -ArgumentList "/S" -Wait
         Remove-Item $wgInstaller -ErrorAction SilentlyContinue
@@ -76,7 +103,8 @@ function Download-Agent {
     } catch {
         Write-Host "Error: Failed to download gpu-agent binary." -ForegroundColor Red
         Write-Host "You may need to build from source: go build ./cmd/gpu-agent/"
-        exit 1
+        # `throw` (not `exit`) so the host window survives under `irm | iex`.
+        throw "Failed to download gpu-agent binary from $downloadUrl"
     }
 
     # Add to PATH if not already there
