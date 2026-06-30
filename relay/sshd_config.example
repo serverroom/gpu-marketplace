@@ -1,0 +1,20 @@
+# Relay sshd drop-in for provider agent tunnels and renter jumps.
+# Place in /etc/ssh/sshd_config.d/gpu-relay.conf on the DMZ relay box.
+#
+# The gpu-tunnel account is forwarding-only; agents land here via `ssh -R` and the
+# authorized_keys entries (written by relaymgr) restrict each one to its own
+# loopback slots. Renter routing (sshpiper / Match ForceCommand) is the separate,
+# still-to-be-proven piece (spec D3 spike) and is NOT enabled here yet.
+
+Match User gpu-tunnel
+    # Forwarding only: no shell, no exec, no SFTP.
+    ForceCommand /usr/sbin/nologin
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    # Reverse (-R) forwards are allowed but every bind is constrained per-key by
+    # the authorized_keys `restrict,permitlisten=...` options relaymgr writes.
+    AllowTcpForwarding remote
+    # Never expose forwarded ports beyond the relay's own loopback.
+    GatewayPorts no
+    PermitOpen none
