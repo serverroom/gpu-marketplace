@@ -59,25 +59,79 @@ install_wireguard() {
     echo "WireGuard installed."
 }
 
+# Verify a downloaded file against the release's checksums.txt (SHA-256).
+# checksums.txt format (one line per asset): "<sha256>  <asset-filename>"
+# Set GPU_AGENT_REQUIRE_CHECKSUM=1 to hard-fail when no checksum is available.
+verify_checksum() {
+    local file="$1" asset="$2" tag="$3"
+    local checksums_url="https://github.com/$REPO/releases/download/$tag/checksums.txt"
+    local tmp
+    tmp="$(mktemp 2>/dev/null || mktemp -t gpu-agent)"
+
+    if ! curl -fsSL -o "$tmp" "$checksums_url"; then
+        rm -f "$tmp"
+        if [ "${GPU_AGENT_REQUIRE_CHECKSUM:-0}" = "1" ]; then
+            echo "Error: no checksums.txt for $tag and GPU_AGENT_REQUIRE_CHECKSUM=1. Aborting." >&2
+            exit 1
+        fi
+        echo "WARNING: No checksums.txt for $tag - skipping integrity verification."
+        return
+    fi
+
+    local expected
+    expected="$(grep -E "[[:space:]]\*?${asset}\$" "$tmp" | awk '{print $1}' | head -1 || true)"
+    rm -f "$tmp"
+
+    if [ -z "$expected" ]; then
+        if [ "${GPU_AGENT_REQUIRE_CHECKSUM:-0}" = "1" ]; then
+            echo "Error: no checksum entry for $asset. Aborting." >&2
+            exit 1
+        fi
+        echo "WARNING: No checksum entry for $asset - skipping verification."
+        return
+    fi
+
+    local actual
+    actual="$(sha256sum "$file" | awk '{print $1}')"
+
+    if [ "$actual" != "$expected" ]; then
+        rm -f "$file"
+        echo "Error: checksum MISMATCH for $asset!" >&2
+        echo "  expected: $expected" >&2
+        echo "  actual:   $actual" >&2
+        echo "Deleted the downloaded binary. Aborting." >&2
+        exit 1
+    fi
+    echo "Checksum verified ($asset)."
+}
+
 # Download latest release binary
 download_agent() {
     echo "Downloading gpu-agent for linux/$GOARCH..."
 
-    # Get latest release tag
-    LATEST=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-    if [ -z "$LATEST" ]; then
-        echo "Warning: No releases found. Downloading from main branch..."
-        DOWNLOAD_URL="https://github.com/$REPO/releases/download/v0.1.0/gpu-agent-linux-$GOARCH"
+    local asset="gpu-agent-linux-$GOARCH"
+
+    # Resolve the release tag (fall back to v0.1.0 if there are no releases yet)
+    local tag
+    tag="$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4 || true)"
+    if [ -z "$tag" ]; then
+        echo "Warning: No releases found. Using v0.1.0..."
+        tag="v0.1.0"
     else
-        echo "Latest release: $LATEST"
-        DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST/gpu-agent-linux-$GOARCH"
+        echo "Latest release: $tag"
     fi
 
-    curl -sSL -o "$INSTALL_DIR/gpu-agent" "$DOWNLOAD_URL" || {
+    local download_url="https://github.com/$REPO/releases/download/$tag/$asset"
+
+    curl -sSL -o "$INSTALL_DIR/gpu-agent" "$download_url" || {
         echo "Error: Failed to download gpu-agent binary."
         echo "You may need to build from source: go build ./cmd/gpu-agent/"
         exit 1
     }
+
+    # Verify integrity before we chmod +x / execute it.
+    verify_checksum "$INSTALL_DIR/gpu-agent" "$asset" "$tag"
+
     chmod +x "$INSTALL_DIR/gpu-agent"
     echo "Installed to $INSTALL_DIR/gpu-agent"
 }
