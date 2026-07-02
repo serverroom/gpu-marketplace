@@ -6,6 +6,12 @@ loopback slots and writes a `restrict`+`permitlisten` authorized_keys entry so t
 agent can bind ONLY those slots. Holds no DB access and no secrets beyond its own
 scoped API token (verified upstream / by network policy).
 
+Renter routing (D3): the control plane calls /authorize-renter at provision
+time; the relay writes a `restrict`+forced-`command` line for the renter's key on
+the SEPARATE gpu-renter account, pinning it to a jump pipe to that listing's ssh
+slot (gpu_route.py). The renter's real SSH to the microVM runs end-to-end through
+the pipe -- the relay moves bytes only.
+
 Run as the gpu-tunnel-manager service inside the DMZ. NOT for the public internet.
 """
 
@@ -15,13 +21,20 @@ import traceback
 
 from flask import Flask, request, jsonify
 
-from relaymgr import build_authorized_keys_line, SlotAllocator
+from relaymgr import (build_authorized_keys_line,
+                      build_renter_authorized_keys_line, SlotAllocator)
 
 app = Flask(__name__)
 
 STORE = os.environ.get('RELAY_STORE', '/etc/gpu-relay/agents.json')
 AUTHORIZED_KEYS = os.environ.get('RELAY_AUTHORIZED_KEYS',
                                  '/home/gpu-tunnel/.ssh/authorized_keys')
+
+# Renter routing store + the gpu-renter account's authorized_keys. Kept apart
+# from the agent account: agents open reverse forwards, renters run a jump pipe.
+RENTER_STORE = os.environ.get('RELAY_RENTER_STORE', '/etc/gpu-relay/renters.json')
+RENTER_AUTHORIZED_KEYS = os.environ.get('RELAY_RENTER_AUTHORIZED_KEYS',
+                                        '/home/gpu-renter/.ssh/authorized_keys')
 
 
 def load_store():
@@ -46,6 +59,30 @@ def rewrite_authorized_keys(store):
         if lines:
             f.write('\n')
     os.chmod(AUTHORIZED_KEYS, 0o600)
+
+
+def load_renters():
+    if os.path.exists(RENTER_STORE):
+        with open(RENTER_STORE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_renters(data):
+    os.makedirs(os.path.dirname(RENTER_STORE), exist_ok=True)
+    with open(RENTER_STORE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def rewrite_renter_authorized_keys(renters):
+    lines = [build_renter_authorized_keys_line(r['pubkey'], r['ssh'])
+             for r in renters.values()]
+    os.makedirs(os.path.dirname(RENTER_AUTHORIZED_KEYS), exist_ok=True)
+    with open(RENTER_AUTHORIZED_KEYS, 'w') as f:
+        f.write('\n'.join(lines))
+        if lines:
+            f.write('\n')
+    os.chmod(RENTER_AUTHORIZED_KEYS, 0o600)
 
 
 @app.route('/register-agent', methods=['POST'])
@@ -75,6 +112,48 @@ def unregister_agent(listing_id):
             del store[listing_id]
             save_store(store)
             rewrite_authorized_keys(store)
+        # An agent going away invalidates any renter routed to it.
+        renters = load_renters()
+        if listing_id in renters:
+            del renters[listing_id]
+            save_renters(renters)
+            rewrite_renter_authorized_keys(renters)
+        return jsonify(removed=True), 200
+    except Exception as ex:
+        return jsonify(error=str(ex)), 500
+
+
+@app.route('/authorize-renter', methods=['POST'])
+def authorize_renter():
+    try:
+        data = request.get_json(force=True)
+        listing_id = data['listing_id']
+        renter_pubkey = data['renter_pubkey']
+
+        # The ssh slot is the agent's, not something the renter or caller picks:
+        # look it up from the agent registration for this listing.
+        agents = load_store()
+        agent = agents.get(listing_id)
+        if agent is None:
+            return jsonify(error='no agent tunnel for listing'), 409
+
+        renters = load_renters()
+        renters[listing_id] = {'pubkey': renter_pubkey, 'ssh': agent['ssh']}
+        save_renters(renters)
+        rewrite_renter_authorized_keys(renters)
+        return jsonify(ssh_slot=agent['ssh']), 200
+    except Exception as ex:
+        return jsonify(error=str(ex), trace=traceback.format_exc()), 500
+
+
+@app.route('/renter/<listing_id>', methods=['DELETE'])
+def revoke_renter(listing_id):
+    try:
+        renters = load_renters()
+        if listing_id in renters:
+            del renters[listing_id]
+            save_renters(renters)
+            rewrite_renter_authorized_keys(renters)
         return jsonify(removed=True), 200
     except Exception as ex:
         return jsonify(error=str(ex)), 500

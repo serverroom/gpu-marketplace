@@ -1,10 +1,11 @@
 # Relay sshd drop-in for provider agent tunnels and renter jumps.
 # Place in /etc/ssh/sshd_config.d/gpu-relay.conf on the DMZ relay box.
 #
-# The gpu-tunnel account is forwarding-only; agents land here via `ssh -R` and the
-# authorized_keys entries (written by relaymgr) restrict each one to its own
-# loopback slots. Renter routing (sshpiper / Match ForceCommand) is the separate,
-# still-to-be-proven piece (spec D3 spike) and is NOT enabled here yet.
+# Two accounts, two roles:
+#   gpu-tunnel  -- provider agents land here via `ssh -R`; each key is pinned to
+#                  its own loopback slots by authorized_keys restrict/permitlisten.
+#   gpu-renter  -- renters jump through here; each key is pinned by a forced
+#                  command to a pipe (gpu_route.py) to exactly one agent ssh slot.
 
 Match User gpu-tunnel
     # Forwarding only: no shell, no exec, no SFTP.
@@ -17,4 +18,16 @@ Match User gpu-tunnel
     AllowTcpForwarding remote
     # Never expose forwarded ports beyond the relay's own loopback.
     GatewayPorts no
+    PermitOpen none
+
+Match User gpu-renter
+    # The forced command in each renter key's authorized_keys line
+    # (relaymgr.build_renter_authorized_keys_line) is the ONLY thing that runs:
+    # it pipes the renter's SSH channel to that listing's loopback ssh slot. No
+    # shell, no pty, no forwarding of any kind -- the renter's real SSH to the
+    # microVM runs end-to-end inside the pipe.
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    AllowTcpForwarding no
     PermitOpen none

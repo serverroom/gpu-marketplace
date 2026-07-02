@@ -10,6 +10,10 @@ CONTROL_BASE = 41000
 SSH_BASE = 42000
 SLOT_RANGE = 1000
 
+# Where the renter jump pipe (gpu_route.py) lives on the relay. Baked into the
+# forced command so a renter key can do nothing but pipe to its own ssh slot.
+ROUTE_BIN = '/opt/gpu-relay/gpu_route.py'
+
 
 def build_authorized_keys_line(pubkey, control_slot, ssh_slot):
     # `restrict` disables everything (pty, agent/X11 forwarding, ALL port
@@ -20,6 +24,27 @@ def build_authorized_keys_line(pubkey, control_slot, ssh_slot):
             'permitlisten="127.0.0.1:%d",'
             'permitlisten="127.0.0.1:%d"' % (control_slot, ssh_slot))
     return opts + ' ' + pubkey.strip()
+
+
+def valid_ssh_slot(slot):
+    # The renter jump pipe may only reach an agent SSH slot (never a control
+    # slot or an arbitrary port). gpu_route enforces this too, defence in depth.
+    try:
+        s = int(slot)
+    except (TypeError, ValueError):
+        return False
+    return SSH_BASE <= s < SSH_BASE + SLOT_RANGE
+
+
+def build_renter_authorized_keys_line(pubkey, ssh_slot, route_bin=ROUTE_BIN):
+    # A renter key is a forwarding-only jump: `restrict` kills pty/forwarding/rc,
+    # and the forced `command` replaces whatever the renter asks with a pipe to
+    # exactly ONE agent ssh slot. The renter's real SSH to the microVM runs
+    # end-to-end *through* that pipe, so the relay never sees the inner session.
+    if not valid_ssh_slot(ssh_slot):
+        raise ValueError('ssh_slot %r out of range' % (ssh_slot,))
+    cmd = 'command="python3 %s %d"' % (route_bin, int(ssh_slot))
+    return 'restrict,%s %s' % (cmd, pubkey.strip())
 
 
 class SlotAllocator:
