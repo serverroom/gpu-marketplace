@@ -3,27 +3,30 @@
 package stats
 
 import (
-	"os/exec"
-	"strconv"
-	"strings"
+	"os"
+
+	"golang.org/x/sys/windows"
 )
 
 func collectDisk() (DiskInfo, error) {
 	var info DiskInfo
-	out, err := exec.Command("wmic", "logicaldisk", "where", "DeviceID='C:'",
-		"get", "Size,FreeSpace", "/value").Output()
+
+	drive := os.Getenv("SystemDrive")
+	if drive == "" {
+		drive = "C:"
+	}
+
+	path, err := windows.UTF16PtrFromString(drive + `\`)
 	if err != nil {
 		return info, err
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Size=") {
-			b, _ := strconv.ParseFloat(strings.TrimPrefix(line, "Size="), 64)
-			info.TotalGB = b / 1024 / 1024 / 1024
-		} else if strings.HasPrefix(line, "FreeSpace=") {
-			b, _ := strconv.ParseFloat(strings.TrimPrefix(line, "FreeSpace="), 64)
-			info.FreeGB = b / 1024 / 1024 / 1024
-		}
+
+	var freeToCaller, total, totalFree uint64
+	if err := windows.GetDiskFreeSpaceEx(path, &freeToCaller, &total, &totalFree); err != nil {
+		return info, err
 	}
+
+	info.TotalGB = float64(total) / 1024 / 1024 / 1024
+	info.FreeGB = float64(freeToCaller) / 1024 / 1024 / 1024
 	return info, nil
 }

@@ -90,25 +90,3 @@ func parseVMStatPages(line string) float64 {
 	n, _ := strconv.ParseFloat(s, 64)
 	return n
 }
-
-func memWindows() (MemoryInfo, error) {
-	var info MemoryInfo
-
-	out, err := exec.Command("wmic", "os", "get", "TotalVisibleMemorySize,FreePhysicalMemory", "/value").Output()
-	if err != nil {
-		return info, err
-	}
-
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "TotalVisibleMemorySize=") {
-			kb, _ := strconv.ParseFloat(strings.TrimPrefix(line, "TotalVisibleMemorySize="), 64)
-			info.TotalGB = kb / 1024 / 1024
-		} else if strings.HasPrefix(line, "FreePhysicalMemory=") {
-			kb, _ := strconv.ParseFloat(strings.TrimPrefix(line, "FreePhysicalMemory="), 64)
-			info.AvailableGB = kb / 1024 / 1024
-		}
-	}
-
-	return info, nil
-}
