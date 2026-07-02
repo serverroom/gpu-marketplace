@@ -266,7 +266,11 @@ func Run(code string) error {
 	fmt.Printf("\nRegistered! listing_id=%s status=%s location=%s\n", resp.ListingID, resp.Status, location)
 	fmt.Printf("Agent key: %s\n", keyPath)
 	fmt.Println()
-	fmt.Println("Your GPU is not listed for rent yet. To publish it, configure the listing in your dashboard.")
+	if tun != nil {
+		fmt.Println("Link established. Continue the setup on your dashboard.")
+	} else {
+		fmt.Println("Continue the setup on your dashboard.")
+	}
 	return nil
 }
 
