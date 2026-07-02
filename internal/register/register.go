@@ -265,6 +265,9 @@ func Run(code string) error {
 	}
 	fmt.Printf("\nRegistered! listing_id=%s status=%s location=%s\n", resp.ListingID, resp.Status, location)
 	fmt.Printf("Agent key: %s\n", keyPath)
+	fmt.Println()
+	fmt.Println("Your GPU is not listed for rent yet. To publish it, configure the listing")
+	fmt.Println("in your dashboard and set your monthly asking price.")
 	return nil
 }
 
