@@ -18,10 +18,8 @@ type Hub struct {
 
 // Config is the agent configuration.
 type Config struct {
-	PeerID    string    `yaml:"peer_id"`
-	HubName   string    `yaml:"hub_name"`
-	ListenPort int      `yaml:"listen_port"`
-	Hubs      []Hub     `yaml:"hubs"`
+	ListenPort int   `yaml:"listen_port"`
+	Hubs       []Hub `yaml:"hubs"`
 }
 
 // DefaultHubs returns the built-in list of relay POPs. Port 443 is the latency

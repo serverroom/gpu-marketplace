@@ -81,4 +81,4 @@ def unregister_agent(listing_id):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=51820)
+    app.run(host='0.0.0.0', port=int(os.environ.get('RELAY_PORT', '5001')))

@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"time"
 
 	"github.com/kardianos/service"
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
-	"github.com/serverroom/gpu-marketplace/internal/heartbeat"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/server"
 	"github.com/serverroom/gpu-marketplace/internal/sshtunnel"
@@ -25,7 +23,6 @@ var version = "dev"
 type gpuAgent struct {
 	cfg          *config.Config
 	httpSrv      *server.Server
-	heartbeat    *heartbeat.Heartbeat
 	tunnelCancel context.CancelFunc
 	controlSrv   *control.Server
 	logger       service.Logger
@@ -57,22 +54,13 @@ func (a *gpuAgent) Start(s service.Service) error {
 		}
 	}
 
-	// Legacy stats server + heartbeat (best-effort; superseded by push-over-tunnel).
+	// Legacy local stats server (best-effort; superseded by push-over-tunnel).
 	cfg, err := config.Load()
 	if err == nil {
 		a.cfg = cfg
 		a.httpSrv = server.New(fmt.Sprintf(":%d", cfg.ListenPort))
 		if serr := a.httpSrv.Start(); serr != nil {
 			a.logger.Warningf("start http server: %v", serr)
-		}
-		if cfg.PeerID != "" && cfg.HubName != "" {
-			for _, hub := range cfg.Hubs {
-				if hub.Name == cfg.HubName {
-					a.heartbeat = heartbeat.New(hub.Host, hub.Port, cfg.PeerID, 60*time.Second)
-					a.heartbeat.Start()
-					break
-				}
-			}
 		}
 	}
 
@@ -88,9 +76,6 @@ func (a *gpuAgent) Stop(s service.Service) error {
 	}
 	if a.controlSrv != nil {
 		a.controlSrv.Stop()
-	}
-	if a.heartbeat != nil {
-		a.heartbeat.Stop()
 	}
 	if a.httpSrv != nil {
 		a.httpSrv.Stop()
