@@ -177,6 +177,12 @@ func main() {
 			runRegister(args[1:])
 			return
 
+		case "select-location":
+			if err := register.RetrySelection(); err != nil {
+				log.Fatalf("Location selection failed: %v", err)
+			}
+			return
+
 		case "test-stats":
 			runTestStats()
 			return
@@ -225,14 +231,15 @@ func printUsage() {
 	fmt.Println("Usage: gpu-agent [command]")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  register    Register this machine to the marketplace (--code, --server)")
-	fmt.Println("  install     Install as a system service")
-	fmt.Println("  uninstall   Remove the system service")
-	fmt.Println("  start       Start the service")
-	fmt.Println("  stop        Stop the service")
-	fmt.Println("  status      Check service status")
-	fmt.Println("  test-stats  Collect and display system stats")
-	fmt.Println("  -version    Print version")
+	fmt.Println("  register         Register this machine to the marketplace (--code)")
+	fmt.Println("  select-location  Redo the location choice for an existing registration")
+	fmt.Println("  install          Install as a system service")
+	fmt.Println("  uninstall        Remove the system service")
+	fmt.Println("  start            Start the service")
+	fmt.Println("  stop             Stop the service")
+	fmt.Println("  status           Check service status")
+	fmt.Println("  test-stats       Collect and display system stats")
+	fmt.Println("  -version         Print version")
 	fmt.Println()
 	fmt.Println("Run without arguments to start interactively (or as a service when managed by the OS).")
 }

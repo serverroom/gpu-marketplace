@@ -3,7 +3,6 @@ package tunnel
 import (
 	"fmt"
 	"net"
-	"sort"
 	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
@@ -14,41 +13,6 @@ type LatencyResult struct {
 	Hub     config.Hub
 	AvgMs   float64
 	Success bool
-}
-
-// SelectBestHub pings all hubs and returns the one with lowest latency.
-func SelectBestHub(hubs []config.Hub) (*config.Hub, error) {
-	results := make([]LatencyResult, 0, len(hubs))
-
-	for _, hub := range hubs {
-		avg, ok := measureLatency(hub.Host, hub.Port, 3)
-		results = append(results, LatencyResult{
-			Hub:     hub,
-			AvgMs:   avg,
-			Success: ok,
-		})
-	}
-
-	// Filter successful results
-	var successful []LatencyResult
-	for _, r := range results {
-		if r.Success {
-			successful = append(successful, r)
-		}
-	}
-
-	if len(successful) == 0 {
-		return nil, fmt.Errorf("no hubs reachable")
-	}
-
-	// Sort by latency
-	sort.Slice(successful, func(i, j int) bool {
-		return successful[i].AvgMs < successful[j].AvgMs
-	})
-
-	best := successful[0]
-	fmt.Printf("Selected hub %s (%s) with %.1fms latency\n", best.Hub.Name, best.Hub.Host, best.AvgMs)
-	return &best.Hub, nil
 }
 
 // measureLatency does TCP connect probes to measure RTT.

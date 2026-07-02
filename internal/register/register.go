@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,13 +25,14 @@ import (
 
 // RegisterRequest is the payload the agent sends to register its hardware. The
 // one-time code is the credential; the agent's public key is its tunnel identity.
+// No relay preference here: the code resolves to an account (and with it the
+// brand and its relay set) only server-side, so relay choice happens after.
 type RegisterRequest struct {
-	Code           string      `json:"code"`
-	AgentPubkey    string      `json:"agent_pubkey"`
-	Specs          interface{} `json:"specs"`
-	GPUModels      []string    `json:"gpu_models"`
-	Reachability   string      `json:"reachability"`
-	PreferredRelay string      `json:"preferred_relay,omitempty"`
+	Code         string      `json:"code"`
+	AgentPubkey  string      `json:"agent_pubkey"`
+	Specs        interface{} `json:"specs"`
+	GPUModels    []string    `json:"gpu_models"`
+	Reachability string      `json:"reachability"`
 }
 
 // DecodeCode unpacks the registration code into the POST URL and the inner
@@ -64,9 +66,33 @@ type TunnelInfo struct {
 	RelayHostkey string `json:"relay_hostkey"`
 }
 
+// RelayOption is one relay the control plane offers for this account's brand.
+type RelayOption struct {
+	Name string `json:"name"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
 // RegisterResponse is what the control plane returns on a successful register.
+// Either it pre-assigns the tunnel directly, or it returns the brand's relay
+// list plus a select_url for the agent to report the user's choice to.
 type RegisterResponse struct {
-	ListingID    string      `json:"listing_id"`
+	ListingID    string        `json:"listing_id"`
+	Status       string        `json:"status"`
+	Relays       []RelayOption `json:"relays,omitempty"`
+	SelectURL    string        `json:"select_url,omitempty"`
+	Tunnel       *TunnelInfo   `json:"tunnel,omitempty"`
+	ControlToken string        `json:"control_token,omitempty"`
+}
+
+// SelectRelayRequest tells the control plane which relay the provider picked.
+type SelectRelayRequest struct {
+	ListingID string `json:"listing_id"`
+	Relay     string `json:"relay"`
+}
+
+// SelectRelayResponse returns the tunnel allocation on the chosen relay.
+type SelectRelayResponse struct {
 	Status       string      `json:"status"`
 	Tunnel       *TunnelInfo `json:"tunnel,omitempty"`
 	ControlToken string      `json:"control_token,omitempty"`
@@ -130,23 +156,14 @@ func Submit(postURL string, req RegisterRequest) (*RegisterResponse, error) {
 	return &rr, nil
 }
 
-// Run executes the full registration flow: let the user pick a relay (closest
-// preselected), generate the agent keypair, collect specs, register, and
-// persist the result.
+// Run executes the full registration flow: generate the agent keypair, collect
+// specs, register, then pick a relay from the brand's list the control plane
+// returned (closest preselected) and report the choice back for slot allocation.
 func Run(code string) error {
 	fmt.Println("GPU Marketplace Agent - register")
 	fmt.Println("================================")
 
 	postURL, secret, err := DecodeCode(code)
-	if err != nil {
-		return err
-	}
-
-	// Pick the relay before registering, so a probe hiccup never strands a
-	// server-side registration. The choice is a preference; the control plane
-	// has the final word via the tunnel info in its response.
-	hubs := loadHubs()
-	hub, err := chooseHub(hubs)
 	if err != nil {
 		return err
 	}
@@ -164,12 +181,11 @@ func Run(code string) error {
 	}
 
 	req := RegisterRequest{
-		Code:           secret,
-		AgentPubkey:    pub,
-		Specs:          st,
-		GPUModels:      gpuModels(st),
-		Reachability:   "unknown",
-		PreferredRelay: hub.Name,
+		Code:         secret,
+		AgentPubkey:  pub,
+		Specs:        st,
+		GPUModels:    gpuModels(st),
+		Reachability: "unknown",
 	}
 
 	// The POST endpoint is decoded from the code (which also carries the owner's
@@ -180,14 +196,16 @@ func Run(code string) error {
 		return err
 	}
 
-	if err := saveRegistration(resp.ListingID, hub.Name, keyPath); err != nil {
-		return fmt.Errorf("save registration: %w", err)
+	// The one-time code is consumed now — persist everything needed to finish
+	// (or later retry) the remaining steps before anything else can fail.
+	reg := Registration{
+		ListingID: resp.ListingID,
+		KeyPath:   keyPath,
+		SelectURL: resp.SelectURL,
+		Relays:    resp.Relays,
 	}
-	if resp.Tunnel != nil {
-		if err := saveTunnelConfig(resp.Tunnel, keyPath); err != nil {
-			return fmt.Errorf("save tunnel config: %w", err)
-		}
-		fmt.Println("Tunnel config saved; the agent service keeps the reverse tunnel up.")
+	if err := saveRegistration(reg); err != nil {
+		return fmt.Errorf("save registration: %w", err)
 	}
 	if resp.ControlToken != "" {
 		if err := saveControlToken(resp.ControlToken); err != nil {
@@ -195,9 +213,193 @@ func Run(code string) error {
 		}
 	}
 
-	fmt.Printf("\nRegistered! listing_id=%s status=%s relay=%s\n", resp.ListingID, resp.Status, hub.Name)
+	tun := resp.Tunnel
+	switch {
+	case tun != nil:
+		reg.Hub = tun.RelayHost
+	case resp.SelectURL == "":
+		// Nothing to choose and nowhere to send a choice: don't prompt (the
+		// answer would go nowhere) and don't pretend the agent is connected.
+		fmt.Println()
+		fmt.Println("Warning: the marketplace assigned no tunnel and offered no location choice.")
+		fmt.Println("The listing is registered, but this agent stays offline until it gets one.")
+	default:
+		// The account's brand — and with it the relay set — was resolved
+		// server-side from the code, so the location choice happens only now.
+		hub, herr := chooseHub(relayOptions(resp))
+		if herr != nil {
+			return fmt.Errorf("registered (listing %s) but location selection failed: %w\nRun 'gpu-agent select-location' to retry without a new code", resp.ListingID, herr)
+		}
+		reg.Hub = hub.Name
+
+		sresp, serr := selectRelayWithRetry(resp.SelectURL, resp.ControlToken, resp.ListingID, hub.Name)
+		if serr != nil {
+			saveRegistration(reg) // keep the choice for the retry path
+			return fmt.Errorf("registered (listing %s) but location assignment failed: %w\nRun 'gpu-agent select-location' to retry without a new code", resp.ListingID, serr)
+		}
+		if sresp.ControlToken != "" {
+			if err := saveControlToken(sresp.ControlToken); err != nil {
+				return fmt.Errorf("save control token: %w", err)
+			}
+		}
+		if sresp.Tunnel == nil {
+			saveRegistration(reg)
+			return fmt.Errorf("registered (listing %s) but the marketplace returned no tunnel for location %s\nRun 'gpu-agent select-location' to retry without a new code", resp.ListingID, hub.Name)
+		}
+		tun = sresp.Tunnel
+	}
+
+	if err := saveRegistration(reg); err != nil {
+		return fmt.Errorf("save registration: %w", err)
+	}
+	if tun != nil {
+		if err := saveTunnelConfig(tun, keyPath); err != nil {
+			return fmt.Errorf("save tunnel config: %w", err)
+		}
+		fmt.Println("Tunnel config saved; the agent service keeps the reverse tunnel up.")
+	}
+
+	location := reg.Hub
+	if location == "" {
+		location = "unassigned"
+	}
+	fmt.Printf("\nRegistered! listing_id=%s status=%s location=%s\n", resp.ListingID, resp.Status, location)
 	fmt.Printf("Agent key: %s\n", keyPath)
 	return nil
+}
+
+// RetrySelection re-runs the location choice and assignment from the persisted
+// registration state — the recovery path when register was interrupted after
+// the one-time code was already consumed.
+func RetrySelection() error {
+	reg, err := LoadRegistration()
+	if err != nil {
+		return fmt.Errorf("no registration found (run 'gpu-agent register' first): %w", err)
+	}
+	if reg.SelectURL == "" {
+		return fmt.Errorf("this registration has no location-selection endpoint; generate a new code and re-register")
+	}
+
+	hubs := hubsFromRelayOptions(reg.Relays)
+	if len(hubs) == 0 {
+		hubs = loadHubs()
+	}
+	hub, err := chooseHub(hubs)
+	if err != nil {
+		return err
+	}
+	reg.Hub = hub.Name
+
+	sresp, err := selectRelayWithRetry(reg.SelectURL, LoadControlToken(), reg.ListingID, hub.Name)
+	if err != nil {
+		return fmt.Errorf("location assignment failed: %w", err)
+	}
+	if sresp.ControlToken != "" {
+		if err := saveControlToken(sresp.ControlToken); err != nil {
+			return fmt.Errorf("save control token: %w", err)
+		}
+	}
+	if sresp.Tunnel == nil {
+		return fmt.Errorf("the marketplace returned no tunnel for location %s", hub.Name)
+	}
+	if err := saveRegistration(*reg); err != nil {
+		return fmt.Errorf("save registration: %w", err)
+	}
+	if err := saveTunnelConfig(sresp.Tunnel, reg.KeyPath); err != nil {
+		return fmt.Errorf("save tunnel config: %w", err)
+	}
+	fmt.Printf("Location %s assigned; tunnel config saved. Restart the agent service to connect.\n", hub.Name)
+	return nil
+}
+
+// SelectRelay reports the provider's relay choice to the control plane, which
+// allocates tunnel slots on that relay and returns the connection info.
+func SelectRelay(selectURL, bearer, listingID, relayName string) (*SelectRelayResponse, error) {
+	body, err := json.Marshal(SelectRelayRequest{ListingID: listingID, Relay: relayName})
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequest("POST", selectURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+bearer)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, &StatusError{Code: resp.StatusCode, Body: string(respBody)}
+	}
+	var sr SelectRelayResponse
+	if err := json.Unmarshal(respBody, &sr); err != nil {
+		return nil, err
+	}
+	return &sr, nil
+}
+
+// StatusError is a non-200 control-plane reply; 4xx will not heal on retry.
+type StatusError struct {
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("location select failed (%d): %s", e.Code, e.Body)
+}
+
+// selectRelayWithRetry retries transient failures (network errors, 5xx) a few
+// times before giving up; 4xx replies fail immediately.
+func selectRelayWithRetry(selectURL, bearer, listingID, relayName string) (*SelectRelayResponse, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		resp, err := SelectRelay(selectURL, bearer, listingID, relayName)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		var se *StatusError
+		if errors.As(err, &se) && se.Code >= 400 && se.Code < 500 {
+			break
+		}
+		if attempt < 3 {
+			fmt.Printf("Location assignment attempt %d failed (%v); retrying...\n", attempt, err)
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
+	}
+	return nil, lastErr
+}
+
+// stdinIsTerminal reports whether stdin is an interactive console (vs a pipe),
+// so invalid piped input falls back to the default instead of re-prompting.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+func hubsFromRelayOptions(relays []RelayOption) []config.Hub {
+	hubs := make([]config.Hub, 0, len(relays))
+	for _, r := range relays {
+		hubs = append(hubs, config.Hub{Name: r.Name, Host: r.Host, Port: r.Port})
+	}
+	return hubs
+}
+
+// relayOptions converts the control plane's relay list for probing, falling
+// back to config.yaml / built-in defaults when the response carries none.
+func relayOptions(resp *RegisterResponse) []config.Hub {
+	if len(resp.Relays) > 0 {
+		return hubsFromRelayOptions(resp.Relays)
+	}
+	return loadHubs()
 }
 
 // loadHubs returns the relay list from config.yaml when present, otherwise the
@@ -210,14 +412,15 @@ func loadHubs() []config.Hub {
 }
 
 // chooseHub probes all relays, shows them closest-first, and lets the user pick
-// one. Enter accepts the preselected closest relay. An unreachable probe is not
+// one. Enter accepts the preselected closest one. An unreachable probe is not
 // fatal: the probe port can be filtered locally while the tunnel still works.
+// User-facing wording says "location" — relays are an infrastructure detail.
 func chooseHub(hubs []config.Hub) (*config.Hub, error) {
 	if len(hubs) == 0 {
-		return nil, fmt.Errorf("no relays configured")
+		return nil, fmt.Errorf("no locations available")
 	}
 
-	fmt.Println("Testing latency to relays...")
+	fmt.Println("Testing latency to available locations...")
 	results := tunnel.TestAllHubs(hubs)
 
 	sort.SliceStable(results, func(i, j int) bool {
@@ -228,7 +431,7 @@ func chooseHub(hubs []config.Hub) (*config.Hub, error) {
 	})
 
 	fmt.Println()
-	fmt.Println("Available relays (closest first):")
+	fmt.Println("Available locations (closest first):")
 	for i, r := range results {
 		if r.Success {
 			fmt.Printf("  %d) %-12s %.1f ms\n", i+1, r.Hub.Name, r.AvgMs)
@@ -237,27 +440,37 @@ func chooseHub(hubs []config.Hub) (*config.Hub, error) {
 		}
 	}
 	if !results[0].Success {
-		fmt.Println("Warning: no relay responded to the latency probe; you can still pick one.")
+		fmt.Println("Warning: no location responded to the latency probe; you can still pick one.")
 	}
 
-	fmt.Printf("Select relay [1]: ")
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	line = strings.TrimSpace(line)
-
+	// Never fatal on bad input: by the time this prompt runs, the one-time
+	// code has already been consumed, so aborting would strand the register.
+	reader := bufio.NewReader(os.Stdin)
+	interactive := stdinIsTerminal()
 	choice := 1
-	if line != "" {
-		n, err := strconv.Atoi(line)
-		if err != nil || n < 1 || n > len(results) {
-			return nil, fmt.Errorf("invalid relay choice %q", line)
+	for {
+		fmt.Printf("Select location [1]: ")
+		line, rerr := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if line == "" {
+			break // Enter (or EOF): accept the closest
 		}
-		choice = n
+		if n, err := strconv.Atoi(line); err == nil && n >= 1 && n <= len(results) {
+			choice = n
+			break
+		}
+		if !interactive || rerr != nil {
+			fmt.Printf("Invalid location choice %q; using %s.\n", line, results[0].Hub.Name)
+			break
+		}
+		fmt.Printf("Enter a number between 1 and %d, or press Enter for the closest.\n", len(results))
 	}
 
 	sel := results[choice-1]
 	if !sel.Success {
-		fmt.Printf("Note: relay %s did not respond to the probe; continuing anyway.\n", sel.Hub.Name)
+		fmt.Printf("Note: %s did not respond to the probe; continuing anyway.\n", sel.Hub.Name)
 	}
-	fmt.Printf("Using relay %s (%s)\n", sel.Hub.Name, sel.Hub.Host)
+	fmt.Printf("Using location %s\n", sel.Hub.Name)
 	return &sel.Hub, nil
 }
 
@@ -269,17 +482,43 @@ func gpuModels(st *stats.SystemStats) []string {
 	return models
 }
 
-func saveRegistration(listingID, hub, keyPath string) error {
-	dir := config.ConfigDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
+// Registration is the persisted register-time state. SelectURL and Relays are
+// kept so location selection can be retried (`gpu-agent select-location`) after
+// an interrupted register — the one-time code is consumed at Submit and cannot
+// be replayed.
+type Registration struct {
+	ListingID string        `json:"listing_id"`
+	Hub       string        `json:"hub,omitempty"`
+	KeyPath   string        `json:"key_path"`
+	SelectURL string        `json:"select_url,omitempty"`
+	Relays    []RelayOption `json:"relays,omitempty"`
+}
+
+// RegistrationPath is where the register-time state is persisted.
+func RegistrationPath() string {
+	return filepath.Join(config.ConfigDir(), "registration.json")
+}
+
+func saveRegistration(reg Registration) error {
+	if err := os.MkdirAll(config.ConfigDir(), 0755); err != nil {
 		return err
 	}
-	data, _ := json.MarshalIndent(map[string]string{
-		"listing_id": listingID,
-		"hub":        hub,
-		"key_path":   keyPath,
-	}, "", "  ")
-	return os.WriteFile(filepath.Join(dir, "registration.json"), data, 0600)
+	data, _ := json.MarshalIndent(reg, "", "  ")
+	return os.WriteFile(RegistrationPath(), data, 0600)
+}
+
+// LoadRegistration reads the persisted register-time state, or an error if the
+// agent has not registered yet.
+func LoadRegistration() (*Registration, error) {
+	data, err := os.ReadFile(RegistrationPath())
+	if err != nil {
+		return nil, err
+	}
+	var reg Registration
+	if err := json.Unmarshal(data, &reg); err != nil {
+		return nil, err
+	}
+	return &reg, nil
 }
 
 // TunnelConfigPath is where the reverse-tunnel config is persisted.

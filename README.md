@@ -6,7 +6,7 @@ A P2P GPU marketplace agent that lets you list your GPU server for others to ren
 
 1. **Install the agent** on your Linux GPU server
 2. Generate a **one-time registration code** in your dashboard and run `gpu-agent register --code <code>`
-3. The agent **tests latency** to the relays and **prompts you to pick one** (closest preselected), then opens a **reverse SSH tunnel** to it
+3. The agent registers, then **tests latency** to the available locations and **prompts you to pick one** (closest preselected) — under the hood it opens a **reverse SSH tunnel** to that location's relay
 4. Your server appears on the **marketplace listing** for renters
 5. When rented, the agent boots an **isolated microVM** with the GPUs passed through, and **wipes it clean** when the rental ends
 
@@ -121,7 +121,7 @@ Provider (behind NAT)              Hub Servers (5 locations)
 
 - **Agent**: Single Go binary using [kardianos/service](https://github.com/kardianos/service) for cross-platform service management
 - **Tunnel**: persistent reverse SSH tunnel (autossh-style), NAT-friendly (outbound only), relay host key pinned
-- **Relay selection**: Latency-based (TCP probe to all relays, picks fastest)
+- **Relay selection**: the control plane returns the account's relay list at register time; the agent TCP-probes them and prompts the provider to pick a location (closest preselected), then reports the choice back for slot allocation
 - **Isolation**: each rental runs in a Kata microVM with the GPUs passed through via VFIO; the disk is wiped and the GPU reset on turnover
 - **GPU detection**: NVIDIA (nvidia-smi), AMD (rocm-smi), Apple Silicon (system_profiler)
 
