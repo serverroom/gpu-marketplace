@@ -1,6 +1,7 @@
 package register
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,11 +25,12 @@ import (
 // RegisterRequest is the payload the agent sends to register its hardware. The
 // one-time code is the credential; the agent's public key is its tunnel identity.
 type RegisterRequest struct {
-	Code         string      `json:"code"`
-	AgentPubkey  string      `json:"agent_pubkey"`
-	Specs        interface{} `json:"specs"`
-	GPUModels    []string    `json:"gpu_models"`
-	Reachability string      `json:"reachability"`
+	Code           string      `json:"code"`
+	AgentPubkey    string      `json:"agent_pubkey"`
+	Specs          interface{} `json:"specs"`
+	GPUModels      []string    `json:"gpu_models"`
+	Reachability   string      `json:"reachability"`
+	PreferredRelay string      `json:"preferred_relay,omitempty"`
 }
 
 // DecodeCode unpacks the registration code into the POST URL and the inner
@@ -126,13 +130,23 @@ func Submit(postURL string, req RegisterRequest) (*RegisterResponse, error) {
 	return &rr, nil
 }
 
-// Run executes the full registration flow: pick the closest hub, generate the
-// agent keypair, collect specs, register, and persist the result.
+// Run executes the full registration flow: let the user pick a relay (closest
+// preselected), generate the agent keypair, collect specs, register, and
+// persist the result.
 func Run(code string) error {
 	fmt.Println("GPU Marketplace Agent - register")
 	fmt.Println("================================")
 
 	postURL, secret, err := DecodeCode(code)
+	if err != nil {
+		return err
+	}
+
+	// Pick the relay before registering, so a probe hiccup never strands a
+	// server-side registration. The choice is a preference; the control plane
+	// has the final word via the tunnel info in its response.
+	hubs := loadHubs()
+	hub, err := chooseHub(hubs)
 	if err != nil {
 		return err
 	}
@@ -150,11 +164,12 @@ func Run(code string) error {
 	}
 
 	req := RegisterRequest{
-		Code:         secret,
-		AgentPubkey:  pub,
-		Specs:        st,
-		GPUModels:    gpuModels(st),
-		Reachability: "unknown",
+		Code:           secret,
+		AgentPubkey:    pub,
+		Specs:          st,
+		GPUModels:      gpuModels(st),
+		Reachability:   "unknown",
+		PreferredRelay: hub.Name,
 	}
 
 	// The POST endpoint is decoded from the code (which also carries the owner's
@@ -163,13 +178,6 @@ func Run(code string) error {
 	resp, err := Submit(postURL, req)
 	if err != nil {
 		return err
-	}
-
-	// Link established. Now choose the closest relay for the reverse tunnel.
-	fmt.Println("Selecting the closest relay...")
-	hub, herr := tunnel.SelectBestHub(config.DefaultConfig().Hubs)
-	if herr != nil {
-		return fmt.Errorf("no relays reachable: %w", herr)
 	}
 
 	if err := saveRegistration(resp.ListingID, hub.Name, keyPath); err != nil {
@@ -190,6 +198,67 @@ func Run(code string) error {
 	fmt.Printf("\nRegistered! listing_id=%s status=%s relay=%s\n", resp.ListingID, resp.Status, hub.Name)
 	fmt.Printf("Agent key: %s\n", keyPath)
 	return nil
+}
+
+// loadHubs returns the relay list from config.yaml when present, otherwise the
+// built-in defaults.
+func loadHubs() []config.Hub {
+	if cfg, err := config.Load(); err == nil && len(cfg.Hubs) > 0 {
+		return cfg.Hubs
+	}
+	return config.DefaultConfig().Hubs
+}
+
+// chooseHub probes all relays, shows them closest-first, and lets the user pick
+// one. Enter accepts the preselected closest relay. An unreachable probe is not
+// fatal: the probe port can be filtered locally while the tunnel still works.
+func chooseHub(hubs []config.Hub) (*config.Hub, error) {
+	if len(hubs) == 0 {
+		return nil, fmt.Errorf("no relays configured")
+	}
+
+	fmt.Println("Testing latency to relays...")
+	results := tunnel.TestAllHubs(hubs)
+
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Success != results[j].Success {
+			return results[i].Success
+		}
+		return results[i].AvgMs < results[j].AvgMs
+	})
+
+	fmt.Println()
+	fmt.Println("Available relays (closest first):")
+	for i, r := range results {
+		if r.Success {
+			fmt.Printf("  %d) %-12s %.1f ms\n", i+1, r.Hub.Name, r.AvgMs)
+		} else {
+			fmt.Printf("  %d) %-12s unreachable\n", i+1, r.Hub.Name)
+		}
+	}
+	if !results[0].Success {
+		fmt.Println("Warning: no relay responded to the latency probe; you can still pick one.")
+	}
+
+	fmt.Printf("Select relay [1]: ")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line = strings.TrimSpace(line)
+
+	choice := 1
+	if line != "" {
+		n, err := strconv.Atoi(line)
+		if err != nil || n < 1 || n > len(results) {
+			return nil, fmt.Errorf("invalid relay choice %q", line)
+		}
+		choice = n
+	}
+
+	sel := results[choice-1]
+	if !sel.Success {
+		fmt.Printf("Note: relay %s did not respond to the probe; continuing anyway.\n", sel.Hub.Name)
+	}
+	fmt.Printf("Using relay %s (%s)\n", sel.Hub.Name, sel.Hub.Host)
+	return &sel.Hub, nil
 }
 
 func gpuModels(st *stats.SystemStats) []string {

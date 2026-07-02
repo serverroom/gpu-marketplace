@@ -6,7 +6,7 @@ A P2P GPU marketplace agent that lets you list your GPU server for others to ren
 
 1. **Install the agent** on your Linux GPU server
 2. Generate a **one-time registration code** in your dashboard and run `gpu-agent register --code <code>`
-3. The agent **tests latency** to the relays, picks the closest, and opens a **reverse SSH tunnel** to it
+3. The agent **tests latency** to the relays and **prompts you to pick one** (closest preselected), then opens a **reverse SSH tunnel** to it
 4. Your server appears on the **marketplace listing** for renters
 5. When rented, the agent boots an **isolated microVM** with the GPUs passed through, and **wipes it clean** when the rental ends
 

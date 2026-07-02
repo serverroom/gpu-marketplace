@@ -24,15 +24,16 @@ type Config struct {
 	Hubs      []Hub     `yaml:"hubs"`
 }
 
-// DefaultHubs returns the built-in list of hub servers.
+// DefaultHubs returns the built-in list of relay POPs. Port 443 is the latency
+// probe target (always reachable); the actual tunnel endpoint and port are
+// assigned by the control plane at register time.
 func DefaultHubs() []Hub {
 	return []Hub{
-		// Placeholder hubs — configure real endpoints via config.yaml.
-		{Name: "POP-1", Host: "hub1.example.com", Port: 51820},
-		{Name: "POP-2", Host: "hub2.example.com", Port: 51820},
-		{Name: "POP-3", Host: "hub3.example.com", Port: 51820},
-		{Name: "POP-4", Host: "hub4.example.com", Port: 51820},
-		{Name: "POP-5", Host: "hub5.example.com", Port: 51820},
+		{Name: "nyc", Host: "162.244.81.236", Port: 443},
+		{Name: "bucharest", Host: "89.39.149.246", Port: 443},
+		{Name: "miami", Host: "38.126.208.235", Port: 443},
+		{Name: "amsterdam", Host: "209.127.202.254", Port: 443},
+		{Name: "sf", Host: "198.145.121.234", Port: 443},
 	}
 }
 

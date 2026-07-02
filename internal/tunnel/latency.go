@@ -64,19 +64,10 @@ func measureLatency(host string, port int, attempts int) (float64, bool) {
 		elapsed := time.Since(start)
 
 		if err != nil {
-			// Try ICMP-like approach with UDP
-			start = time.Now()
-			conn2, err2 := net.DialTimeout("udp", addr, 5*time.Second)
-			elapsed = time.Since(start)
-			if err2 == nil {
-				conn2.Close()
-				total += float64(elapsed.Milliseconds())
-				ok++
-			}
 			continue
 		}
 		conn.Close()
-		total += float64(elapsed.Milliseconds())
+		total += float64(elapsed.Microseconds()) / 1000.0
 		ok++
 	}
 
