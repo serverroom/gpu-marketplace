@@ -79,34 +79,3 @@ func cpuDarwin(threads int) (CPUInfo, error) {
 
 	return info, nil
 }
-
-func cpuWindows(threads int) (CPUInfo, error) {
-	info := CPUInfo{Threads: threads, Cores: threads}
-
-	out, err := exec.Command("wmic", "cpu", "get", "Name", "/value").Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "Name=") {
-				info.Model = strings.TrimPrefix(line, "Name=")
-				break
-			}
-		}
-	}
-
-	out, err = exec.Command("wmic", "cpu", "get", "NumberOfCores", "/value").Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "NumberOfCores=") {
-				n, _ := strconv.Atoi(strings.TrimPrefix(line, "NumberOfCores="))
-				if n > 0 {
-					info.Cores = n
-				}
-				break
-			}
-		}
-	}
-
-	return info, nil
-}
