@@ -32,31 +32,30 @@ case "$ARCH" in
 esac
 echo "Detected architecture: $ARCH ($GOARCH)"
 
-# Detect package manager and install WireGuard
-install_wireguard() {
-    if command -v wg &>/dev/null; then
-        echo "WireGuard already installed."
+# The agent tunnels over reverse SSH: it needs the OpenSSH client (ssh + ssh-keygen).
+install_openssh_client() {
+    if command -v ssh &>/dev/null && command -v ssh-keygen &>/dev/null; then
+        echo "OpenSSH client already installed."
         return
     fi
 
-    echo "Installing WireGuard..."
+    echo "Installing OpenSSH client..."
     if command -v apt-get &>/dev/null; then
         apt-get update -qq
-        apt-get install -y -qq wireguard wireguard-tools
+        apt-get install -y -qq openssh-client
     elif command -v dnf &>/dev/null; then
-        dnf install -y wireguard-tools
+        dnf install -y openssh-clients
     elif command -v yum &>/dev/null; then
-        yum install -y epel-release
-        yum install -y wireguard-tools
+        yum install -y openssh-clients
     elif command -v pacman &>/dev/null; then
-        pacman -Sy --noconfirm wireguard-tools
+        pacman -Sy --noconfirm openssh
     elif command -v zypper &>/dev/null; then
-        zypper install -y wireguard-tools
+        zypper install -y openssh
     else
-        echo "Error: Unsupported package manager. Install WireGuard manually."
+        echo "Error: Unsupported package manager. Install the OpenSSH client manually."
         exit 1
     fi
-    echo "WireGuard installed."
+    echo "OpenSSH client installed."
 }
 
 # Download latest release binary
@@ -82,13 +81,6 @@ download_agent() {
     echo "Installed to $INSTALL_DIR/gpu-agent"
 }
 
-# Run setup (latency test, registration, WireGuard config)
-run_setup() {
-    echo
-    echo "Running agent setup..."
-    "$INSTALL_DIR/gpu-agent" setup
-}
-
 # Install as systemd service
 install_service() {
     echo
@@ -102,9 +94,8 @@ install_service() {
 }
 
 # Main
-install_wireguard
+install_openssh_client
 download_agent
-run_setup
 install_service
 
 echo
@@ -112,5 +103,7 @@ echo "================================================"
 echo " GPU Marketplace Agent installed successfully!"
 echo "================================================"
 echo
-echo "Your server is now reporting stats to the hub."
-echo "Stats endpoint: http://localhost:9100/stats"
+echo "Next: generate a one-time registration code in your dashboard, then run:"
+echo "  gpu-agent register --code <code>"
+echo "and restart the service to bring the tunnel up:"
+echo "  gpu-agent stop && gpu-agent start"

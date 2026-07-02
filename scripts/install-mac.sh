@@ -31,25 +31,13 @@ case "$ARCH" in
 esac
 echo "Detected architecture: $ARCH ($GOARCH)"
 
-# Install WireGuard via Homebrew
-install_wireguard() {
-    if command -v wg &>/dev/null; then
-        echo "WireGuard already installed."
-        return
-    fi
-
-    echo "Installing WireGuard..."
-    if command -v brew &>/dev/null; then
-        # Run as the real user, not root
-        REAL_USER="${SUDO_USER:-$USER}"
-        sudo -u "$REAL_USER" brew install wireguard-tools
-    else
-        echo "Error: Homebrew not found. Install it first:"
-        echo "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-        echo "Then re-run this installer."
+# The agent tunnels over reverse SSH; macOS ships the OpenSSH client.
+check_openssh_client() {
+    if ! command -v ssh &>/dev/null || ! command -v ssh-keygen &>/dev/null; then
+        echo "Error: OpenSSH client (ssh, ssh-keygen) not found."
         exit 1
     fi
-    echo "WireGuard installed."
+    echo "OpenSSH client found."
 }
 
 # Download latest release binary
@@ -74,13 +62,6 @@ download_agent() {
     echo "Installed to $INSTALL_DIR/gpu-agent"
 }
 
-# Run setup
-run_setup() {
-    echo
-    echo "Running agent setup..."
-    "$INSTALL_DIR/gpu-agent" setup
-}
-
 # Install as launchd daemon
 install_service() {
     echo
@@ -94,9 +75,8 @@ install_service() {
 }
 
 # Main
-install_wireguard
+check_openssh_client
 download_agent
-run_setup
 install_service
 
 echo
@@ -104,5 +84,7 @@ echo "================================================"
 echo " GPU Marketplace Agent installed successfully!"
 echo "================================================"
 echo
-echo "Your server is now reporting stats to the hub."
-echo "Stats endpoint: http://localhost:9100/stats"
+echo "Next: generate a one-time registration code in your dashboard, then run:"
+echo "  gpu-agent register --code <code>"
+echo "and restart the service to bring the tunnel up:"
+echo "  gpu-agent stop && gpu-agent start"

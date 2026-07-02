@@ -21,7 +21,7 @@ Write-Host ""
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host "This installer needs Administrator rights to:" -ForegroundColor Yellow
-    Write-Host "  - install WireGuard" -ForegroundColor Yellow
+    Write-Host "  - enable the Windows OpenSSH client (if missing)" -ForegroundColor Yellow
     Write-Host "  - write to '$INSTALL_DIR'" -ForegroundColor Yellow
     Write-Host "  - edit the system PATH" -ForegroundColor Yellow
     Write-Host "  - register the 'GPU Marketplace Agent' Windows service" -ForegroundColor Yellow
@@ -58,26 +58,23 @@ $goarch = switch ($arch) {
 }
 Write-Host "Detected architecture: $arch ($goarch)"
 
-# Install WireGuard
-function Install-WireGuard {
-    if (Get-Command "wireguard.exe" -ErrorAction SilentlyContinue) {
-        Write-Host "WireGuard already installed."
+# The agent tunnels over reverse SSH: it needs the OpenSSH client (ssh + ssh-keygen).
+function Install-OpenSSHClient {
+    if ((Get-Command "ssh.exe" -ErrorAction SilentlyContinue) -and
+        (Get-Command "ssh-keygen.exe" -ErrorAction SilentlyContinue)) {
+        Write-Host "OpenSSH client already installed."
         return
     }
 
-    Write-Host "Installing WireGuard..."
-    if (Get-Command "winget" -ErrorAction SilentlyContinue) {
-        winget install --id WireGuard.WireGuard --accept-source-agreements --accept-package-agreements --silent
-    } elseif (Get-Command "choco" -ErrorAction SilentlyContinue) {
-        choco install wireguard -y
-    } else {
-        Write-Host "Downloading WireGuard installer..."
-        $wgInstaller = "$env:TEMP\wireguard-installer.exe"
-        Invoke-WebRequest -Uri "https://download.wireguard.com/windows-client/wireguard-installer.exe" -OutFile $wgInstaller
-        Start-Process -FilePath $wgInstaller -ArgumentList "/S" -Wait
-        Remove-Item $wgInstaller -ErrorAction SilentlyContinue
+    Write-Host "Enabling the Windows OpenSSH client..."
+    $cap = Get-WindowsCapability -Online -Name "OpenSSH.Client*" | Select-Object -First 1
+    if ($null -eq $cap) {
+        throw "OpenSSH client capability not found; install OpenSSH manually and re-run."
     }
-    Write-Host "WireGuard installed."
+    if ($cap.State -ne "Installed") {
+        Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+    }
+    Write-Host "OpenSSH client ready."
 }
 
 # Download latest agent binary
@@ -118,13 +115,6 @@ function Download-Agent {
     Write-Host "Installed to $INSTALL_DIR\gpu-agent.exe"
 }
 
-# Run setup
-function Run-Setup {
-    Write-Host ""
-    Write-Host "Running agent setup..."
-    & "$INSTALL_DIR\gpu-agent.exe" setup
-}
-
 # Install as Windows Service
 function Install-Service {
     Write-Host ""
@@ -138,9 +128,8 @@ function Install-Service {
 }
 
 # Main
-Install-WireGuard
+Install-OpenSSHClient
 Download-Agent
-Run-Setup
 Install-Service
 
 Write-Host ""
@@ -148,5 +137,7 @@ Write-Host "================================================" -ForegroundColor G
 Write-Host " GPU Marketplace Agent installed successfully!" -ForegroundColor Green
 Write-Host "================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "Your server is now reporting stats to the hub."
-Write-Host "Stats endpoint: http://localhost:9100/stats"
+Write-Host "Next: generate a one-time registration code in your dashboard, then run:"
+Write-Host "  gpu-agent register --code <code>"
+Write-Host "and restart the service to bring the tunnel up:"
+Write-Host "  gpu-agent stop; gpu-agent start"
