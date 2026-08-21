@@ -181,3 +181,21 @@ func TestDecodeCodeRejectsGarbage(t *testing.T) {
 		t.Fatal("expected an error on a garbage code")
 	}
 }
+
+// The label is display only: the control plane matches the relay on its KEY, so
+// a request carrying "New York" instead of "nyc" would fail to allocate a tunnel.
+func TestSelectRelaySendsTheKeyNotTheDisplayName(t *testing.T) {
+	var got SelectRelayRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got)
+		json.NewEncoder(w).Encode(SelectRelayResponse{Status: "ok"})
+	}))
+	defer srv.Close()
+
+	if _, err := SelectRelay(srv.URL, "", "L-1", "nyc"); err != nil {
+		t.Fatalf("SelectRelay error: %v", err)
+	}
+	if got.Relay != "nyc" {
+		t.Errorf("server received relay %q, want the wire key \"nyc\"", got.Relay)
+	}
+}

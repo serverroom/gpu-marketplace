@@ -268,7 +268,7 @@ func runStatus(svc service.Service) {
 	st := register.LoadState()
 	switch {
 	case st.Registered && !st.Unreadable && st.HasTunnel:
-		fmt.Printf("Registration: listing %s, location %s, tunnel configured\n", st.ListingID, locationOrUnassigned(st.Location))
+		fmt.Printf("Registration: listing %s, location %s, tunnel configured\n", st.ListingID, locationOrUnassigned(config.LocationLabel(st.Location)))
 		return
 	case st.Unreadable:
 		fmt.Println("Registration: registered, details unreadable")
