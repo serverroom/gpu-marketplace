@@ -9,6 +9,7 @@
 package provisioner
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -47,21 +48,44 @@ const (
 	vramClearThresholdMiB = 512
 )
 
+// GPUVendor selects the toolchain used to reset and verify the host's GPUs.
+// Detection already knows all three (internal/stats), but reset and verify are
+// vendor-specific and a host cannot be turned over clean without them.
+type GPUVendor string
+
+const (
+	VendorNVIDIA GPUVendor = "nvidia"
+	VendorAMD    GPUVendor = "amd"
+	// VendorApple cannot host rentals: Apple Silicon has no IOMMU passthrough
+	// path, and its GPU memory is unified with system RAM, so there is neither a
+	// device to hand a guest nor a discrete VRAM to prove clean afterwards.
+	VendorApple GPUVendor = "apple"
+)
+
+// ErrVendorCannotIsolate is returned when the host's GPUs cannot be passed
+// through to a guest at all. Refusing at Provision is deliberate: the previous
+// behaviour accepted the rental and only discovered the problem at teardown,
+// where an unverifiable wipe quarantines the box dirty - so a host that could
+// never have worked ended up permanently unrentable after one booking.
+var ErrVendorCannotIsolate = errors.New("this host's GPUs cannot be isolated for rental")
+
 // Provisioner implements the control.Provisioner interface.
 type Provisioner struct {
 	runner      Runner
 	goldenImage string
 	diskDir     string
 	gpuBDFs     []string // PCI addresses of the passthrough GPUs
+	vendor      GPUVendor
 	status      string
 }
 
-func New(runner Runner, goldenImage, diskDir string, gpuBDFs []string) *Provisioner {
+func New(runner Runner, goldenImage, diskDir string, gpuBDFs []string, vendor GPUVendor) *Provisioner {
 	return &Provisioner{
 		runner:      runner,
 		goldenImage: goldenImage,
 		diskDir:     diskDir,
 		gpuBDFs:     gpuBDFs,
+		vendor:      vendor,
 		status:      StatusFree,
 	}
 }
@@ -75,6 +99,9 @@ func (p *Provisioner) overlayPath(rentalID string) string {
 // Provision boots a Kata microVM for the rental, passes through the GPUs, attaches
 // a fresh encrypted ephemeral disk, and injects the renter's SSH key.
 func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
+	if !p.vendor.CanIsolate() {
+		return fmt.Errorf("%w (vendor %s)", ErrVendorCannotIsolate, p.vendor)
+	}
 	if err := p.createEncryptedDisk(rentalID); err != nil {
 		return fmt.Errorf("create disk: %w", err)
 	}
@@ -138,18 +165,44 @@ func (p *Provisioner) wipeDisk(rentalID string) bool {
 	return true
 }
 
+// CanIsolate reports whether a host with these GPUs can hand one to a guest and
+// prove it clean afterwards.
+func (v GPUVendor) CanIsolate() bool {
+	return v == VendorNVIDIA || v == VendorAMD
+}
+
 func (p *Provisioner) resetAndVerifyGPU() bool {
-	for _, bdf := range p.gpuBDFs {
-		if err := p.runner.Run("nvidia-smi", "--gpu-reset", "-i", bdf); err != nil {
+	switch p.vendor {
+	case VendorNVIDIA:
+		for _, bdf := range p.gpuBDFs {
+			if err := p.runner.Run("nvidia-smi", "--gpu-reset", "-i", bdf); err != nil {
+				return false
+			}
+		}
+		out, err := p.runner.Output("nvidia-smi",
+			"--query-gpu=memory.used", "--format=csv,noheader,nounits")
+		if err != nil {
 			return false
 		}
-	}
-	out, err := p.runner.Output("nvidia-smi",
-		"--query-gpu=memory.used", "--format=csv,noheader,nounits")
-	if err != nil {
+		return VerifyVRAMClear(out)
+
+	case VendorAMD:
+		for _, bdf := range p.gpuBDFs {
+			if err := p.runner.Run("rocm-smi", "--gpureset", "-d", bdf); err != nil {
+				return false
+			}
+		}
+		// Same query shape internal/stats already relies on for AMD.
+		out, err := p.runner.Output("rocm-smi", "--showmeminfo", "vram", "--csv")
+		if err != nil {
+			return false
+		}
+		return VerifyAMDVRAMClear(out)
+
+	default:
+		// Unknown or non-isolating vendor: never claim a clean turnover.
 		return false
 	}
-	return VerifyVRAMClear(out)
 }
 
 // VerifyVRAMClear returns true only if every GPU reports used VRAM below the clear
@@ -169,4 +222,51 @@ func VerifyVRAMClear(nvidiaSMIOutput string) bool {
 		}
 	}
 	return true
+}
+
+// VerifyAMDVRAMClear reads `rocm-smi --showmeminfo vram --csv` and returns true
+// only if every GPU is below the clear threshold. rocm-smi reports VRAM in
+// BYTES where nvidia-smi reports MiB, which is exactly the kind of difference
+// that makes one shared parser wrong for both.
+//
+// Fails closed on anything it cannot read: no header, no rows, an unparseable
+// number, or a used column it cannot find.
+func VerifyAMDVRAMClear(rocmSMIOutput string) bool {
+	lines := strings.Split(strings.TrimSpace(rocmSMIOutput), "\n")
+	if len(lines) < 2 {
+		return false
+	}
+
+	header := strings.Split(strings.TrimSpace(lines[0]), ",")
+	usedCol := -1
+	for i, h := range header {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if strings.Contains(h, "used") && strings.Contains(h, "memory") {
+			usedCol = i
+			break
+		}
+	}
+	if usedCol < 0 {
+		return false
+	}
+
+	rows := 0
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		cols := strings.Split(line, ",")
+		if usedCol >= len(cols) {
+			return false
+		}
+		usedBytes, err := strconv.ParseInt(strings.TrimSpace(cols[usedCol]), 10, 64)
+		if err != nil {
+			return false
+		}
+		if usedBytes/(1024*1024) >= vramClearThresholdMiB {
+			return false
+		}
+		rows++
+	}
+	return rows > 0
 }
