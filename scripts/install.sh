@@ -72,12 +72,24 @@ download_agent() {
         DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST/gpu-agent-linux-$GOARCH"
     fi
 
-    curl -sSL -o "$INSTALL_DIR/gpu-agent" "$DOWNLOAD_URL" || {
+    # $INSTALL_DIR is on the default PATH but is not guaranteed to exist — a
+    # slim container image often ships without /usr/local/bin, and curl then
+    # fails the write, not the transfer.
+    mkdir -p "$INSTALL_DIR"
+
+    # Download beside the target, then move it into place: --fail keeps an HTTP
+    # error page from being saved and chmod +x'd as if it were the binary, and
+    # the temp file means a partial download never lands on $INSTALL_DIR.
+    TMP_AGENT="$INSTALL_DIR/.gpu-agent.download.$$"
+    curl -fsSL -o "$TMP_AGENT" "$DOWNLOAD_URL" || {
+        rm -f "$TMP_AGENT"
         echo "Error: Failed to download gpu-agent binary."
+        echo "  URL: $DOWNLOAD_URL"
         echo "You may need to build from source: go build ./cmd/gpu-agent/"
         exit 1
     }
-    chmod +x "$INSTALL_DIR/gpu-agent"
+    chmod +x "$TMP_AGENT"
+    mv -f "$TMP_AGENT" "$INSTALL_DIR/gpu-agent"
     echo "Installed to $INSTALL_DIR/gpu-agent"
 }
 
