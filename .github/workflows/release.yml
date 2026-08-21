@@ -35,7 +35,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          # Track go.mod rather than a pinned version: the module already
+          # requires a newer Go than the pin did, and a release build is the
+          # worst place to discover a toolchain mismatch.
+          go-version-file: go.mod
 
       - name: Build
         env:

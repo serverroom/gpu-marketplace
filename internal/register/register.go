@@ -527,6 +527,49 @@ func LoadRegistration() (*Registration, error) {
 	return &reg, nil
 }
 
+// State is what the agent has on disk: whether `register` has run, and whether
+// it has the relay tunnel it needs to actually be online. The two are separate
+// on purpose — registration consumes the one-time code before the location is
+// assigned, so "registered but no tunnel" is a real state a provider gets stuck
+// in, and it needs a different instruction from "never registered".
+type State struct {
+	Registered bool
+	HasTunnel  bool
+	ListingID  string
+	Location   string
+
+	// Unreadable is set when the registration exists but this process may not
+	// read it — `gpu-agent status` run without sudo, since the state files are
+	// 0600 and owned by root. It keeps "cannot tell" from being reported as
+	// "not registered", which would send a registered provider to re-register.
+	Unreadable bool
+}
+
+// LoadState reports the on-disk registration state. Presence is checked with
+// Stat, which any user can do (the config dir is 0755), and the details are
+// read best-effort so an unprivileged caller still gets the important half.
+func LoadState() State {
+	var st State
+	st.Registered = fileExists(RegistrationPath())
+	st.HasTunnel = fileExists(TunnelConfigPath())
+	if !st.Registered {
+		return st
+	}
+	reg, err := LoadRegistration()
+	if err != nil {
+		st.Unreadable = true
+		return st
+	}
+	st.ListingID = reg.ListingID
+	st.Location = reg.Hub
+	return st
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // TunnelConfigPath is where the reverse-tunnel config is persisted.
 func TunnelConfigPath() string {
 	return filepath.Join(config.ConfigDir(), "tunnel.json")

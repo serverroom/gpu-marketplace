@@ -43,8 +43,16 @@ func DefaultConfig() *Config {
 	}
 }
 
+// ConfigDirEnv overrides the platform config directory. It exists so the agent
+// can be pointed at a scratch directory by tests and dry runs; a real install
+// never sets it, and a root daemon never inherits it from a local user.
+const ConfigDirEnv = "GPU_AGENT_CONFIG_DIR"
+
 // ConfigDir returns the platform-specific config directory.
 func ConfigDir() string {
+	if dir := os.Getenv(ConfigDirEnv); dir != "" {
+		return dir
+	}
 	switch runtime.GOOS {
 	case "windows":
 		return filepath.Join(os.Getenv("ProgramData"), "gpu-agent")

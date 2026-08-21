@@ -99,7 +99,11 @@ function Download-Agent {
         Invoke-WebRequest -Uri $downloadUrl -OutFile "$INSTALL_DIR\gpu-agent.exe" -ErrorAction Stop
     } catch {
         Write-Host "Error: Failed to download gpu-agent binary." -ForegroundColor Red
-        Write-Host "You may need to build from source: go build ./cmd/gpu-agent/"
+        Write-Host ""
+        Write-Host "The agent is a self-contained binary - you do not need to install"
+        Write-Host "anything else to run it. Check the releases page for a windows/$goarch"
+        Write-Host "build: https://github.com/$REPO/releases"
+        Write-Host "(From a source checkout, with a Go toolchain: go build ./cmd/gpu-agent/)"
         # `throw` (not `exit`) so the host window survives under `irm | iex`.
         throw "Failed to download gpu-agent binary from $downloadUrl"
     }
@@ -119,6 +123,14 @@ function Download-Agent {
 function Install-Service {
     Write-Host ""
     Write-Host "Installing as Windows Service..."
+
+    # `gpu-agent install` refuses to overwrite an existing service registration,
+    # so on an upgrade the box would keep the old one. Replace it instead.
+    if (Get-Service -Name "gpu-agent" -ErrorAction SilentlyContinue) {
+        Write-Host "Existing service found; replacing it."
+        & "$INSTALL_DIR\gpu-agent.exe" uninstall 2>&1 | Out-Null
+    }
+
     & "$INSTALL_DIR\gpu-agent.exe" install
     & "$INSTALL_DIR\gpu-agent.exe" start
     Write-Host "Service installed and started."

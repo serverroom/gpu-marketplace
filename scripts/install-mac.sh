@@ -66,7 +66,11 @@ download_agent() {
         rm -f "$TMP_AGENT"
         echo "Error: Failed to download gpu-agent binary."
         echo "  URL: $DOWNLOAD_URL"
-        echo "You may need to build from source: go build ./cmd/gpu-agent/"
+        echo
+        echo "The agent is a self-contained binary — you do not need to install"
+        echo "anything else to run it. Check the releases page for a darwin/$GOARCH"
+        echo "build: https://github.com/$REPO/releases"
+        echo "(From a source checkout, with a Go toolchain: go build ./cmd/gpu-agent/)"
         exit 1
     }
     chmod +x "$TMP_AGENT"
@@ -78,12 +82,21 @@ download_agent() {
 install_service() {
     echo
     echo "Installing as launchd daemon..."
+
+    # `gpu-agent install` refuses to overwrite an existing plist, so on an
+    # upgrade the box would keep running the old one — and the plist is where
+    # RunAtLoad/KeepAlive live. Replace it rather than leaving it stale.
+    if [ -f "/Library/LaunchDaemons/gpu-agent.plist" ]; then
+        echo "Existing service found; replacing it."
+        "$INSTALL_DIR/gpu-agent" uninstall >/dev/null 2>&1 || true
+    fi
+
     "$INSTALL_DIR/gpu-agent" install
     "$INSTALL_DIR/gpu-agent" start
     echo "Service installed and started."
     echo
     echo "Check status: gpu-agent status"
-    echo "View logs:    log show --predicate 'processImagePath contains \"gpu-agent\"' --last 1h"
+    echo "View logs:    tail -f /var/log/gpu-agent.err.log"
 }
 
 # Main

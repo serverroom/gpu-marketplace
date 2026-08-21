@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/kardianos/service"
 
@@ -29,19 +31,23 @@ type gpuAgent struct {
 }
 
 func (a *gpuAgent) Start(s service.Service) error {
-	a.logger.Info("GPU Agent starting...")
+	a.say("GPU Agent %s starting...", version)
 
 	// Bring up the persistent reverse SSH tunnel to the relay, if registered.
 	tcfg, err := register.LoadTunnelConfig()
-	if err != nil {
-		a.logger.Warningf("load tunnel config: %v", err)
-	} else if tcfg != nil {
+	switch {
+	case err != nil:
+		a.warn("load tunnel config: %v", err)
+	case tcfg != nil:
 		ctx, cancel := context.WithCancel(context.Background())
 		a.tunnelCancel = cancel
 		go sshtunnel.Supervise(ctx, *tcfg)
-		a.logger.Infof("Reverse tunnel to %s started", tcfg.RelayHost)
-	} else {
-		a.logger.Info("No tunnel configured yet (run 'gpu-agent register' first)")
+		a.say("Reverse tunnel to %s started", tcfg.RelayHost)
+	default:
+		// The state between installing and registering. It has no tunnel and
+		// no listening ports, so from the outside it is indistinguishable from
+		// a crashed agent — say what it is waiting for, every time.
+		a.say("%s", idleReason(register.LoadState()))
 	}
 
 	// Start the control channel on loopback; the control plane reaches it through
@@ -50,7 +56,7 @@ func (a *gpuAgent) Start(s service.Service) error {
 		addr := fmt.Sprintf("127.0.0.1:%d", register.AgentControlPort)
 		a.controlSrv = control.New(addr, token, control.NewStubProvisioner())
 		if cerr := a.controlSrv.Start(); cerr != nil {
-			a.logger.Warningf("start control channel: %v", cerr)
+			a.warn("start control channel: %v", cerr)
 		}
 	}
 
@@ -60,16 +66,61 @@ func (a *gpuAgent) Start(s service.Service) error {
 		a.cfg = cfg
 		a.httpSrv = server.New(fmt.Sprintf(":%d", cfg.ListenPort))
 		if serr := a.httpSrv.Start(); serr != nil {
-			a.logger.Warningf("start http server: %v", serr)
+			a.warn("start http server: %v", serr)
 		}
 	}
 
-	a.logger.Info("GPU Agent started successfully")
+	a.say("GPU Agent started successfully")
 	return nil
 }
 
+// say logs one line at info level and, when running under a service manager,
+// writes the same line to stderr.
+//
+// The stderr copy is the whole point. kardianos routes the non-interactive
+// logger to syslog, which current macOS surfaces neither in the plist's
+// StandardErrorPath nor in `log show` — so a daemon that logs only through it
+// is completely silent: /var/log/gpu-agent.err.log stays 0 bytes and there is
+// no way to tell "waiting to be registered" from "crashed on startup".
+// launchd, systemd and the Windows service wrapper all capture stderr, so
+// writing there too puts the reason where whoever is looking will find it.
+// Interactively kardianos already writes to stderr — don't print twice.
+func (a *gpuAgent) say(format string, args ...interface{}) {
+	a.emit(false, format, args...)
+}
+
+func (a *gpuAgent) warn(format string, args ...interface{}) {
+	a.emit(true, format, args...)
+}
+
+func (a *gpuAgent) emit(warning bool, format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if warning {
+		a.logger.Warning(msg)
+	} else {
+		a.logger.Info(msg)
+	}
+	if !service.Interactive() {
+		fmt.Fprintf(os.Stderr, "%s gpu-agent: %s\n", time.Now().Format(time.RFC3339), msg)
+	}
+}
+
+// idleReason is the one line that explains an agent with no tunnel: which of
+// the two setup steps has not happened, and the exact command that does it.
+// Shared by the daemon log and `gpu-agent status` so they cannot disagree.
+func idleReason(st register.State) string {
+	switch {
+	case st.Unreadable:
+		return fmt.Sprintf("registered, but %s could not be read — the state files are 0600, so try 'sudo gpu-agent status'", register.RegistrationPath())
+	case !st.Registered:
+		return "not registered — run 'gpu-agent register --code <code>' with a one-time code from your dashboard, then restart the service"
+	default:
+		return fmt.Sprintf("registered (listing %s) but no location assigned — run 'gpu-agent select-location' to finish, then restart the service", st.ListingID)
+	}
+}
+
 func (a *gpuAgent) Stop(s service.Service) error {
-	a.logger.Info("GPU Agent stopping...")
+	a.say("GPU Agent stopping...")
 
 	if a.tunnelCancel != nil {
 		a.tunnelCancel()
@@ -81,7 +132,7 @@ func (a *gpuAgent) Stop(s service.Service) error {
 		a.httpSrv.Stop()
 	}
 
-	a.logger.Info("GPU Agent stopped")
+	a.say("GPU Agent stopped")
 	return nil
 }
 
@@ -90,6 +141,19 @@ func main() {
 		Name:        "gpu-agent",
 		DisplayName: "GPU Marketplace Agent",
 		Description: "GPU Marketplace agent: registers the host, keeps a reverse SSH tunnel to the relay, and serves the rental control channel",
+		Option: service.KeyValue{
+			// kardianos' launchd defaults are RunAtLoad=false with
+			// KeepAlive=true — two keys pulling opposite ways. The
+			// `launchctl load` behind `gpu-agent start` is told not to start
+			// the job, and launchd then starts it anyway on its own schedule
+			// because KeepAlive says it must always be running. Neither
+			// `start` nor boot is deterministic, and if the agent ever exits
+			// early that pair becomes a silent relaunch every 10 seconds.
+			// This is a daemon: start on load, start at boot, restart if it
+			// dies.
+			"RunAtLoad": true,
+			"KeepAlive": true,
+		},
 	}
 
 	agent := &gpuAgent{}
@@ -144,18 +208,7 @@ func main() {
 			return
 
 		case "status":
-			status, err := svc.Status()
-			if err != nil {
-				log.Fatalf("Status check failed: %v", err)
-			}
-			switch status {
-			case service.StatusRunning:
-				fmt.Println("Service is running")
-			case service.StatusStopped:
-				fmt.Println("Service is stopped")
-			default:
-				fmt.Println("Service status unknown")
-			}
+			runStatus(svc)
 			return
 
 		case "register":
@@ -181,8 +234,52 @@ func main() {
 
 	// Run interactively or as a service
 	if err := svc.Run(); err != nil {
-		agent.logger.Errorf("Run failed: %v", err)
+		agent.emit(true, "Run failed: %v", err)
+		os.Exit(1)
 	}
+}
+
+// runStatus prints both halves of "is this thing working": whether the service
+// manager has the daemon running, and whether the agent has been registered.
+// They fail independently — a freshly installed agent is a healthy service with
+// nothing to do — and reporting only the first is what made a normal
+// not-yet-registered install read as a crash.
+func runStatus(svc service.Service) {
+	status, err := svc.Status()
+	switch {
+	case errors.Is(err, service.ErrNotInstalled):
+		fmt.Println("Service:      not installed")
+	case err != nil:
+		fmt.Printf("Service:      unknown (%v)\n", err)
+	case status == service.StatusRunning:
+		fmt.Println("Service:      running")
+	case status == service.StatusStopped:
+		fmt.Println("Service:      stopped")
+	default:
+		fmt.Println("Service:      unknown")
+	}
+
+	st := register.LoadState()
+	switch {
+	case st.Registered && !st.Unreadable && st.HasTunnel:
+		fmt.Printf("Registration: listing %s, location %s, tunnel configured\n", st.ListingID, locationOrUnassigned(st.Location))
+		return
+	case st.Unreadable:
+		fmt.Println("Registration: registered, details unreadable")
+	case st.Registered:
+		fmt.Println("Registration: registered, no tunnel configured")
+	default:
+		fmt.Println("Registration: not registered")
+	}
+	fmt.Println()
+	fmt.Println(idleReason(st))
+}
+
+func locationOrUnassigned(name string) string {
+	if name == "" {
+		return "unassigned"
+	}
+	return name
 }
 
 func runTestStats() {
