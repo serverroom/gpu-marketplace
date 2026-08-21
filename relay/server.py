@@ -160,4 +160,13 @@ def revoke_renter(listing_id):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('RELAY_PORT', '5001')))
+    # Bind loopback unless told otherwise. This service authenticates NOTHING -
+    # /register-agent takes a pubkey and writes it into gpu-tunnel's
+    # authorized_keys - and its security rests entirely on being unreachable
+    # except from the control plane. A 0.0.0.0 default is only safe on a box
+    # whose firewall enforces that, and it is the wrong way round: a relay
+    # deployed somewhere with a public interface and no rules would hand the
+    # internet an authorized_keys write. Set RELAY_BIND to the address the
+    # control plane reaches it on.
+    app.run(host=os.environ.get('RELAY_BIND', '127.0.0.1'),
+            port=int(os.environ.get('RELAY_PORT', '5001')))
