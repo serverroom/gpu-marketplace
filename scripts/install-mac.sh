@@ -44,14 +44,18 @@ check_openssh_client() {
 download_agent() {
     echo "Downloading gpu-agent for darwin/$GOARCH..."
 
-    LATEST=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-    if [ -z "$LATEST" ]; then
+    # Resolve the tag once: the binary and the checksums that vouch for it must
+    # come from the same release, or the check proves nothing.
+    ASSET="gpu-agent-darwin-$GOARCH"
+    TAG=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+    if [ -z "$TAG" ]; then
         echo "Warning: No releases found. Downloading from v0.1.0..."
-        DOWNLOAD_URL="https://github.com/$REPO/releases/download/v0.1.0/gpu-agent-darwin-$GOARCH"
+        TAG="v0.1.0"
     else
-        echo "Latest release: $LATEST"
-        DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST/gpu-agent-darwin-$GOARCH"
+        echo "Latest release: $TAG"
     fi
+    RELEASE_URL="https://github.com/$REPO/releases/download/$TAG"
+    DOWNLOAD_URL="$RELEASE_URL/$ASSET"
 
     # $INSTALL_DIR is on the default PATH but does not always exist yet — on an
     # Apple Silicon Mac (Homebrew lives in /opt/homebrew) /usr/local/bin is
@@ -62,8 +66,13 @@ download_agent() {
     # error page from being saved and chmod +x'd as if it were the binary, and
     # the temp file means a partial download never lands on $INSTALL_DIR.
     TMP_AGENT="$INSTALL_DIR/.gpu-agent.download.$$"
+    TMP_SUMS="$INSTALL_DIR/.gpu-agent.checksums.$$"
+    download_failed() {
+        rm -f "$TMP_AGENT" "$TMP_SUMS"
+        exit 1
+    }
+
     curl -fsSL -o "$TMP_AGENT" "$DOWNLOAD_URL" || {
-        rm -f "$TMP_AGENT"
         echo "Error: Failed to download gpu-agent binary."
         echo "  URL: $DOWNLOAD_URL"
         echo
@@ -71,8 +80,41 @@ download_agent() {
         echo "anything else to run it. Check the releases page for a darwin/$GOARCH"
         echo "build: https://github.com/$REPO/releases"
         echo "(From a source checkout, with a Go toolchain: go build ./cmd/gpu-agent/)"
-        exit 1
+        download_failed
     }
+
+    # Verify before this becomes a root-owned executable on PATH. `curl -f`
+    # only proves the server answered 200; it says nothing about a truncated or
+    # substituted body, and the next two steps are chmod +x and mv into PATH.
+    # The release publishes a sha256 per asset, so consult it.
+    echo "Verifying checksum..."
+    curl -fsSL -o "$TMP_SUMS" "$RELEASE_URL/checksums.txt" || {
+        echo "Error: could not download checksums.txt for $TAG."
+        echo "  URL: $RELEASE_URL/checksums.txt"
+        echo "Refusing to install a binary that cannot be verified."
+        download_failed
+    }
+
+    # sha256sum writes "<hash>  <name>" in text mode and "<hash> *<name>" in
+    # binary mode; accept either rather than depending on how it was produced.
+    EXPECTED=$(awk -v a="$ASSET" '$2 == a || $2 == "*" a {print $1; exit}' "$TMP_SUMS")
+    if [ -z "$EXPECTED" ]; then
+        echo "Error: checksums.txt for $TAG lists no $ASSET."
+        echo "That release publishes no build for this platform."
+        download_failed
+    fi
+
+    ACTUAL=$(shasum -a 256 "$TMP_AGENT" | awk '{print $1}')
+    if [ "$EXPECTED" != "$ACTUAL" ]; then
+        echo "Error: the downloaded binary does not match the published checksum."
+        echo "  expected: $EXPECTED"
+        echo "  got:      $ACTUAL"
+        echo "Refusing to install it."
+        download_failed
+    fi
+    echo "Checksum verified."
+    rm -f "$TMP_SUMS"
+
     chmod +x "$TMP_AGENT"
     mv -f "$TMP_AGENT" "$INSTALL_DIR/gpu-agent"
     echo "Installed to $INSTALL_DIR/gpu-agent"
