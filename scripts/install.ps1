@@ -84,20 +84,27 @@ function Download-Agent {
     # Create install directory
     New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
 
-    # Get latest release
+    # Resolve the tag once: the binary and the checksums that vouch for it must
+    # come from the same release, or the check proves nothing.
+    $asset = "gpu-agent-windows-$goarch.exe"
     try {
         $release = Invoke-RestMethod "https://api.github.com/repos/$REPO/releases/latest" -ErrorAction Stop
         $tag = $release.tag_name
         Write-Host "Latest release: $tag"
-        $downloadUrl = "https://github.com/$REPO/releases/download/$tag/gpu-agent-windows-$goarch.exe"
     } catch {
         Write-Host "Warning: No releases found. Using v0.1.0..."
-        $downloadUrl = "https://github.com/$REPO/releases/download/v0.1.0/gpu-agent-windows-$goarch.exe"
+        $tag = "v0.1.0"
     }
+    $releaseUrl = "https://github.com/$REPO/releases/download/$tag"
+    $downloadUrl = "$releaseUrl/$asset"
 
+    # Download beside the target, verify, and only then move it into place — a
+    # failed or tampered download must not overwrite a working agent.
+    $tmpAgent = "$INSTALL_DIR\.gpu-agent.download.$PID"
     try {
-        Invoke-WebRequest -Uri $downloadUrl -OutFile "$INSTALL_DIR\gpu-agent.exe" -ErrorAction Stop
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpAgent -UseBasicParsing -ErrorAction Stop
     } catch {
+        Remove-Item $tmpAgent -Force -ErrorAction SilentlyContinue
         Write-Host "Error: Failed to download gpu-agent binary." -ForegroundColor Red
         Write-Host ""
         Write-Host "The agent is a self-contained binary - you do not need to install"
@@ -107,6 +114,51 @@ function Download-Agent {
         # `throw` (not `exit`) so the host window survives under `irm | iex`.
         throw "Failed to download gpu-agent binary from $downloadUrl"
     }
+
+    # Verify before this becomes an executable in Program Files. A 200 from
+    # GitHub says nothing about a truncated or substituted body.
+    Write-Host "Verifying checksum..."
+    $tmpSums = "$INSTALL_DIR\.gpu-agent.checksums.$PID"
+    try {
+        # -OutFile, not .Content: GitHub serves release assets as
+        # application/octet-stream, and PowerShell 7 hands back a Byte[] for
+        # that, which splits into individual byte values instead of lines.
+        # Windows PowerShell 5.1 returns a string, so this fails on exactly one
+        # of the two hosts a provider might have. Read it off disk instead.
+        Invoke-WebRequest -Uri "$releaseUrl/checksums.txt" -OutFile $tmpSums -UseBasicParsing -ErrorAction Stop
+        $sums = Get-Content -Path $tmpSums -Raw
+    } catch {
+        Remove-Item $tmpAgent, $tmpSums -Force -ErrorAction SilentlyContinue
+        throw "Could not download $releaseUrl/checksums.txt - refusing to install a binary that cannot be verified."
+    }
+
+    # sha256sum writes "<hash>  <name>" in text mode and "<hash> *<name>" in
+    # binary mode; accept either rather than depending on how it was produced.
+    $expected = $null
+    foreach ($line in ($sums -split "`n")) {
+        $parts = $line.Trim() -split '\s+', 2
+        if ($parts.Count -eq 2 -and ($parts[1] -replace '^\*', '') -eq $asset) {
+            $expected = $parts[0]
+            break
+        }
+    }
+    if (-not $expected) {
+        Remove-Item $tmpAgent, $tmpSums -Force -ErrorAction SilentlyContinue
+        throw "checksums.txt for $tag lists no $asset - that release publishes no build for this platform."
+    }
+
+    $actual = (Get-FileHash -Path $tmpAgent -Algorithm SHA256).Hash.ToLower()
+    if ($actual -ne $expected.ToLower()) {
+        Remove-Item $tmpAgent, $tmpSums -Force -ErrorAction SilentlyContinue
+        Write-Host "Error: the downloaded binary does not match the published checksum." -ForegroundColor Red
+        Write-Host "  expected: $expected"
+        Write-Host "  got:      $actual"
+        throw "Refusing to install an unverified gpu-agent binary."
+    }
+    Remove-Item $tmpSums -Force -ErrorAction SilentlyContinue
+    Write-Host "Checksum verified."
+
+    Move-Item -Path $tmpAgent -Destination "$INSTALL_DIR\gpu-agent.exe" -Force
 
     # Add to PATH if not already there
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
