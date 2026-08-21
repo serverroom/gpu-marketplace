@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/kardianos/service"
@@ -248,11 +249,16 @@ func runStatus(svc service.Service) {
 	status, err := svc.Status()
 	switch {
 	case errors.Is(err, service.ErrNotInstalled):
+		// Reliable at any privilege: this is a Stat of the plist/unit file,
+		// which lives in a world-readable directory.
 		fmt.Println("Service:      not installed")
 	case err != nil:
 		fmt.Printf("Service:      unknown (%v)\n", err)
 	case status == service.StatusRunning:
+		// Only reported when a PID was actually seen, so it is never a guess.
 		fmt.Println("Service:      running")
+	case status == service.StatusStopped && !serviceStateVisible(runtime.GOOS, os.Geteuid()):
+		fmt.Println("Service:      unknown — re-run as 'sudo gpu-agent status'")
 	case status == service.StatusStopped:
 		fmt.Println("Service:      stopped")
 	default:
@@ -273,6 +279,22 @@ func runStatus(svc service.Service) {
 	}
 	fmt.Println()
 	fmt.Println(idleReason(st))
+}
+
+// serviceStateVisible reports whether this process can actually observe the
+// daemon's run state.
+//
+// On darwin it cannot unless it is root: the agent installs into launchd's
+// system domain, and `launchctl list gpu-agent` from an unprivileged session
+// answers "Could not find service" (exit 113) whether the daemon is running or
+// not. kardianos sees no PID, sees the plist on disk, and reports Stopped — so
+// a healthy daemon reads as stopped, which is the exact confusion this command
+// exists to clear up. Say "unknown" instead of guessing wrong.
+//
+// Linux and Windows are fine: `systemctl is-active` and the service control
+// manager both answer honestly to an unprivileged caller.
+func serviceStateVisible(goos string, euid int) bool {
+	return goos != "darwin" || euid == 0
 }
 
 func locationOrUnassigned(name string) string {
