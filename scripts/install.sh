@@ -97,6 +97,14 @@ download_agent() {
 install_service() {
     echo
     echo "Installing as system service..."
+
+    # `gpu-agent install` refuses to overwrite an existing unit, so on an
+    # upgrade the box would keep running the old one. Replace it instead.
+    if [ -f "/etc/systemd/system/gpu-agent.service" ]; then
+        echo "Existing service found; replacing it."
+        "$INSTALL_DIR/gpu-agent" uninstall >/dev/null 2>&1 || true
+    fi
+
     "$INSTALL_DIR/gpu-agent" install
     "$INSTALL_DIR/gpu-agent" start
     echo "Service installed and started."

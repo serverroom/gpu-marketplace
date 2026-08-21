@@ -56,11 +56,48 @@ sudo gpu-agent start
 | `gpu-agent uninstall` | Remove the system service |
 | `gpu-agent start` | Start the service |
 | `gpu-agent stop` | Stop the service |
-| `gpu-agent status` | Check service status |
+| `gpu-agent status` | Check the service *and* the registration state |
 | `gpu-agent test-stats` | Collect and display system stats as JSON |
 | `gpu-agent -version` | Print version |
 
 Running without arguments starts the agent interactively or as a managed service.
+
+`status` reports the two halves separately, because they fail independently — a
+freshly installed agent is a healthy service with nothing to do yet:
+
+```
+$ sudo gpu-agent status
+Service:      running
+Registration: not registered
+
+not registered — run 'gpu-agent register --code <code>' with a one-time code from your dashboard, then restart the service
+```
+
+```
+$ sudo gpu-agent status
+Service:      running
+Registration: listing L-1042, location nyc, tunnel configured
+```
+
+Run it with `sudo`: the registration state is stored 0600 and root-owned, so an
+unprivileged `status` can see that a registration exists but not read it.
+
+## Troubleshooting
+
+**The agent seems to do nothing after installing.** That is the expected state
+until you register — there is no tunnel and nothing is listening. The agent says
+so on every start; read it with `sudo gpu-agent status`, or in the daemon log:
+
+| Platform | Log |
+|---|---|
+| macOS | `tail -f /var/log/gpu-agent.err.log` |
+| Linux | `journalctl -u gpu-agent -f` |
+| Windows | `services.msc` → GPU Marketplace Agent |
+
+**`register` succeeded but the agent is still offline.** Location assignment is a
+second step, and the one-time code is already spent by then. `gpu-agent status`
+shows `registered, no tunnel configured`; run `sudo gpu-agent select-location` —
+it does not need a new code — then restart the service.
 
 ## Stats Endpoint
 

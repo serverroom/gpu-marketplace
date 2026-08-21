@@ -119,6 +119,14 @@ function Download-Agent {
 function Install-Service {
     Write-Host ""
     Write-Host "Installing as Windows Service..."
+
+    # `gpu-agent install` refuses to overwrite an existing service registration,
+    # so on an upgrade the box would keep the old one. Replace it instead.
+    if (Get-Service -Name "gpu-agent" -ErrorAction SilentlyContinue) {
+        Write-Host "Existing service found; replacing it."
+        & "$INSTALL_DIR\gpu-agent.exe" uninstall 2>&1 | Out-Null
+    }
+
     & "$INSTALL_DIR\gpu-agent.exe" install
     & "$INSTALL_DIR\gpu-agent.exe" start
     Write-Host "Service installed and started."
