@@ -34,9 +34,29 @@ Proven end-to-end in `tests/` (`test_gpu_route.py` splices real sockets; a herme
 
 ## Setup (per POP)
 
-1. Create the two forwarding-only accounts:
-   `useradd -m -s /usr/sbin/nologin gpu-tunnel` and `useradd -m -s /usr/sbin/nologin gpu-renter`
+1. Create the two service accounts. **The details here are load-bearing — both
+   defaults of `useradd` break the relay in ways that look like something else:**
+   ```
+   useradd -m -s /usr/sbin/nologin gpu-tunnel   # never runs anything
+   useradd -m -s /bin/bash        gpu-renter    # must be able to run the forced command
+   usermod -p '*' gpu-tunnel && usermod -p '*' gpu-renter
+   ```
+   - `useradd` leaves `!` in the password field, which sshd treats as **locked** and
+     refuses before it ever looks at a key: `User gpu-tunnel not allowed because
+     account is locked`. `-p '*'` means no password can ever match while leaving the
+     account usable, which is what a key-only service account wants.
+   - `gpu-renter` needs a **real shell**. sshd runs a forced command through the
+     user's login shell, so `nologin` answers `This account is currently not
+     available` and `gpu_route.py` never runs. Its isolation comes from `restrict`
+     plus the forced command, not from the shell. `gpu-tunnel` keeps `nologin`
+     because nothing should ever run for it.
 2. Install the pipe: copy `gpu_route.py` (and `relaymgr.py`) to `/opt/gpu-relay/`; ensure `python3` is present.
-3. Install the sshd drop-in: copy `sshd_config.example` → `/etc/ssh/sshd_config.d/gpu-relay.conf`, `systemctl reload sshd`.
+3. Run the relay's sshd as a **separate instance**, not as a drop-in on the box's
+   admin sshd: copy `sshd_config.example` to `/etc/gpu-relay/sshd_config`, set its
+   `ListenAddress`/`HostKey`, give it its own systemd unit
+   (`/usr/sbin/sshd -D -f /etc/gpu-relay/sshd_config`), and leave the admin sshd
+   bound to the internal address. Different process, different config, its own host
+   key, and only the relay one faces the internet — so rotating or breaking either
+   cannot touch the other, and admin ssh is never exposed by deploying a relay.
 4. Run the manager (behind the DMZ; reachable only from the control plane):
    `RELAY_AUTHORIZED_KEYS=/home/gpu-tunnel/.ssh/authorized_keys RELAY_RENTER_AUTHORIZED_KEYS=/home/gpu-renter/.ssh/authorized_keys python3 server.py`
