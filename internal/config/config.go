@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,6 +34,40 @@ func DefaultHubs() []Hub {
 		{Name: "amsterdam", Host: "209.127.202.254", Port: 443},
 		{Name: "sf", Host: "198.145.121.234", Port: 443},
 	}
+}
+
+// locationLabels maps a relay key to the city a provider recognises. The key is
+// the WIRE value — the control plane matches on it in SelectRelay and it is what
+// gets persisted in registration.json — so these are display only and must never
+// be substituted into a request.
+var locationLabels = map[string]string{
+	"nyc":       "New York",
+	"miami":     "Miami",
+	"sf":        "San Francisco",
+	"amsterdam": "Amsterdam",
+	"bucharest": "Bucharest",
+}
+
+// LocationLabel returns the display name for a relay key. An unrecognised key is
+// title-cased rather than dropped, so a relay the control plane adds later still
+// reads properly without shipping a new agent. Anything that does not look like a
+// plain key is passed through untouched — Registration.Hub holds a bare hostname
+// on the pre-assigned-tunnel path, and "162.244.81.236" must not become
+// "162.244.81.236" title-cased into nonsense.
+func LocationLabel(key string) string {
+	k := strings.ToLower(strings.TrimSpace(key))
+	if label, ok := locationLabels[k]; ok {
+		return label
+	}
+	if k == "" || strings.ContainsAny(k, ".:/") {
+		return key
+	}
+	parts := strings.FieldsFunc(k, func(r rune) bool { return r == '-' || r == '_' || r == ' ' })
+	for i, part := range parts {
+		r := []rune(part)
+		parts[i] = strings.ToUpper(string(r[0])) + string(r[1:])
+	}
+	return strings.Join(parts, " ")
 }
 
 // DefaultConfig returns a config with sensible defaults.

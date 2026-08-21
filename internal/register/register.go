@@ -244,7 +244,7 @@ func Run(code string) error {
 		}
 		if sresp.Tunnel == nil {
 			saveRegistration(reg)
-			return fmt.Errorf("registered (listing %s) but the marketplace returned no tunnel for location %s\nRun 'gpu-agent select-location' to retry without a new code", resp.ListingID, hub.Name)
+			return fmt.Errorf("registered (listing %s) but the marketplace returned no tunnel for location %s\nRun 'gpu-agent select-location' to retry without a new code", resp.ListingID, config.LocationLabel(hub.Name))
 		}
 		tun = sresp.Tunnel
 	}
@@ -259,7 +259,7 @@ func Run(code string) error {
 		fmt.Println("Tunnel config saved; the agent service keeps the reverse tunnel up.")
 	}
 
-	location := reg.Hub
+	location := config.LocationLabel(reg.Hub)
 	if location == "" {
 		location = "unassigned"
 	}
@@ -306,7 +306,7 @@ func RetrySelection() error {
 		}
 	}
 	if sresp.Tunnel == nil {
-		return fmt.Errorf("the marketplace returned no tunnel for location %s", hub.Name)
+		return fmt.Errorf("the marketplace returned no tunnel for location %s", config.LocationLabel(hub.Name))
 	}
 	if err := saveRegistration(*reg); err != nil {
 		return fmt.Errorf("save registration: %w", err)
@@ -314,7 +314,7 @@ func RetrySelection() error {
 	if err := saveTunnelConfig(sresp.Tunnel, reg.KeyPath); err != nil {
 		return fmt.Errorf("save tunnel config: %w", err)
 	}
-	fmt.Printf("Location %s assigned; tunnel config saved. Restart the agent service to connect.\n", hub.Name)
+	fmt.Printf("Location %s assigned; tunnel config saved. Restart the agent service to connect.\n", config.LocationLabel(hub.Name))
 	return nil
 }
 
@@ -440,9 +440,9 @@ func chooseHub(hubs []config.Hub) (*config.Hub, error) {
 	fmt.Println("Available locations (closest first):")
 	for i, r := range results {
 		if r.Success {
-			fmt.Printf("  %d) %-12s %.1f ms\n", i+1, r.Hub.Name, r.AvgMs)
+			fmt.Printf("  %d) %-14s %.1f ms\n", i+1, config.LocationLabel(r.Hub.Name), r.AvgMs)
 		} else {
-			fmt.Printf("  %d) %-12s unreachable\n", i+1, r.Hub.Name)
+			fmt.Printf("  %d) %-14s unreachable\n", i+1, config.LocationLabel(r.Hub.Name))
 		}
 	}
 	if !results[0].Success {
@@ -466,7 +466,7 @@ func chooseHub(hubs []config.Hub) (*config.Hub, error) {
 			break
 		}
 		if !interactive || rerr != nil {
-			fmt.Printf("Invalid location choice %q; using %s.\n", line, results[0].Hub.Name)
+			fmt.Printf("Invalid location choice %q; using %s.\n", line, config.LocationLabel(results[0].Hub.Name))
 			break
 		}
 		fmt.Printf("Enter a number between 1 and %d, or press Enter for the closest.\n", len(results))
@@ -474,9 +474,9 @@ func chooseHub(hubs []config.Hub) (*config.Hub, error) {
 
 	sel := results[choice-1]
 	if !sel.Success {
-		fmt.Printf("Note: %s did not respond to the probe; continuing anyway.\n", sel.Hub.Name)
+		fmt.Printf("Note: %s did not respond to the probe; continuing anyway.\n", config.LocationLabel(sel.Hub.Name))
 	}
-	fmt.Printf("Using location %s\n", sel.Hub.Name)
+	fmt.Printf("Using location %s\n", config.LocationLabel(sel.Hub.Name))
 	return &sel.Hub, nil
 }
 

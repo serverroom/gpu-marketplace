@@ -52,9 +52,9 @@ func TestAllHubs(hubs []config.Hub) []LatencyResult {
 			Success: ok,
 		})
 		if ok {
-			fmt.Printf("  %s (%s): %.1fms\n", hub.Name, hub.Host, avg)
+			fmt.Printf("  %s (%s): %.1fms\n", config.LocationLabel(hub.Name), hub.Host, avg)
 		} else {
-			fmt.Printf("  %s (%s): unreachable\n", hub.Name, hub.Host)
+			fmt.Printf("  %s (%s): unreachable\n", config.LocationLabel(hub.Name), hub.Host)
 		}
 	}
 	return results
