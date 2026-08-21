@@ -61,3 +61,17 @@ def test_renter_line_rejects_non_ssh_slot():
         build_renter_authorized_keys_line('ssh-ed25519 RRRR', 41000)
     with pytest.raises(ValueError):
         build_renter_authorized_keys_line('ssh-ed25519 RRRR', 'shell')
+
+
+def test_agent_line_re_enables_port_forwarding():
+    """`restrict` clears the port-forwarding permission flag and permitlisten only
+    narrows which binds are allowed - it does not put the permission back. Without
+    an explicit `port-forwarding`, sshd accepts the key and then refuses every -R
+    with "remote port forwarding failed", so no agent can ever establish a tunnel.
+    Found on a live relay, not in review: the key authenticated fine every time."""
+    line = build_authorized_keys_line('ssh-ed25519 AAAA', 41000, 42000)
+    opts = line.split(' ', 1)[0].split(',')
+    assert 'restrict' in opts
+    assert 'port-forwarding' in opts
+    assert opts.index('restrict') < opts.index('port-forwarding'), \
+        'restrict must come first or it overrides the re-enable'

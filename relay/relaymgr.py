@@ -20,7 +20,12 @@ def build_authorized_keys_line(pubkey, control_slot, ssh_slot):
     # forwarding, user rc). Each `permitlisten` then re-enables exactly ONE
     # reverse-forward bind. Net effect: the agent can bind only its two loopback
     # slots and do nothing else -- no shell, no other listens, no gateway ports.
-    opts = ('restrict,'
+    # `port-forwarding` is not redundant next to `restrict`: restrict clears the
+    # key's port-forwarding permission flag outright, and permitlisten only
+    # narrows which binds are allowed - it does not put the permission back. Without
+    # it sshd accepts the key and then refuses every -R with "remote port
+    # forwarding failed", so the tunnel can never come up.
+    opts = ('restrict,port-forwarding,'
             'permitlisten="127.0.0.1:%d",'
             'permitlisten="127.0.0.1:%d"' % (control_slot, ssh_slot))
     return opts + ' ' + pubkey.strip()
