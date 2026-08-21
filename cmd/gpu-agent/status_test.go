@@ -54,3 +54,25 @@ func TestIdleReasonDistinguishesUnregisteredFromStuck(t *testing.T) {
 		t.Errorf("an unregistered agent was told to run select-location: %q", fresh)
 	}
 }
+
+// A system daemon's run state is not readable without root on macOS, and
+// reporting the resulting blind spot as "stopped" is how a healthy agent came
+// to look broken in the first place.
+func TestServiceStateVisibility(t *testing.T) {
+	tests := []struct {
+		goos string
+		euid int
+		want bool
+	}{
+		{"darwin", 501, false}, // the case that misreported a running daemon
+		{"darwin", 0, true},
+		{"linux", 1000, true}, // systemctl is-active answers unprivileged
+		{"windows", 1000, true},
+	}
+
+	for _, tt := range tests {
+		if got := serviceStateVisible(tt.goos, tt.euid); got != tt.want {
+			t.Errorf("serviceStateVisible(%q, %d) = %v, want %v", tt.goos, tt.euid, got, tt.want)
+		}
+	}
+}

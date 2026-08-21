@@ -79,8 +79,11 @@ Service:      running
 Registration: listing L-1042, location nyc, tunnel configured
 ```
 
-Run it with `sudo`: the registration state is stored 0600 and root-owned, so an
-unprivileged `status` can see that a registration exists but not read it.
+Run it with `sudo`. Both halves need it: the registration state is stored 0600
+and root-owned, so an unprivileged `status` can see that a registration exists
+but not read it — and on macOS the daemon lives in launchd's system domain,
+which a normal user cannot query at all, so the service line reads `unknown`
+rather than guessing.
 
 ## Troubleshooting
 
