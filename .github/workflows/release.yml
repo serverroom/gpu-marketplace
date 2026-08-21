@@ -23,6 +23,9 @@ jobs:
           - goos: windows
             goarch: amd64
             suffix: ".exe"
+          - goos: windows
+            goarch: arm64
+            suffix: ".exe"
           - goos: darwin
             goarch: amd64
             suffix: ""
