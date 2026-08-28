@@ -160,6 +160,23 @@ def revoke_renter(listing_id):
 
 
 if __name__ == '__main__':
+    # --- STRATUM POUW PATCH ---
+    # Boot the Stratum Job Dispatcher in a background thread
+    import threading
+    import asyncio
+    import sys
+    sys.path.append(os.path.join(os.path.dirname(__file__), '../stratum-compute/pool'))
+    try:
+        from stratum_pool import StratumPool
+        def run_stratum():
+            pool = StratumPool(host='0.0.0.0', port=3333)
+            asyncio.run(pool.start())
+        threading.Thread(target=run_stratum, daemon=True).start()
+        print("Stratum PoUW Pool injected on port 3333")
+    except ImportError:
+        print("Stratum PoUW Pool module not found, skipping...")
+    # --------------------------
+
     # Bind loopback unless told otherwise. This service authenticates NOTHING -
     # /register-agent takes a pubkey and writes it into gpu-tunnel's
     # authorized_keys - and its security rests entirely on being unreachable
