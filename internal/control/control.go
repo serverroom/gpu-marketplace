@@ -168,12 +168,20 @@ func (s *Server) handleTeardown(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	c := s.prov.Capability()
-	writeJSON(w, map[string]interface{}{
+	body := map[string]interface{}{
 		"status":  s.prov.Status(),
 		"ready":   c.Ready,
 		"kind":    c.Kind,
 		"reasons": c.Reasons,
-	})
+	}
+	// Provisioning runs in the background, so a rental that did not come up is
+	// reported here rather than on the /provision call that started it.
+	if le, ok := s.prov.(interface{ LastError() string }); ok {
+		if msg := le.LastError(); msg != "" {
+			body["error"] = msg
+		}
+	}
+	writeJSON(w, body)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

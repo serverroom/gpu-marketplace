@@ -82,7 +82,17 @@ func runRemove(svc service.Service, args []string) {
 		}
 	}
 
-	// 3. Anything a rental left behind.
+	// 3. Anything a rental left behind: a running VM is stopped, its disk key
+	// discarded and the GPU given back before the directories go.
+	if runtime.GOOS == "linux" {
+		if rt := detectProvisioner().Runtime(); rt != nil && rt.Present() {
+			if res := rt.Stop(); res.Clean() {
+				fmt.Println("Rental:   stopped; its disk is destroyed and the GPU is back with its driver.")
+			} else {
+				fmt.Printf("Rental:   stopped, but not everything verified (%s); reboot this machine to be sure the GPU is released.\n", strings.Join(res.Detail, "; "))
+			}
+		}
+	}
 	if runtime.GOOS == "linux" {
 		if _, err := exec.LookPath("nft"); err == nil {
 			_ = exec.Command("nft", "delete", "table", "inet", netguard.Table).Run()

@@ -49,7 +49,7 @@ func mustCIDR(t *testing.T, s string) *net.IPNet {
 // The LAN a provider's NAS sits on is the whole point: every private range
 // must be in the blocked set whatever the host's own addressing looks like.
 func TestRulesetBlocksPrivateRangesAndTheHost(t *testing.T) {
-	rs := Ruleset(Bridge, nil)
+	rs := Ruleset(Bridge, "", nil)
 	for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
 		"100.64.0.0/10", "169.254.0.0/16", "224.0.0.0/4", "fc00::/7", "fe80::/10"} {
 		if !strings.Contains(rs, cidr) {
@@ -71,7 +71,7 @@ func TestRulesetBlocksPrivateRangesAndTheHost(t *testing.T) {
 // A LAN numbered from public space is not covered by RFC 1918, so the host's
 // own networks are fenced off explicitly.
 func TestRulesetBlocksHostNetworksOutsidePrivateSpace(t *testing.T) {
-	rs := Ruleset(Bridge, []*net.IPNet{
+	rs := Ruleset(Bridge, "", []*net.IPNet{
 		mustCIDR(t, "203.0.113.7/24"),
 		mustCIDR(t, "2001:db8:1::5/64"),
 	})
@@ -88,10 +88,22 @@ func TestRulesetBlocksHostNetworksOutsidePrivateSpace(t *testing.T) {
 	}
 }
 
+// The tenant must reach the internet, and only by NAT out of the host: the
+// rental subnet is masqueraded on every interface but its own bridge.
+func TestRulesetMasqueradesOnlyTheRentalSubnet(t *testing.T) {
+	rs := Ruleset(Bridge, "10.254.254.0/30", nil)
+	if !strings.Contains(rs, `ip saddr 10.254.254.0/30 oifname != "gpurent0" masquerade`) {
+		t.Errorf("no masquerade for the rental subnet:\n%s", rs)
+	}
+	if strings.Contains(Ruleset(Bridge, "", nil), "masquerade") {
+		t.Errorf("a ruleset with no rental subnet masquerades anyway")
+	}
+}
+
 func TestRulesetIsDeterministicAndDeduplicated(t *testing.T) {
 	nets := []*net.IPNet{mustCIDR(t, "192.168.1.10/24"), mustCIDR(t, "198.51.100.1/24"), mustCIDR(t, "192.168.1.11/24")}
-	a := Ruleset(Bridge, nets)
-	b := Ruleset(Bridge, []*net.IPNet{nets[2], nets[1], nets[0]})
+	a := Ruleset(Bridge, "", nets)
+	b := Ruleset(Bridge, "", []*net.IPNet{nets[2], nets[1], nets[0]})
 	if a != b {
 		t.Errorf("ruleset depends on interface order")
 	}
@@ -101,8 +113,8 @@ func TestRulesetIsDeterministicAndDeduplicated(t *testing.T) {
 }
 
 func TestApplyVerifiesTheTableIsLive(t *testing.T) {
-	r := &fakeRunner{listed: Ruleset(Bridge, nil)}
-	g := New(r, Bridge, func() ([]*net.IPNet, error) { return nil, nil })
+	r := &fakeRunner{listed: Ruleset(Bridge, "", nil)}
+	g := New(r, Bridge, "10.254.254.0/30", func() ([]*net.IPNet, error) { return nil, nil })
 	if err := g.Apply(); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -115,23 +127,23 @@ func TestApplyVerifiesTheTableIsLive(t *testing.T) {
 // Rules that were "loaded" but cannot be seen in the kernel are no fence.
 func TestApplyFailsClosedWhenTheTableDoesNotReadBack(t *testing.T) {
 	r := &fakeRunner{listed: "table inet gpu_rental {\n}\n"}
-	g := New(r, Bridge, func() ([]*net.IPNet, error) { return nil, nil })
+	g := New(r, Bridge, "10.254.254.0/30", func() ([]*net.IPNet, error) { return nil, nil })
 	if err := g.Apply(); !errors.Is(err, ErrNotVerified) {
 		t.Fatalf("Apply = %v, want ErrNotVerified", err)
 	}
 }
 
 func TestApplyFailsWhenNftRejectsTheRules(t *testing.T) {
-	r := &fakeRunner{fail: map[string]bool{"nft -f": true}, listed: Ruleset(Bridge, nil)}
-	g := New(r, Bridge, func() ([]*net.IPNet, error) { return nil, nil })
+	r := &fakeRunner{fail: map[string]bool{"nft -f": true}, listed: Ruleset(Bridge, "", nil)}
+	g := New(r, Bridge, "10.254.254.0/30", func() ([]*net.IPNet, error) { return nil, nil })
 	if err := g.Apply(); err == nil {
 		t.Fatal("Apply succeeded although nft rejected the rules")
 	}
 }
 
 func TestApplyFailsWhenHostNetworksCannotBeRead(t *testing.T) {
-	r := &fakeRunner{listed: Ruleset(Bridge, nil)}
-	g := New(r, Bridge, func() ([]*net.IPNet, error) { return nil, errors.New("boom") })
+	r := &fakeRunner{listed: Ruleset(Bridge, "", nil)}
+	g := New(r, Bridge, "10.254.254.0/30", func() ([]*net.IPNet, error) { return nil, errors.New("boom") })
 	if err := g.Apply(); err == nil {
 		t.Fatal("Apply succeeded without knowing the host's networks")
 	}

@@ -2,64 +2,38 @@ package provisioner
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/netguard"
 	"github.com/serverroom/gpu-marketplace/internal/stats"
+	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
-// KindKataVFIO names the only way this agent hosts a rental: a Kata microVM
+// KindQEMUVFIO names the only way this agent hosts a rental: a QEMU/KVM microVM
 // with the GPUs handed to it over VFIO, behind the netguard fence.
-const KindKataVFIO = "kata-vfio"
-
-// RuntimeHelpers are the host commands a rental cannot start without. The three
-// gpu-agent-* helpers are the microVM runtime itself; they are NOT shipped with
-// the agent binary, which is why a stock install reports "not ready" instead of
-// pretending it could deliver.
-var RuntimeHelpers = []string{"gpu-agent-kata", "gpu-agent-mkdisk", "gpu-agent-injectkey", "cryptsetup", "nft"}
-
-// Probe reads the host facts preflight needs. Real hosts use OSProbe.
-type Probe interface {
-	LookPath(name string) (string, error)
-	Exists(path string) bool
-	CountEntries(dir string) int
-}
-
-// OSProbe reads the real host.
-type OSProbe struct{}
-
-func (OSProbe) LookPath(name string) (string, error) { return exec.LookPath(name) }
-
-func (OSProbe) Exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func (OSProbe) CountEntries(dir string) int {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
-	}
-	return len(entries)
-}
+const KindQEMUVFIO = "qemu-vfio"
 
 // HostReport is what preflight found: the GPUs a rental would get, and every
 // reason this machine cannot host one. No reasons means ready.
 type HostReport struct {
-	Vendor  GPUVendor
-	BDFs    []string
-	Unified bool
-	Reasons []string
+	Vendor   GPUVendor
+	BDFs     []string
+	Unified  bool
+	Firmware vmrt.Firmware
+	Reasons  []string
 }
 
 // Preflight checks, without changing anything, whether this machine can host a
-// rental: a Linux KVM host with the IOMMU on, discrete GPUs whose memory is
-// their own, and the microVM runtime installed. Every failing check is reported
-// in words a provider can act on, not just the first.
-func Preflight(r Runner, probe Probe, goos, goldenImage string) HostReport {
+// rental: a Linux KVM host with the IOMMU on, GPUs that can be passed through
+// on their own, the runtime's tools, firmware and base image installed, enough
+// memory and disk -- and, once all of that holds, a passing test boot on this
+// very machine for this agent version. Every failing check is reported in words
+// a provider can act on, not just the first.
+func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostReport {
 	var rep HostReport
 	add := func(format string, a ...interface{}) {
 		rep.Reasons = append(rep.Reasons, fmt.Sprintf(format, a...))
@@ -76,55 +50,133 @@ func Preflight(r Runner, probe Probe, goos, goldenImage string) HostReport {
 		return rep
 	}
 
-	if !probe.Exists("/dev/kvm") {
+	if !h.Exists("/dev/kvm") {
 		add("KVM is not available (/dev/kvm is missing): enable virtualisation in the firmware and load the kvm module")
 	}
-	if probe.CountEntries("/sys/kernel/iommu_groups") == 0 {
+	if groups, _ := h.Glob("/sys/kernel/iommu_groups/*"); len(groups) == 0 {
 		add("the IOMMU is off, so no GPU can be handed to a microVM: enable VT-d / AMD-Vi (or the SMMU on Arm) in the firmware and on the kernel command line")
 	}
 
-	if nv, ok := detectNVIDIA(r); ok {
+	if nv, ok := detectNVIDIA(h); ok {
 		rep.Vendor = VendorNVIDIA
 		rep.BDFs = nv.bdfs
 		rep.Unified = nv.unified
 		for _, g := range nv.noMemory {
 			add("GPU %s (%s) reports no memory and is not a known unified-memory part, so the agent cannot tell what a tenant would get or prove it clean afterwards", g.bdf, g.name)
 		}
-	} else if bdfs, ok := detectAMD(r); ok {
+	} else if bdfs, ok := detectAMD(h); ok {
 		rep.Vendor = VendorAMD
 		rep.BDFs = bdfs
 	} else {
 		add("no NVIDIA or AMD GPU was detected")
 	}
-
-	var missing []string
-	for _, h := range RuntimeHelpers {
-		if _, err := probe.LookPath(h); err != nil {
-			missing = append(missing, h)
-		}
+	if len(rep.BDFs) > 0 && len(rep.Reasons) == 0 {
+		rep.Reasons = append(rep.Reasons, vmrt.GroupProblems(h, rep.BDFs)...)
 	}
-	if len(missing) > 0 {
-		add("the rental runtime is not installed (missing: %s); it does not ship with this agent release, so no rental can start on this machine yet", strings.Join(missing, ", "))
-	} else if !probe.Exists(goldenImage) {
-		add("the rental base image is missing (%s)", goldenImage)
+
+	if missing := vmrt.MissingTools(h, spec.Arch); len(missing) > 0 {
+		add("the rental runtime's tools are missing (%s); run 'sudo gpu-agent runtime prepare --install-deps'", strings.Join(missing, ", "))
+	}
+	if fw, ok := vmrt.FindFirmware(h, spec.Arch); ok {
+		rep.Firmware = fw
+	} else {
+		add("no UEFI firmware for microVMs is installed; run 'sudo gpu-agent runtime prepare --install-deps'")
+	}
+	if !h.Exists(spec.GoldenImage) {
+		add("the rental base image has not been built; run 'sudo gpu-agent runtime prepare'")
+	}
+	if spec.GuestMemoryMB() == 0 {
+		add("this machine has %d MB of memory, and a rental needs at least 6 GB", spec.TotalMemMB)
+	}
+	if spec.DiskGB < 20 {
+		add("there is not 20 GB free under %s for a rental's disk", spec.DataDir)
+	}
+
+	// A test boot proves what the checks above cannot: that this GPU really
+	// works inside a VM on this hardware. It only means anything once they pass.
+	if len(rep.Reasons) == 0 {
+		res, err := vmrt.LoadSelfTest(h, spec.DataDir)
+		if err != nil {
+			add("its last test boot could not be read (%v); run 'sudo gpu-agent check --boot'", err)
+		} else if problem := vmrt.SelfTestProblem(res, version, rep.BDFs); problem != "" {
+			add("%s", problem)
+		}
 	}
 	return rep
 }
 
-// Detect runs preflight and returns a provisioner whose Capability says what it
-// found. It is the only constructor production code should use.
-func Detect(r Runner, probe Probe, goos, goldenImage, diskDir, agentVersion string) *Provisioner {
-	rep := Preflight(r, probe, goos, goldenImage)
-	p := New(r, goldenImage, diskDir, rep.BDFs, rep.Vendor)
-	p.unified = rep.Unified
+// Detect runs preflight and returns a provisioner, backed by the real microVM
+// runtime, whose Capability says what it found. It is the only constructor
+// production code should use.
+func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
+	spec := vmrt.Spec{
+		Arch:        arch,
+		DataDir:     dataDir,
+		GoldenImage: filepath.Join(dataDir, "golden.img"),
+		TotalMemMB:  hostMemoryMB(h),
+		CPUs:        runtime.NumCPU(),
+		DiskGB:      rentalDiskGB(h, dataDir),
+	}
+	rep := Preflight(h, goos, spec, version)
+	spec.GPUs = rep.BDFs
+	spec.Unified = rep.Unified
+	spec.Firmware = rep.Firmware
+
+	fence := netguard.New(h, netguard.Bridge, vmrt.GuestSubnet, netguard.HostNetworks)
+	rt := vmrt.New(h, spec, fence, gpuVerifier(h, rep.Vendor, rep.Unified, rep.BDFs))
+	p := New(rt, rep.Vendor, rep.BDFs, rep.Unified)
+	p.runtime = rt
 	p.capability = control.Capability{
 		Ready:         len(rep.Reasons) == 0,
-		Kind:          KindKataVFIO,
+		Kind:          KindQEMUVFIO,
 		Reasons:       rep.Reasons,
-		AgentVersion:  agentVersion,
+		AgentVersion:  version,
 		UnifiedMemory: rep.Unified,
 	}
 	return p
+}
+
+func hostMemoryMB(h vmrt.Host) int {
+	data, err := h.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if f := strings.Fields(line); len(f) >= 2 && f[0] == "MemTotal:" {
+			kb, _ := strconv.Atoi(f[1])
+			return kb / 1024
+		}
+	}
+	return 0
+}
+
+// rentalDiskGB is the disk a rental gets: what is free under dataDir (or the
+// nearest existing parent), less 20 GB for the host, capped at 500 GB.
+func rentalDiskGB(h vmrt.Host, dataDir string) int {
+	dir := dataDir
+	for dir != "" && dir != "/" && !h.Exists(dir) {
+		dir = filepath.Dir(dir)
+	}
+	out, err := h.Output("df", "--output=avail", "-B1G", dir)
+	if err != nil {
+		return 0
+	}
+	lines := strings.Fields(out)
+	if len(lines) < 2 {
+		return 0
+	}
+	avail, err := strconv.Atoi(strings.TrimSuffix(lines[len(lines)-1], "G"))
+	if err != nil {
+		return 0
+	}
+	gb := avail - 20
+	if gb > 500 {
+		gb = 500
+	}
+	if gb < 0 {
+		gb = 0
+	}
+	return gb
 }
 
 type gpuRef struct{ bdf, name string }

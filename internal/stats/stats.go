@@ -8,9 +8,9 @@ import (
 
 // CPUInfo holds CPU details.
 type CPUInfo struct {
-	Model   string  `json:"model"`
-	Cores   int     `json:"cores"`
-	Threads int     `json:"threads"`
+	Model    string  `json:"model"`
+	Cores    int     `json:"cores"`
+	Threads  int     `json:"threads"`
 	UsagePct float64 `json:"usage_pct"`
 }
 

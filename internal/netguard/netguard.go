@@ -62,13 +62,15 @@ var blockedV6 = []string{
 type Guard struct {
 	runner   Runner
 	bridge   string
+	subnet   string
 	hostNets func() ([]*net.IPNet, error)
 }
 
-// New builds a guard for bridge. hostNets reports the networks configured on
-// the host; production passes HostNetworks.
-func New(r Runner, bridge string, hostNets func() ([]*net.IPNet, error)) *Guard {
-	return &Guard{runner: r, bridge: bridge, hostNets: hostNets}
+// New builds a guard for bridge. subnet is the rental network, which is
+// masqueraded out of the host so the tenant can reach the internet. hostNets
+// reports the networks configured on the host; production passes HostNetworks.
+func New(r Runner, bridge, subnet string, hostNets func() ([]*net.IPNet, error)) *Guard {
+	return &Guard{runner: r, bridge: bridge, subnet: subnet, hostNets: hostNets}
 }
 
 // HostNetworks returns every network configured on this host's interfaces.
@@ -97,7 +99,9 @@ func HostNetworks() ([]*net.IPNet, error) {
 // input: from the bridge the host answers DHCP and IPv6 neighbour discovery and
 // replies on connections it opened itself; every other packet a tenant sends to
 // the host — its SSH, its web UI, anything listening on it — is dropped.
-func Ruleset(bridge string, hostNets []*net.IPNet) string {
+// postrouting: the rental subnet leaving by any other interface is masqueraded,
+// so what is left — the internet — is reachable at all.
+func Ruleset(bridge, subnet string, hostNets []*net.IPNet) string {
 	var host4, host6 []string
 	for _, n := range hostNets {
 		if n == nil {
@@ -137,6 +141,11 @@ func Ruleset(bridge string, hostNets []*net.IPNet) string {
 	fmt.Fprintf(&b, "\t\tiifname %s icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept\n", q)
 	fmt.Fprintf(&b, "\t\tiifname %s drop\n", q)
 	fmt.Fprintf(&b, "\t}\n")
+	if subnet != "" {
+		fmt.Fprintf(&b, "\tchain postrouting {\n\t\ttype nat hook postrouting priority srcnat; policy accept;\n")
+		fmt.Fprintf(&b, "\t\tip saddr %s oifname != %s masquerade\n", subnet, q)
+		fmt.Fprintf(&b, "\t}\n")
+	}
 	fmt.Fprintf(&b, "}\n")
 	return b.String()
 }
@@ -176,7 +185,7 @@ func (g *Guard) Apply() error {
 		return fmt.Errorf("write firewall rules: %w", err)
 	}
 	defer os.Remove(f.Name())
-	if _, err := f.WriteString(Ruleset(g.bridge, nets)); err != nil {
+	if _, err := f.WriteString(Ruleset(g.bridge, g.subnet, nets)); err != nil {
 		f.Close()
 		return fmt.Errorf("write firewall rules: %w", err)
 	}

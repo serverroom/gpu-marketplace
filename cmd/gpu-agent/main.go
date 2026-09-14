@@ -57,6 +57,7 @@ func (a *gpuAgent) Start(s service.Service) error {
 	// rental request is answered from it. Up to v0.1.5 this was a stub that
 	// answered success and created nothing.
 	a.prov = detectProvisioner()
+	a.prov.Resume()
 	if c := a.prov.Capability(); c.Ready {
 		a.say("Hosting checks passed: this machine can host a rental")
 	} else {
@@ -241,7 +242,15 @@ func main() {
 			return
 
 		case "check":
-			runCheck(args[1:])
+			runCheck(svc, args[1:])
+			return
+
+		case "runtime":
+			if len(args) < 2 || args[1] != "prepare" {
+				fmt.Println("Usage: gpu-agent runtime prepare [--install-deps] [--driver 580-server-open]")
+				os.Exit(1)
+			}
+			runPrepare(args[2:])
 			return
 
 		case "start":
@@ -399,6 +408,8 @@ func printUsage() {
 	fmt.Println("  select-location  Redo the location choice for an existing registration")
 	fmt.Println("  install          Install as a system service")
 	fmt.Println("  check            Check whether this machine can host a rental, and what a tenant is fenced off from (--rules)")
+	fmt.Println("  check --boot     Boot a real test rental with the GPU passed through and record the result")
+	fmt.Println("  runtime prepare  Install the microVM runtime (--install-deps) and bake the rental base image")
 	fmt.Println("  remove           Withdraw the listing, revoke relay access and delete the agent completely (--yes)")
 	fmt.Println("  uninstall        Remove the system service only (keys and listing stay; see remove)")
 	fmt.Println("  start            Start the service")
