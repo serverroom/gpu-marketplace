@@ -63,6 +63,7 @@ sudo gpu-agent start
 | `gpu-agent start` | Start the service |
 | `gpu-agent stop` | Stop the service |
 | `gpu-agent status` | Check the service *and* the registration state |
+| `gpu-agent speedtest` | Measure download, upload and latency to the speed test server in this machine's location, and post them to the listing (not while rented) |
 | `gpu-agent test-stats` | Collect and display system stats as JSON |
 | `gpu-agent -version` | Print version |
 
@@ -90,6 +91,15 @@ and root-owned, so an unprivileged `status` can see that a registration exists
 but not read it — and on macOS the daemon lives in launchd's system domain,
 which a normal user cannot query at all, so the service line reads `unknown`
 rather than guessing.
+
+Once registered, the agent measures this machine's network once, against the
+speed test server in the location of its relay: download and upload in Mbps,
+and latency in ms. The result is shown on the listing, so renters see what the
+connection can do before they rent it. The test takes up to 40 seconds in the
+background. It never runs while the machine is rented, and it stops if a rental
+starts; if a rental is on the machine, it waits for the next agent start.
+`sudo gpu-agent speedtest` measures again at any time the machine is not rented,
+and updates the listing.
 
 ## Troubleshooting
 

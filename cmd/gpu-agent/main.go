@@ -28,6 +28,7 @@ type gpuAgent struct {
 	cfg          *config.Config
 	httpSrv      *server.Server
 	tunnelCancel context.CancelFunc
+	bgCancel     context.CancelFunc // background work: capability report, speed test
 	controlSrv   *control.Server
 	prov         *provisioner.Provisioner
 	logger       service.Logger
@@ -74,7 +75,9 @@ func (a *gpuAgent) Start(s service.Service) error {
 		if cerr := a.controlSrv.Start(); cerr != nil {
 			a.warn("start control channel: %v", cerr)
 		}
-		go a.reportCapability(a.prov.Capability())
+		bg, cancel := context.WithCancel(context.Background())
+		a.bgCancel = cancel
+		go a.reportCapability(bg, a.prov.Capability())
 	}
 
 	// Legacy local stats server (best-effort; superseded by push-over-tunnel).
@@ -142,12 +145,16 @@ func idleReason(st register.State) string {
 // machine is only ever offered to renters while it can actually host. Retries
 // transient failures; a 4xx (an old control plane, a withdrawn listing) will
 // not heal and is logged once.
-func (a *gpuAgent) reportCapability(c control.Capability) {
+//
+// When the answer says the listing still needs its network measurement, the
+// speed test runs from here, already off the start path.
+func (a *gpuAgent) reportCapability(ctx context.Context, c control.Capability) {
 	backoff := 5 * time.Second
 	for attempt := 1; attempt <= 6; attempt++ {
-		err := register.ReportCapability(c)
+		resp, err := register.ReportCapability(c)
 		if err == nil {
 			a.say("Hosting capability reported to the marketplace (ready=%v)", c.Ready)
+			a.speedtestJob().initial(ctx, resp)
 			return
 		}
 		var ee *register.EndpointError
@@ -166,6 +173,9 @@ func (a *gpuAgent) Stop(s service.Service) error {
 
 	if a.tunnelCancel != nil {
 		a.tunnelCancel()
+	}
+	if a.bgCancel != nil {
+		a.bgCancel()
 	}
 	if a.controlSrv != nil {
 		a.controlSrv.Stop()
@@ -279,6 +289,10 @@ func main() {
 			if err := register.RetrySelection(); err != nil {
 				log.Fatalf("Location selection failed: %v", err)
 			}
+			return
+
+		case "speedtest":
+			runSpeedtest(args[1:])
 			return
 
 		case "test-stats":
@@ -415,6 +429,7 @@ func printUsage() {
 	fmt.Println("  start            Start the service")
 	fmt.Println("  stop             Stop the service")
 	fmt.Println("  status           Check service status")
+	fmt.Println("  speedtest        Measure download, upload and latency to this location's speed test server and post them to the listing")
 	fmt.Println("  test-stats       Collect and display system stats")
 	fmt.Println("  -version         Print version")
 	fmt.Println()

@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/speedtest"
 )
 
 // ErrNotRegistered is returned by calls that need a registration on disk.
@@ -78,25 +82,156 @@ func lifecycleTarget(explicit func(*Registration) string, name string) (*Registr
 	return reg, url, token, nil
 }
 
+// CapabilityResponse is the control plane's answer to a capability report.
+type CapabilityResponse struct {
+	// Speedtest names the server to measure against while the listing still
+	// needs its initial network measurement; nil once it has one.
+	Speedtest *speedtest.Target `json:"speedtest,omitempty"`
+	// MeasureURL is where a measurement is posted.
+	MeasureURL string `json:"measure_url,omitempty"`
+}
+
 // ReportCapability tells the control plane whether this machine can host a
 // rental. The marketplace only offers a machine to renters while its latest
 // report says ready, so this runs at register and on every start.
-func ReportCapability(c control.Capability) error {
+//
+// The answer can ask for the listing's network measurement. Its target is
+// saved, so `gpu-agent speedtest` can measure again once the marketplace has
+// stopped asking.
+func ReportCapability(c control.Capability) (*CapabilityResponse, error) {
 	reg, url, token, err := lifecycleTarget(func(r *Registration) string { return r.CapabilityURL }, "capability")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	code, body, err := postBearer(url, token, map[string]interface{}{
 		"listing_id": reg.ListingID,
 		"capability": c,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if code != http.StatusOK {
-		return &EndpointError{Op: "capability report", Code: code, Body: string(body)}
+		return nil, &EndpointError{Op: "capability report", Code: code, Body: string(body)}
+	}
+	resp := parseCapabilityResponse(body)
+	// Best effort: losing it costs only the command's fallback target.
+	_ = rememberSpeedtest(resp)
+	return resp, nil
+}
+
+// parseCapabilityResponse reads the answer to a capability report. A control
+// plane older than the speed test answers with no body, or a body without
+// these fields; the report still succeeded, so that is an empty answer, not an
+// error.
+func parseCapabilityResponse(body []byte) *CapabilityResponse {
+	var r CapabilityResponse
+	if err := json.Unmarshal(body, &r); err != nil {
+		return &CapabilityResponse{}
+	}
+	return &r
+}
+
+// SpeedtestPath is where the last speed test target and measure URL the
+// control plane named are kept.
+func SpeedtestPath() string {
+	return filepath.Join(config.ConfigDir(), "speedtest.json")
+}
+
+// SavedSpeedtest is the last speed test target and measure URL the control
+// plane named, or neither.
+func SavedSpeedtest() CapabilityResponse {
+	data, err := os.ReadFile(SpeedtestPath())
+	if err != nil {
+		return CapabilityResponse{}
+	}
+	var r CapabilityResponse
+	if err := json.Unmarshal(data, &r); err != nil {
+		return CapabilityResponse{}
+	}
+	return r
+}
+
+// rememberSpeedtest saves the newest target and measure URL. An answer that
+// names neither -- the listing is already measured -- keeps the old ones.
+func rememberSpeedtest(resp *CapabilityResponse) error {
+	if resp == nil || (resp.Speedtest == nil && resp.MeasureURL == "") {
+		return nil
+	}
+	saved := SavedSpeedtest()
+	if resp.Speedtest != nil {
+		saved.Speedtest = resp.Speedtest
+	}
+	if resp.MeasureURL != "" {
+		saved.MeasureURL = resp.MeasureURL
+	}
+	if err := os.MkdirAll(config.ConfigDir(), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(saved, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(SpeedtestPath(), data, 0600)
+}
+
+// Measurement is what a speed test posts to the listing.
+type Measurement struct {
+	ListingID string  `json:"listing_id"`
+	DownMbps  float64 `json:"down_mbps"`
+	UpMbps    float64 `json:"up_mbps"`
+	LatencyMs float64 `json:"latency_ms"`
+	Server    string  `json:"server"`
+}
+
+// PostMeasurement posts a speed test result to this machine's listing, at
+// measureURL when the control plane named one.
+func PostMeasurement(measureURL string, r speedtest.Result) error {
+	reg, err := LoadRegistration()
+	if err != nil {
+		return ErrNotRegistered
+	}
+	url := measureEndpoint(measureURL, SavedSpeedtest().MeasureURL, reg)
+	if url == "" {
+		return errors.New("this registration has no measure endpoint; register again with a new code")
+	}
+	token := LoadControlToken()
+	if token == "" {
+		return errors.New("no control token on disk")
+	}
+	code, body, err := postBearer(url, token, Measurement{
+		ListingID: reg.ListingID,
+		DownMbps:  r.DownMbps,
+		UpMbps:    r.UpMbps,
+		LatencyMs: r.LatencyMs,
+		Server:    r.Server,
+	})
+	if err != nil {
+		return err
+	}
+	// Values the control plane will not store come back as 219; that, like
+	// anything but a 200, is a failure.
+	if code != http.StatusOK {
+		return &EndpointError{Op: "speed test report", Code: code, Body: string(body)}
 	}
 	return nil
+}
+
+// measureEndpoint is where a measurement goes: the URL the control plane just
+// named, else the last one it named, else the capability endpoint's sibling on
+// the same API.
+func measureEndpoint(explicit, saved string, reg *Registration) string {
+	if explicit != "" {
+		return explicit
+	}
+	if saved != "" {
+		return saved
+	}
+	const suffix = "/capability"
+	capabilityURL := endpointURL(reg.CapabilityURL, reg.SelectURL, "capability")
+	if strings.HasSuffix(capabilityURL, suffix) {
+		return strings.TrimSuffix(capabilityURL, suffix) + "/measure"
+	}
+	return ""
 }
 
 // DeregisterOutcome is what the marketplace said when told this agent is going.
