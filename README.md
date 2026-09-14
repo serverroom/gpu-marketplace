@@ -179,13 +179,6 @@ GOOS=linux GOARCH=amd64 go build -o gpu-agent-linux-amd64 ./cmd/gpu-agent/
 GOOS=darwin GOARCH=arm64 go build -o gpu-agent-darwin-arm64 ./cmd/gpu-agent/
 ```
 
-## Relay Setup (Internal)
-
-See [relay/](relay/) for the relay — the SSH jump host that terminates agent tunnels:
-- `relaymgr.py` — slot allocation + restricted `authorized_keys`
-- `server.py` — agent authorization API
-- `sshd_config.example` — forwarding-only sshd drop-in
-
 ## License
 
 MIT
