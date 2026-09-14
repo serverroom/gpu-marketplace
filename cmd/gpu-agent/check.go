@@ -25,6 +25,9 @@ func detectProvisioner() *provisioner.Provisioner {
 
 // printCapability writes the hosting half of status/check.
 func printCapability(c control.Capability) {
+	if c.UnifiedMemory {
+		fmt.Println("GPU memory:   unified — the GPU has no memory of its own; the machine's memory is one pool used by both CPU and GPU, and a rental gets that pool")
+	}
 	if c.Ready {
 		fmt.Println("Hosting:      ready — this machine can host a rental")
 		return

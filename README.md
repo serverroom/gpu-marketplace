@@ -119,7 +119,7 @@ Every one of these must hold, and `check` lists every one that does not:
 
 - **Linux with KVM** (`/dev/kvm`). Rentals run in a microVM; Windows and macOS hosts cannot host.
 - **IOMMU enabled** (VT-d / AMD-Vi, or the SMMU on Arm), in firmware and on the kernel command line — without it no GPU can be handed to a microVM.
-- **A discrete NVIDIA or AMD GPU with its own memory.** A GPU that shares memory with the host has nothing to hand a tenant and nothing that can be proven clean after a rental, so it is refused: **Apple Silicon**, and the **NVIDIA GB10 in a DGX Spark** (`nvidia-smi` reports its memory as `[N/A]`).
+- **An NVIDIA or AMD GPU the agent can pass through.** Discrete GPUs report their own memory. **Unified-memory GPUs are supported too:** the NVIDIA GB10 in a DGX Spark (and the other GB10 boxes) has no separate GPU memory — `nvidia-smi` shows `[N/A]` — because the machine's memory is one pool used by both the CPU and the GPU. The agent knows this: it reports that pool as the GPU's memory, marks it unified so it is not counted twice, and a rental gets the pool as both its system and its GPU memory. A GPU that reports no memory and is *not* a known unified part is refused rather than guessed at. **Apple Silicon** cannot host: it has no way to pass its GPU through to a microVM.
 - **The rental runtime** — `gpu-agent-kata`, `gpu-agent-mkdisk`, `gpu-agent-injectkey`, plus `cryptsetup` and `nft`. Not yet released (see Status above).
 
 ## What the agent does on your machine

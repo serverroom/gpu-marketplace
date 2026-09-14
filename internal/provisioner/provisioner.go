@@ -62,8 +62,8 @@ const (
 	VendorNVIDIA GPUVendor = "nvidia"
 	VendorAMD    GPUVendor = "amd"
 	// VendorApple cannot host rentals: Apple Silicon has no IOMMU passthrough
-	// path, and its GPU memory is unified with system RAM, so there is neither a
-	// device to hand a guest nor a discrete VRAM to prove clean afterwards.
+	// path, so there is no device to hand a guest. (Unified memory on its own is
+	// not the problem -- a GB10 has it and can host.)
 	VendorApple GPUVendor = "apple"
 )
 
@@ -92,6 +92,7 @@ type Provisioner struct {
 	diskDir     string
 	gpuBDFs     []string // PCI addresses of the passthrough GPUs
 	vendor      GPUVendor
+	unified     bool // the GPUs share the machine's memory pool (GB10)
 	status      string
 	capability  control.Capability
 }
@@ -230,6 +231,15 @@ func (p *Provisioner) resetAndVerifyGPU() bool {
 			if err := p.runner.Run("nvidia-smi", "--gpu-reset", "-i", bdf); err != nil {
 				return false
 			}
+		}
+		if p.unified {
+			// No VRAM figure exists to read: the GPU's memory is the machine's
+			// pool, which the kernel took back when the microVM exited and hands
+			// out again only zeroed. What must be true is that nothing still
+			// holds the GPU.
+			out, err := p.runner.Output("nvidia-smi",
+				"--query-compute-apps=pid", "--format=csv,noheader")
+			return err == nil && strings.TrimSpace(out) == ""
 		}
 		out, err := p.runner.Output("nvidia-smi",
 			"--query-gpu=memory.used", "--format=csv,noheader,nounits")

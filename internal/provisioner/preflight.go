@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/stats"
 )
 
 // KindKataVFIO names the only way this agent hosts a rental: a Kata microVM
@@ -50,6 +51,7 @@ func (OSProbe) CountEntries(dir string) int {
 type HostReport struct {
 	Vendor  GPUVendor
 	BDFs    []string
+	Unified bool
 	Reasons []string
 }
 
@@ -67,7 +69,7 @@ func Preflight(r Runner, probe Probe, goos, goldenImage string) HostReport {
 	case "linux":
 	case "darwin":
 		rep.Vendor = VendorApple
-		add("%v: Apple Silicon cannot pass a GPU through to a microVM, and its GPU memory is the system's own memory", ErrVendorCannotIsolate)
+		add("%v: Apple Silicon has no way to pass its GPU through to a microVM", ErrVendorCannotIsolate)
 		return rep
 	default:
 		add("rentals run inside a Linux KVM microVM, and this machine runs %s", goos)
@@ -81,11 +83,12 @@ func Preflight(r Runner, probe Probe, goos, goldenImage string) HostReport {
 		add("the IOMMU is off, so no GPU can be handed to a microVM: enable VT-d / AMD-Vi (or the SMMU on Arm) in the firmware and on the kernel command line")
 	}
 
-	if bdfs, unified, ok := detectNVIDIA(r); ok {
+	if nv, ok := detectNVIDIA(r); ok {
 		rep.Vendor = VendorNVIDIA
-		rep.BDFs = bdfs
-		for _, bdf := range unified {
-			add("GPU %s shares its memory with the host (unified memory, as on the GB10 in a DGX Spark): there is no separate GPU memory to hand to a tenant, and none that can be proven clean after a rental", bdf)
+		rep.BDFs = nv.bdfs
+		rep.Unified = nv.unified
+		for _, g := range nv.noMemory {
+			add("GPU %s (%s) reports no memory and is not a known unified-memory part, so the agent cannot tell what a tenant would get or prove it clean afterwards", g.bdf, g.name)
 		}
 	} else if bdfs, ok := detectAMD(r); ok {
 		rep.Vendor = VendorAMD
@@ -113,39 +116,59 @@ func Preflight(r Runner, probe Probe, goos, goldenImage string) HostReport {
 func Detect(r Runner, probe Probe, goos, goldenImage, diskDir, agentVersion string) *Provisioner {
 	rep := Preflight(r, probe, goos, goldenImage)
 	p := New(r, goldenImage, diskDir, rep.BDFs, rep.Vendor)
+	p.unified = rep.Unified
 	p.capability = control.Capability{
-		Ready:        len(rep.Reasons) == 0,
-		Kind:         KindKataVFIO,
-		Reasons:      rep.Reasons,
-		AgentVersion: agentVersion,
+		Ready:         len(rep.Reasons) == 0,
+		Kind:          KindKataVFIO,
+		Reasons:       rep.Reasons,
+		AgentVersion:  agentVersion,
+		UnifiedMemory: rep.Unified,
 	}
 	return p
 }
 
-// detectNVIDIA lists the NVIDIA GPUs by PCI address. unified holds the ones
-// with no memory of their own: nvidia-smi reports memory.total as [N/A] (or 0)
-// for a GPU that shares the host's memory pool, which is exactly what a GB10
-// does.
-func detectNVIDIA(r Runner) (bdfs, unified []string, ok bool) {
-	out, err := r.Output("nvidia-smi", "--query-gpu=pci.bus_id,memory.total", "--format=csv,noheader,nounits")
+type gpuRef struct{ bdf, name string }
+
+type nvidiaGPUs struct {
+	bdfs []string
+	// unified is set when the GPUs share the machine's memory pool (a GB10).
+	// A rental then gets that pool as both its system memory and its GPU memory.
+	unified bool
+	// noMemory are GPUs that report no memory and are NOT a known unified part.
+	noMemory []gpuRef
+}
+
+// detectNVIDIA lists the NVIDIA GPUs by PCI address. nvidia-smi reports
+// memory.total as [N/A] for a GPU with no memory of its own; for a known
+// unified-memory part (GB10) that is expected and the machine's pool is the
+// GPU's memory, for anything else it is a GPU whose memory cannot be read.
+func detectNVIDIA(r Runner) (nvidiaGPUs, bool) {
+	var nv nvidiaGPUs
+	out, err := r.Output("nvidia-smi", "--query-gpu=pci.bus_id,name,memory.total", "--format=csv,noheader,nounits")
 	if err != nil {
-		return nil, nil, false
+		return nv, false
 	}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		fields := strings.Split(line, ",")
-		if len(fields) < 2 {
+		if len(fields) < 3 {
 			continue
 		}
 		bdf := NormalizeBDF(fields[0])
 		if bdf == "" {
 			continue
 		}
-		bdfs = append(bdfs, bdf)
-		if total, err := strconv.ParseFloat(strings.TrimSpace(fields[1]), 64); err != nil || total <= 0 {
-			unified = append(unified, bdf)
+		name := strings.TrimSpace(fields[1])
+		nv.bdfs = append(nv.bdfs, bdf)
+		if total, err := strconv.ParseFloat(strings.TrimSpace(fields[2]), 64); err == nil && total > 0 {
+			continue
+		}
+		if stats.IsUnifiedMemoryModel(name) {
+			nv.unified = true
+		} else {
+			nv.noMemory = append(nv.noMemory, gpuRef{bdf: bdf, name: name})
 		}
 	}
-	return bdfs, unified, len(bdfs) > 0
+	return nv, len(nv.bdfs) > 0
 }
 
 // detectAMD lists the AMD GPUs by PCI address from `rocm-smi --showbus --csv`.

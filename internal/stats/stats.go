@@ -27,6 +27,9 @@ type GPUInfo struct {
 	VRAMUsedGB     float64 `json:"vram_used_gb"`
 	TempC          int     `json:"temp_c"`
 	UtilizationPct float64 `json:"utilization_pct"`
+	// UnifiedMemory: this GPU has no memory of its own and uses the machine's
+	// memory pool, so VRAMTotalGB is that pool (shared with the CPU), not extra.
+	UnifiedMemory bool `json:"unified_memory,omitempty"`
 }
 
 // DiskInfo holds disk details.
@@ -64,6 +67,7 @@ func Collect() (*SystemStats, error) {
 	}
 
 	gpus := collectGPUs()
+	fillUnifiedMemory(gpus, mem)
 
 	disk, err := collectDisk()
 	if err != nil {

@@ -293,7 +293,7 @@ func goodHost() fakeProbe {
 }
 
 func TestPreflightReadyHost(t *testing.T) {
-	r := &fakeRunner{output: map[string]string{"nvidia-smi": "00000000:01:00.0, 81559\n00000000:41:00.0, 81559\n"}}
+	r := &fakeRunner{output: map[string]string{"nvidia-smi": "00000000:01:00.0, NVIDIA A100-SXM4-80GB, 81559\n00000000:41:00.0, NVIDIA A100-SXM4-80GB, 81559\n"}}
 	p := Detect(r, goodHost(), "linux", "/img/golden.img", "/disks", "v0.1.6")
 	c := p.Capability()
 	if !c.Ready {
@@ -307,16 +307,54 @@ func TestPreflightReadyHost(t *testing.T) {
 	}
 }
 
-// A DGX Spark: one GB10 whose memory is the host's. It has no memory of its own
-// to hand a tenant or to prove clean, so it must be reported as not ready.
-func TestPreflightRefusesUnifiedMemoryGPU(t *testing.T) {
-	r := &fakeRunner{output: map[string]string{"nvidia-smi": "0000000F:01:00.0, [N/A]\n"}}
-	rep := Preflight(r, goodHost(), "linux", "/img/golden.img")
-	if len(rep.Reasons) != 1 || !strings.Contains(rep.Reasons[0], "shares its memory with the host") {
-		t.Fatalf("reasons = %v, want the unified-memory refusal", rep.Reasons)
+// A DGX Spark: one GB10 whose memory is the machine's pool. nvidia-smi says
+// [N/A], which on a GB10 means "no separate pool", so the machine is a host
+// like any other and its capability says the memory is unified.
+func TestPreflightAcceptsGB10UnifiedMemory(t *testing.T) {
+	r := &fakeRunner{output: map[string]string{"nvidia-smi": "0000000F:01:00.0, NVIDIA GB10, [N/A]\n"}}
+	p := Detect(r, goodHost(), "linux", "/img/golden.img", "/disks", "v0.1.6")
+	c := p.Capability()
+	if !c.Ready {
+		t.Fatalf("a GB10 host is not ready: %v", c.Reasons)
 	}
-	if !strings.Contains(rep.Reasons[0], "000f:01:00.0") {
-		t.Errorf("reason does not name the GPU: %q", rep.Reasons[0])
+	if !c.UnifiedMemory || !p.unified {
+		t.Errorf("capability does not say the memory is unified: %+v", c)
+	}
+	if strings.Join(p.gpuBDFs, " ") != "000f:01:00.0" {
+		t.Errorf("BDFs = %v", p.gpuBDFs)
+	}
+}
+
+// A GPU that reports no memory and is NOT a known unified part is a GPU whose
+// memory cannot be read; that is not guessed at.
+func TestPreflightRefusesUnknownGPUWithNoMemory(t *testing.T) {
+	r := &fakeRunner{output: map[string]string{"nvidia-smi": "00000000:01:00.0, NVIDIA Mystery, [N/A]\n"}}
+	rep := Preflight(r, goodHost(), "linux", "/img/golden.img")
+	if len(rep.Reasons) != 1 || !strings.Contains(rep.Reasons[0], "NVIDIA Mystery") || rep.Unified {
+		t.Fatalf("reasons = %v unified = %v", rep.Reasons, rep.Unified)
+	}
+}
+
+// On a unified-memory host there is no VRAM figure to read after teardown; the
+// turnover is clean when nothing still holds the GPU.
+func TestUnifiedTeardownCleanWhenNoProcessHoldsTheGPU(t *testing.T) {
+	r := &fakeRunner{output: map[string]string{"nvidia-smi": ""}}
+	p := newProv(r)
+	p.unified = true
+	if err := p.Teardown("R1"); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if p.Status() != StatusFree {
+		t.Errorf("status = %q, want free", p.Status())
+	}
+}
+
+func TestUnifiedTeardownDirtyWhenAProcessStillHoldsTheGPU(t *testing.T) {
+	r := &fakeRunner{output: map[string]string{"nvidia-smi": "4242\n"}}
+	p := newProv(r)
+	p.unified = true
+	if err := p.Teardown("R1"); err == nil || p.Status() != StatusDirty {
+		t.Fatalf("Teardown = %v status = %q, want dirty", err, p.Status())
 	}
 }
 
@@ -324,7 +362,7 @@ func TestPreflightRefusesUnifiedMemoryGPU(t *testing.T) {
 func TestPreflightReportsMissingRuntime(t *testing.T) {
 	probe := goodHost()
 	probe.missing = map[string]bool{"gpu-agent-kata": true, "gpu-agent-mkdisk": true, "gpu-agent-injectkey": true}
-	r := &fakeRunner{output: map[string]string{"nvidia-smi": "00000000:01:00.0, 24564\n"}}
+	r := &fakeRunner{output: map[string]string{"nvidia-smi": "00000000:01:00.0, NVIDIA L4, 24564\n"}}
 	rep := Preflight(r, probe, "linux", "/img/golden.img")
 	if len(rep.Reasons) != 1 || !strings.Contains(rep.Reasons[0], "gpu-agent-kata, gpu-agent-mkdisk, gpu-agent-injectkey") {
 		t.Fatalf("reasons = %v", rep.Reasons)

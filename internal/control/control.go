@@ -26,6 +26,9 @@ type Capability struct {
 	Kind         string   `json:"kind"`
 	Reasons      []string `json:"reasons,omitempty"`
 	AgentVersion string   `json:"agent_version,omitempty"`
+	// UnifiedMemory: the GPU has no memory of its own and shares the machine's
+	// pool (a GB10). A rental gets that pool as system and GPU memory at once.
+	UnifiedMemory bool `json:"unified_memory,omitempty"`
 }
 
 // Provisioner is the agent action layer the control channel drives. The real
