@@ -172,3 +172,6 @@ echo "Next: generate a one-time registration code in your dashboard, then run:"
 echo "  gpu-agent register --code <code>"
 echo "and restart the service to bring the tunnel up:"
 echo "  gpu-agent stop && gpu-agent start"
+echo
+echo "Whether this machine can host a rental:  sudo gpu-agent check"
+echo "Remove the agent and withdraw the listing: sudo gpu-agent remove"

@@ -98,6 +98,16 @@ func ConfigDir() string {
 	}
 }
 
+// DataDir is where rental disks and the rental base image live. It is kept
+// apart from ConfigDir on Linux so the agent's credentials and a tenant's disk
+// never share a directory; `gpu-agent remove` deletes both.
+func DataDir() string {
+	if os.Getenv(ConfigDirEnv) != "" || runtime.GOOS != "linux" {
+		return filepath.Join(ConfigDir(), "data")
+	}
+	return "/var/lib/gpu-agent"
+}
+
 // ConfigPath returns the full path to the config file.
 func ConfigPath() string {
 	return filepath.Join(ConfigDir(), "config.yaml")

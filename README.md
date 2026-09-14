@@ -1,6 +1,8 @@
 # GPU Marketplace
 
-A P2P GPU marketplace agent that lets you list your GPU server for others to rent. The agent registers your host with a one-time code, keeps a reverse SSH tunnel to the nearest relay, and runs rentals in isolated microVMs.
+A P2P GPU marketplace agent that lets you list your GPU server for others to rent. The agent registers your host with a one-time code, keeps a reverse SSH tunnel to the nearest relay, checks whether the machine can host a rental safely, and — once the rental runtime exists — runs rentals in isolated microVMs.
+
+> **Status: no machine can host a rental yet.** The microVM runtime the agent drives (`gpu-agent-kata`, `gpu-agent-mkdisk`, `gpu-agent-injectkey`) is not part of any release. Until it is, every machine reports *not ready*, and the marketplace neither shows it to renters nor accepts orders for it. Up to v0.1.5 the agent answered rental requests with a stub that reported success and created nothing; that stub is gone. See [Can this machine host a rental?](#can-this-machine-host-a-rental)
 
 ## How It Works
 
@@ -8,8 +10,8 @@ A P2P GPU marketplace agent that lets you list your GPU server for others to ren
 2. Generate a **one-time registration code** in your dashboard and run `gpu-agent register --code <code>`
 3. The agent registers, then **tests latency** to the available locations and **prompts you to pick one** (closest preselected) — under the hood it opens a **reverse SSH tunnel** to that location's relay
 4. **Configure your listing** in your dashboard; nothing is published until you do
-5. Once configured, your server appears on the **marketplace listing** for renters
-6. When rented, the agent boots an **isolated microVM** with the GPUs passed through, and **wipes it clean** when the rental ends
+5. Once configured **and** the machine passes its hosting checks, your server appears on the **marketplace listing** for renters
+6. When rented, the agent fences the tenant off your network, boots an **isolated microVM** with the GPUs passed through, and **wipes it clean** when the rental ends — refusing the rental outright if any of that cannot be done
 
 ## Quick Install
 
@@ -52,8 +54,10 @@ sudo gpu-agent start
 | Command | Description |
 |---------|-------------|
 | `gpu-agent register --code <code>` | Register this host (latency test, key generation, listing) |
+| `gpu-agent check` | Check whether this machine can host a rental, and show what a tenant is fenced off from (`--rules` prints the exact firewall rules) |
 | `gpu-agent install` | Install as a system service (systemd/launchd/Windows Service) |
-| `gpu-agent uninstall` | Remove the system service |
+| `gpu-agent remove` | Withdraw the listing, revoke relay access and delete the agent completely (`--yes` skips the prompt) |
+| `gpu-agent uninstall` | Remove the system service only — keys, token and listing stay; use `remove` to take everything off |
 | `gpu-agent start` | Start the service |
 | `gpu-agent stop` | Stop the service |
 | `gpu-agent status` | Check the service *and* the registration state |
@@ -102,9 +106,79 @@ second step, and the one-time code is already spent by then. `gpu-agent status`
 shows `registered, no tunnel configured`; run `sudo gpu-agent select-location` —
 it does not need a new code — then restart the service.
 
+## Can this machine host a rental?
+
+`sudo gpu-agent check` answers that without changing anything, and `status`
+and `register` print the same answer. The agent reports it to the marketplace at
+register and on every start; a machine is only shown to renters, and can only be
+ordered, while its latest report says ready. A machine that is not ready also
+refuses a rental request itself, with the reasons — it never accepts one it
+cannot deliver.
+
+Every one of these must hold, and `check` lists every one that does not:
+
+- **Linux with KVM** (`/dev/kvm`). Rentals run in a microVM; Windows and macOS hosts cannot host.
+- **IOMMU enabled** (VT-d / AMD-Vi, or the SMMU on Arm), in firmware and on the kernel command line — without it no GPU can be handed to a microVM.
+- **A discrete NVIDIA or AMD GPU with its own memory.** A GPU that shares memory with the host has nothing to hand a tenant and nothing that can be proven clean after a rental, so it is refused: **Apple Silicon**, and the **NVIDIA GB10 in a DGX Spark** (`nvidia-smi` reports its memory as `[N/A]`).
+- **The rental runtime** — `gpu-agent-kata`, `gpu-agent-mkdisk`, `gpu-agent-injectkey`, plus `cryptsetup` and `nft`. Not yet released (see Status above).
+
+## What the agent does on your machine
+
+It runs as root, because booting a microVM with a GPU passed through, loading
+firewall rules and creating an encrypted disk all need it. Concretely:
+
+- **Network: outbound only.** One SSH connection to the relay you picked (port 2222). Its key on the relay is `restrict`ed to two reverse forwards — no shell, no command, nothing else. Nothing is opened on your router.
+- **Listens on loopback only.** `127.0.0.1:9101` is the control channel; `127.0.0.1:9100` is the legacy stats endpoint (only when `config.yaml` exists). Nothing on your LAN can reach either.
+- **The control channel does four things:** provision, teardown, status, health. Every call but health needs the bearer token minted for this machine at register. There is no command execution, no file access, no shell, and no way for anyone at the marketplace to log in to your machine — nobody asks for, or gets, an account on it.
+- **Hosting checks are local.** `check` reads `/dev/kvm`, `/sys/kernel/iommu_groups`, `nvidia-smi`/`rocm-smi` and your `PATH`, and reports the result. It changes nothing.
+- **Files:** the binary (`/usr/local/bin/gpu-agent`), `/etc/gpu-agent` (the agent's SSH key, control token, registration and tunnel config, all `0600`), `/var/lib/gpu-agent` (rental disks, once the runtime exists), and the service unit. It adds no users, kernel modules, drivers or packages; the installer only installs the OpenSSH client if it is missing.
+
+## What a tenant can reach
+
+Before a microVM boots, the agent loads one nftables table (`inet gpu_rental`)
+and **reads it back from the kernel**; if the rules cannot be verified, nothing
+boots. The microVM is attached only to the `gpurent0` bridge, and the table:
+
+- drops every packet from the tenant to private and special ranges — `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `169.254/16`, `127/8`, multicast, `fc00::/7`, `fe80::/10`;
+- drops every packet from the tenant to **every network configured on your machine**, whatever its addressing — your LAN and your NAS are blocked even if they are numbered from public space;
+- drops every connection from the tenant to your machine itself, except DHCP and IPv6 neighbour discovery;
+- drops every connection into the tenant from your network — the renter's SSH arrives through the agent's tunnel, not from your LAN.
+
+`sudo gpu-agent check --rules` prints the exact table for your machine. The
+tenant's disk is a per-rental encrypted overlay whose key only ever exists in
+memory; at teardown it is destroyed and the GPU is reset and checked, and a
+machine whose wipe or reset does not verify is quarantined instead of re-let.
+
+## Removing the agent
+
+```bash
+sudo gpu-agent remove
+```
+
+This withdraws your listing and revokes the agent's access on the relay (while
+the token that proves who it is still exists), stops and uninstalls the service,
+deletes the rental firewall table and any rental disks, deletes `/etc/gpu-agent`
+— the SSH key, token and registration — and deletes the binary. Your operating
+system, drivers, packages and data are untouched; there is nothing to reinstall.
+If the marketplace cannot be reached, the local removal still completes: the
+agent's private key is gone, so the machine can never connect again, and the
+command tells you the listing id to give support. On Windows, run it from an
+Administrator PowerShell and delete `gpu-agent.exe` afterwards (Windows keeps a
+running program locked).
+
+`gpu-agent uninstall` is not the same thing: it only removes the service
+definition and leaves the key, token and live listing behind.
+
+## One machine, one listing
+
+The agent registers the machine it runs on. Two machines — even two connected
+to each other — are two agents and two listings; a listing that spans several
+machines is not supported. Running `register` again on the same machine creates
+a second listing, so do not, unless you mean to replace the first.
+
 ## Stats Endpoint
 
-When running, the agent exposes an HTTP endpoint on port 9100:
+When running with a `config.yaml`, the agent exposes an HTTP endpoint on `127.0.0.1:9100` (loopback only — it answers without authentication, so it is never bound to your LAN):
 
 - `GET /stats` — Returns system stats as JSON
 - `GET /health` — Health check
@@ -163,7 +237,8 @@ Provider (behind NAT)              Hub Servers (5 locations)
 - **Agent**: Single Go binary using [kardianos/service](https://github.com/kardianos/service) for cross-platform service management
 - **Tunnel**: persistent reverse SSH tunnel (autossh-style), NAT-friendly (outbound only), relay host key pinned
 - **Relay selection**: the control plane returns the account's relay list at register time; the agent TCP-probes them and prompts the provider to pick a location (closest preselected), then reports the choice back for slot allocation
-- **Isolation**: each rental runs in a Kata microVM with the GPUs passed through via VFIO; the disk is wiped and the GPU reset on turnover
+- **Isolation**: each rental runs in a Kata microVM with the GPUs passed through via VFIO, behind a verified nftables fence; the disk is wiped and the GPU reset on turnover, failing closed. A machine that fails its hosting checks refuses rentals and reports why
+- **Control path**: the control plane reaches an agent only through the relay manager's `/agent/<listing_id>/{health,status,provision,teardown}` proxy, which forwards to that listing's own loopback slot and passes the bearer token through untouched
 - **GPU detection**: NVIDIA (nvidia-smi), AMD (rocm-smi), Apple Silicon (system_profiler)
 
 ## Building from Source

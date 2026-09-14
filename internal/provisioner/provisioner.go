@@ -3,9 +3,11 @@
 // encrypted disk, and on teardown destroy everything and FAIL CLOSED unless the
 // wipe and GPU reset both verify.
 //
-// The exact Kata/VFIO commands depend on the host and are validated by the spec's
-// hardware spike; the orchestration and the fail-closed decision below are what
-// this package guarantees, exercised through an injectable Runner.
+// The exact Kata/VFIO commands depend on the host and live in the gpu-agent-*
+// runtime helpers, which do not ship with the agent; Preflight reports their
+// absence and Provision refuses without them. The orchestration, the network
+// fence and the fail-closed decisions below are what this package guarantees,
+// exercised through an injectable Runner.
 package provisioner
 
 import (
@@ -16,6 +18,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/netguard"
 )
 
 // Runner executes host commands. Real hosts use ExecRunner; tests inject a fake.
@@ -69,38 +74,75 @@ const (
 // never have worked ended up permanently unrentable after one booking.
 var ErrVendorCannotIsolate = errors.New("this host's GPUs cannot be isolated for rental")
 
+// ErrNotReady is returned when preflight found a reason this machine cannot
+// host a rental. The reasons are in the error and in Capability().
+var ErrNotReady = errors.New("this machine cannot host a rental")
+
+// Fence isolates a rental's network. netguard.Guard is the real one.
+type Fence interface {
+	Apply() error
+	Remove() error
+}
+
 // Provisioner implements the control.Provisioner interface.
 type Provisioner struct {
 	runner      Runner
+	fence       Fence
 	goldenImage string
 	diskDir     string
 	gpuBDFs     []string // PCI addresses of the passthrough GPUs
 	vendor      GPUVendor
 	status      string
+	capability  control.Capability
 }
 
+// New builds a provisioner that has NOT been checked against the host, so it
+// refuses every rental until Detect (or a test) records a ready capability.
+// Failing closed is the default: an unchecked machine is not a ready one.
 func New(runner Runner, goldenImage, diskDir string, gpuBDFs []string, vendor GPUVendor) *Provisioner {
 	return &Provisioner{
 		runner:      runner,
+		fence:       netguard.New(runner, netguard.Bridge, netguard.HostNetworks),
 		goldenImage: goldenImage,
 		diskDir:     diskDir,
 		gpuBDFs:     gpuBDFs,
 		vendor:      vendor,
 		status:      StatusFree,
+		capability: control.Capability{
+			Kind:    KindKataVFIO,
+			Reasons: []string{"the hosting checks have not run"},
+		},
 	}
 }
 
 func (p *Provisioner) Status() string { return p.status }
+
+// Capability reports what preflight found.
+func (p *Provisioner) Capability() control.Capability { return p.capability }
 
 func (p *Provisioner) overlayPath(rentalID string) string {
 	return filepath.Join(p.diskDir, "rental-"+rentalID+".img")
 }
 
 // Provision boots a Kata microVM for the rental, passes through the GPUs, attaches
-// a fresh encrypted ephemeral disk, and injects the renter's SSH key.
+// a fresh encrypted ephemeral disk, and injects the renter's SSH key. The network
+// fence goes up FIRST and must verify: nothing boots on a machine where the
+// tenant could reach the provider's LAN.
 func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
 	if !p.vendor.CanIsolate() {
 		return fmt.Errorf("%w (vendor %s)", ErrVendorCannotIsolate, p.vendor)
+	}
+	if !p.capability.Ready {
+		return fmt.Errorf("%w: %s", ErrNotReady, strings.Join(p.capability.Reasons, "; "))
+	}
+	if !control.ValidRentalID(rentalID) {
+		return fmt.Errorf("invalid rental id %q", rentalID)
+	}
+	if p.status != StatusFree {
+		return fmt.Errorf("this machine is %s, not free", p.status)
+	}
+	if err := p.fence.Apply(); err != nil {
+		return fmt.Errorf("isolate network: %w", err)
 	}
 	if err := p.createEncryptedDisk(rentalID); err != nil {
 		return fmt.Errorf("create disk: %w", err)
@@ -118,10 +160,19 @@ func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
 // Teardown destroys the rental and FAILS CLOSED: the box returns to `free` only
 // if the wipe AND the GPU reset both verify; otherwise it is quarantined `dirty`.
 func (p *Provisioner) Teardown(rentalID string) error {
+	if !control.ValidRentalID(rentalID) {
+		return fmt.Errorf("invalid rental id %q", rentalID)
+	}
 	_ = p.stopMicroVM(rentalID) // best-effort; the wipe is what matters
 
 	wiped := p.wipeDisk(rentalID)
 	gpuClean := p.resetAndVerifyGPU()
+
+	// The fence only ever blocks, so failing to remove it costs the host
+	// nothing but a stale table; it is not a reason to quarantine the box.
+	if err := p.fence.Remove(); err != nil {
+		log.Printf("teardown of %s: could not remove the rental firewall table: %v", rentalID, err)
+	}
 
 	if wiped && gpuClean {
 		p.status = StatusFree
@@ -141,7 +192,8 @@ func (p *Provisioner) createEncryptedDisk(rentalID string) error {
 }
 
 func (p *Provisioner) bootMicroVM(rentalID string) error {
-	args := []string{"boot", "--image", p.goldenImage, "--disk", p.overlayPath(rentalID)}
+	args := []string{"boot", "--image", p.goldenImage, "--disk", p.overlayPath(rentalID),
+		"--bridge", netguard.Bridge}
 	for _, bdf := range p.gpuBDFs {
 		args = append(args, "--vfio", bdf)
 	}

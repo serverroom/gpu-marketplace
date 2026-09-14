@@ -205,3 +205,6 @@ Write-Host "Next: generate a one-time registration code in your dashboard, then 
 Write-Host "  gpu-agent register --code <code>"
 Write-Host "and restart the service to bring the tunnel up:"
 Write-Host "  gpu-agent stop; gpu-agent start"
+Write-Host ""
+Write-Host "Note: Windows cannot host rentals (they run in a Linux KVM microVM); 'gpu-agent check' explains."
+Write-Host "Remove the agent and withdraw the listing (Administrator): gpu-agent remove"

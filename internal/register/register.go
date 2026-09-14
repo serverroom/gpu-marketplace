@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
+	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/sshtunnel"
 	"github.com/serverroom/gpu-marketplace/internal/stats"
 	"github.com/serverroom/gpu-marketplace/internal/tunnel"
@@ -33,6 +34,9 @@ type RegisterRequest struct {
 	Specs        interface{} `json:"specs"`
 	GPUModels    []string    `json:"gpu_models"`
 	Reachability string      `json:"reachability"`
+	// Capability is whether this machine can host a rental, so the marketplace
+	// never offers one that cannot.
+	Capability *control.Capability `json:"capability,omitempty"`
 }
 
 // DecodeCode unpacks the registration code into the POST URL and the inner
@@ -83,6 +87,10 @@ type RegisterResponse struct {
 	SelectURL    string        `json:"select_url,omitempty"`
 	Tunnel       *TunnelInfo   `json:"tunnel,omitempty"`
 	ControlToken string        `json:"control_token,omitempty"`
+	// Where later capability reports and the withdrawal go. Absent from control
+	// planes older than this agent; endpointURL derives them from SelectURL.
+	CapabilityURL string `json:"capability_url,omitempty"`
+	DeregisterURL string `json:"deregister_url,omitempty"`
 }
 
 // SelectRelayRequest tells the control plane which relay the provider picked.
@@ -159,7 +167,7 @@ func Submit(postURL string, req RegisterRequest) (*RegisterResponse, error) {
 // Run executes the full registration flow: generate the agent keypair, collect
 // specs, register, then pick a relay from the brand's list the control plane
 // returned (closest preselected) and report the choice back for slot allocation.
-func Run(code string) error {
+func Run(code string, capability control.Capability) error {
 	fmt.Println("GPU Marketplace Agent - register")
 	fmt.Println("================================")
 
@@ -186,6 +194,7 @@ func Run(code string) error {
 		Specs:        st,
 		GPUModels:    gpuModels(st),
 		Reachability: "unknown",
+		Capability:   &capability,
 	}
 
 	// The POST endpoint is decoded from the code (which also carries the owner's
@@ -199,10 +208,12 @@ func Run(code string) error {
 	// The one-time code is consumed now — persist everything needed to finish
 	// (or later retry) the remaining steps before anything else can fail.
 	reg := Registration{
-		ListingID: resp.ListingID,
-		KeyPath:   keyPath,
-		SelectURL: resp.SelectURL,
-		Relays:    resp.Relays,
+		ListingID:     resp.ListingID,
+		KeyPath:       keyPath,
+		SelectURL:     resp.SelectURL,
+		Relays:        resp.Relays,
+		CapabilityURL: resp.CapabilityURL,
+		DeregisterURL: resp.DeregisterURL,
 	}
 	if err := saveRegistration(reg); err != nil {
 		return fmt.Errorf("save registration: %w", err)
@@ -498,6 +509,9 @@ type Registration struct {
 	KeyPath   string        `json:"key_path"`
 	SelectURL string        `json:"select_url,omitempty"`
 	Relays    []RelayOption `json:"relays,omitempty"`
+
+	CapabilityURL string `json:"capability_url,omitempty"`
+	DeregisterURL string `json:"deregister_url,omitempty"`
 }
 
 // RegistrationPath is where the register-time state is persisted.
