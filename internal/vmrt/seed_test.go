@@ -30,14 +30,19 @@ func TestNormalizePubkeyKeepsOnlyTypeAndKey(t *testing.T) {
 
 func TestRentalUserDataHasNoPasswordAndNoCommands(t *testing.T) {
 	k, _ := ThrowawayPubkey()
-	ud, err := UserData(k, nil)
+	ud, err := UserData("b8c78a70-9132-4b10-83c2-beb861a862ea", k, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"#cloud-config", "ssh_pwauth: false", "disable_root: true", "lock_passwd: true", `"` + k + `"`} {
+	for _, want := range []string{"#cloud-config", "hostname: gpu-b8c78a70\n", "ssh_pwauth: false", "disable_root: false",
+		"users: []\n", "ssh_authorized_keys:\n  - \"" + k + "\"\n", "PermitRootLogin prohibit-password", "PasswordAuthentication no"} {
 		if !strings.Contains(ud, want) {
 			t.Errorf("user-data missing %q:\n%s", want, ud)
 		}
+	}
+	// No second account: the renter is root, and only with their key.
+	if strings.Contains(ud, "- name:") || strings.Contains(ud, "default") {
+		t.Errorf("a rental's user-data creates another user:\n%s", ud)
 	}
 	if strings.Contains(ud, "runcmd") || strings.Contains(ud, "chpasswd") || strings.Contains(ud, "\n    passwd:") || strings.Contains(ud, "plain_text_passwd") {
 		t.Errorf("a rental's user-data runs commands or sets a password:\n%s", ud)
@@ -46,7 +51,7 @@ func TestRentalUserDataHasNoPasswordAndNoCommands(t *testing.T) {
 
 func TestSelfTestUserDataProbes(t *testing.T) {
 	k, _ := ThrowawayPubkey()
-	ud, err := UserData(k, []string{"10.254.254.1:22", "192.168.1.1:80"})
+	ud, err := UserData("selftest", k, []string{"10.254.254.1:22", "192.168.1.1:80"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,8 +60,23 @@ func TestSelfTestUserDataProbes(t *testing.T) {
 			t.Errorf("self-test user-data missing %q", want)
 		}
 	}
-	if _, err := UserData(k, []string{"1.2.3.4:22; reboot"}); err == nil {
+	if _, err := UserData("selftest", k, []string{"1.2.3.4:22; reboot"}); err == nil {
 		t.Errorf("a probe target carrying a command was accepted")
+	}
+}
+
+func TestHostnameIsGpuAndTheRentalIdsFirstEight(t *testing.T) {
+	for id, want := range map[string]string{
+		"b8c78a70-9132-4b10-83c2-beb861a862ea": "gpu-b8c78a70",
+		"R1":                                   "gpu-r1",
+		"abcdefg-hij":                          "gpu-abcdefg",
+	} {
+		if got := Hostname(id); got != want {
+			t.Errorf("Hostname(%q) = %q, want %q", id, got, want)
+		}
+	}
+	if md := MetaData("b8c78a70-9132"); !strings.Contains(md, "local-hostname: gpu-b8c78a70\n") {
+		t.Errorf("meta-data hostname wrong:\n%s", md)
 	}
 }
 

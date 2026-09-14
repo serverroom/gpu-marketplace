@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-// The base image every rental starts from: Ubuntu 24.04 LTS's official cloud
+// The base image every rental starts from: Ubuntu 26.04 LTS's official cloud
 // image, verified against Canonical's published SHA256SUMS, with the NVIDIA
 // driver baked in once so a rental boots straight to a working GPU.
 var (
-	UbuntuRelease = "noble"
+	UbuntuRelease = "resolute"
 	BakeTimeout   = 45 * time.Minute
 	// DefaultDriver is an open-kernel-module server branch: required for
 	// Blackwell (GB10), and supported on Turing and later.
@@ -35,6 +35,23 @@ type GoldenInfo struct {
 	Driver       string `json:"driver"`
 	AgentVersion string `json:"agent_version"`
 	CreatedAt    int64  `json:"created_at"`
+}
+
+// GoldenProblem says why the baked image on disk is not the one this agent
+// builds, or "" when it is. A golden image outlives an agent upgrade, so without
+// this a machine upgraded to a new release would keep renting out the old one.
+func GoldenProblem(h Host, spec Spec) string {
+	want := cloudImageName(spec.Arch)
+	data, err := h.ReadFile(spec.GoldenImage + ".json")
+	var info GoldenInfo
+	if err != nil || json.Unmarshal(data, &info) != nil || info.Base == "" {
+		return "the rental base image does not say which Ubuntu image it was built from; rebuild it with 'sudo gpu-agent runtime prepare'"
+	}
+	if info.Base != want {
+		return "the rental base image was built from " + info.Base + ", and this agent rents out " + want +
+			"; rebuild it with 'sudo gpu-agent runtime prepare'"
+	}
+	return ""
 }
 
 // PrepareOptions controls `gpu-agent runtime prepare`.

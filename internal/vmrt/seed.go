@@ -65,9 +65,26 @@ func sshString(s string) []byte {
 	return b
 }
 
+// VMUser is the login a rental's VM accepts the renter's key for. The marketplace
+// reads it from the capability report, so the ssh command it hands out names the
+// user this agent actually created.
+const VMUser = "root"
+
 // MetaData is the NoCloud meta-data for a rental.
 func MetaData(id string) string {
-	return "instance-id: gpu-rental-" + id + "\nlocal-hostname: gpu-rental\n"
+	return "instance-id: gpu-rental-" + id + "\nlocal-hostname: " + Hostname(id) + "\n"
+}
+
+// Hostname is the guest's name: gpu- and the first eight characters of the
+// rental id, the same name the marketplace gives the machine in the renter's ssh
+// command. Every rental's first boot makes a new host key, so a name shared
+// across rentals would trip ssh's changed-host-key refusal on the next one.
+func Hostname(id string) string {
+	short := id
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	return "gpu-" + strings.ToLower(strings.TrimRight(short, "-"))
 }
 
 // NetworkConfig pins the guest's one NIC to the rental /30 with a static
@@ -107,29 +124,40 @@ const (
 	markBake     = "GPUAGENT-BAKE"
 )
 
-// UserData is the cloud-init user-data for a rental: one user, `renter`, who can
-// only log in with the renter's key, with sudo inside the VM (it is theirs), no
-// password anywhere, root login off. probes non-nil makes it a self-test VM.
-func UserData(pubkey string, probes []string) (string, error) {
+// rootLoginConf keeps root's login key-only whatever the image's sshd defaults
+// are. sshd reads sshd_config.d in name order and the first value wins, so 10-
+// is ahead of cloud-init's own 50-cloud-init.conf. cloud-init writes it before
+// sshd starts.
+const rootLoginConf = `  - path: /etc/ssh/sshd_config.d/10-gpu-rental.conf
+    permissions: "0644"
+    content: |
+      PermitRootLogin prohibit-password
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+`
+
+// UserData is the cloud-init user-data for a rental: the renter logs in as root
+// (the VM is theirs) with their key and nothing else -- no password anywhere, no
+// other account. `users: []` stops cloud-init creating the image's default user,
+// and with disable_root false the key goes to root without the "log in as ubuntu"
+// command cloud-init otherwise puts in front of it. probes non-nil makes it a
+// self-test VM.
+func UserData(id, pubkey string, probes []string) (string, error) {
 	key, err := NormalizePubkey(pubkey)
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
-	b.WriteString("hostname: gpu-rental\n")
+	b.WriteString("hostname: " + Hostname(id) + "\n")
 	b.WriteString("ssh_pwauth: false\n")
-	b.WriteString("disable_root: true\n")
-	b.WriteString("users:\n")
-	b.WriteString("  - name: renter\n")
-	b.WriteString("    groups: [sudo]\n")
-	b.WriteString("    shell: /bin/bash\n")
-	b.WriteString("    sudo: \"ALL=(ALL) NOPASSWD:ALL\"\n")
-	b.WriteString("    lock_passwd: true\n")
-	b.WriteString("    ssh_authorized_keys:\n")
-	fmt.Fprintf(&b, "      - %q\n", key)
+	b.WriteString("disable_root: false\n")
+	b.WriteString("users: []\n")
+	b.WriteString("ssh_authorized_keys:\n")
+	fmt.Fprintf(&b, "  - %q\n", key)
 	b.WriteString("growpart:\n  mode: auto\n  devices: [\"/\"]\n")
 	b.WriteString("write_files:\n")
+	b.WriteString(rootLoginConf)
 	b.WriteString(sayScript)
 	if probes != nil {
 		script, err := selfTestScript(probes)

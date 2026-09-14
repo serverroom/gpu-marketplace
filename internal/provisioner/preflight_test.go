@@ -35,6 +35,9 @@ func goodHost(t *testing.T, gpuLine string) *fakehost.Host {
 	h.Files["/usr/share/OVMF/OVMF_VARS_4M.fd"] = nil
 	h.Files[dataDir+"/golden.img"] = nil
 	h.Files[filepath.Join(dataDir, "golden.img")] = nil // Detect joins with the OS separator
+	golden, _ := json.Marshal(vmrt.GoldenInfo{Base: "resolute-server-cloudimg-amd64.img"})
+	h.Files[dataDir+"/golden.img.json"] = golden
+	h.Files[filepath.Join(dataDir, "golden.img")+".json"] = golden
 	bdf := NormalizeBDF(strings.Split(gpuLine, ",")[0])
 	pass, _ := json.Marshal(vmrt.SelfTestResult{Passed: true, AgentVersion: version, HostGPUs: []string{bdf}})
 	h.Files[vmrt.SelfTestPath(dataDir)] = pass
@@ -42,6 +45,22 @@ func goodHost(t *testing.T, gpuLine string) *fakehost.Host {
 }
 
 func reasons(rep HostReport) string { return strings.Join(rep.Reasons, " | ") }
+
+// A machine that baked its image under an older agent keeps that image across the
+// upgrade. It must not rent out the old Ubuntu, nor an image nobody can name.
+func TestPreflightRefusesABaseImageFromAnotherRelease(t *testing.T) {
+	h := goodHost(t, "00000000:01:00.0, NVIDIA CMP 170HX, 8192\n")
+	old, _ := json.Marshal(vmrt.GoldenInfo{Base: "noble-server-cloudimg-amd64.img"})
+	h.Files[dataDir+"/golden.img.json"] = old
+	if r := reasons(Preflight(h, "linux", spec(), version)); !strings.Contains(r, "built from noble-server-cloudimg-amd64.img") ||
+		!strings.Contains(r, "runtime prepare") {
+		t.Errorf("a 24.04 base image was accepted: %q", r)
+	}
+	delete(h.Files, dataDir+"/golden.img.json")
+	if r := reasons(Preflight(h, "linux", spec(), version)); !strings.Contains(r, "does not say which Ubuntu image") {
+		t.Errorf("a base image with no record was accepted: %q", r)
+	}
+}
 
 func TestPreflightReadyHost(t *testing.T) {
 	h := goodHost(t, "00000000:01:00.0, NVIDIA CMP 170HX, 8192\n")
@@ -144,7 +163,7 @@ func TestDetectBuildsACapability(t *testing.T) {
 	h.Outputs["df --output=avail"] = " Avail\n  900G\n"
 	p := Detect(h, "linux", "amd64", dataDir, version)
 	c := p.Capability()
-	if !c.Ready || !c.UnifiedMemory || c.Kind != KindQEMUVFIO || c.AgentVersion != version {
+	if !c.Ready || !c.UnifiedMemory || c.Kind != KindQEMUVFIO || c.AgentVersion != version || c.VMUser != "root" {
 		t.Fatalf("capability = %+v", c)
 	}
 	if p.Runtime() == nil || p.Runtime().Spec().DiskGB != 500 || p.Runtime().Spec().TotalMemMB != 125000 {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
@@ -88,6 +89,9 @@ func TestLoadStateMalformedRegistrationIsUnreadable(t *testing.T) {
 func TestLoadStateUnreadableWithoutPermission(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: file modes do not restrict reads")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod 0000 does not restrict reads")
 	}
 	dir := scratchConfigDir(t)
 	writeRegistration(t, Registration{ListingID: "L-9"})

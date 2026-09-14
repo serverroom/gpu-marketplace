@@ -84,6 +84,8 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	}
 	if !h.Exists(spec.GoldenImage) {
 		add("the rental base image has not been built; run 'sudo gpu-agent runtime prepare'")
+	} else if problem := vmrt.GoldenProblem(h, spec); problem != "" {
+		add("%s", problem)
 	}
 	if spec.GuestMemoryMB() == 0 {
 		add("this machine has %d MB of memory, and a rental needs at least 6 GB", spec.TotalMemMB)
@@ -132,6 +134,7 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		Reasons:       rep.Reasons,
 		AgentVersion:  version,
 		UnifiedMemory: rep.Unified,
+		VMUser:        vmrt.VMUser,
 	}
 	return p
 }

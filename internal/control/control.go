@@ -29,6 +29,9 @@ type Capability struct {
 	// UnifiedMemory: the GPU has no memory of its own and shares the machine's
 	// pool (a GB10). A rental gets that pool as system and GPU memory at once.
 	UnifiedMemory bool `json:"unified_memory,omitempty"`
+	// VMUser: the login the rental's VM accepts the renter's key for. Absent from
+	// agents up to v0.1.7, whose VMs log in as renter.
+	VMUser string `json:"vm_user,omitempty"`
 }
 
 // Provisioner is the agent action layer the control channel drives. The real

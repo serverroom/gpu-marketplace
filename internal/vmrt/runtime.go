@@ -69,7 +69,7 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 		}
 		return fmt.Errorf("%w (%s)", ErrRentalPresent, st.RentalID)
 	}
-	userData, err := UserData(o.Pubkey, o.Probes)
+	userData, err := UserData(o.ID, o.Pubkey, o.Probes)
 	if err != nil {
 		return err
 	}
