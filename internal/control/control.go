@@ -32,7 +32,8 @@ type Capability struct {
 }
 
 // Provisioner is the agent action layer the control channel drives. The real
-// Kata/VFIO implementation lives in the provisioner package; tests use a fake.
+// QEMU/VFIO implementation is the provisioner package on top of internal/vmrt;
+// tests use a fake.
 type Provisioner interface {
 	Provision(rentalID, renterPubkey string) error
 	Teardown(rentalID string) error

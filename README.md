@@ -2,7 +2,7 @@
 
 A P2P GPU marketplace agent that lets you list your GPU server for others to rent. The agent registers your host with a one-time code, keeps a reverse SSH tunnel to the nearest relay, checks whether the machine can host a rental safely, and — once the rental runtime exists — runs rentals in isolated microVMs.
 
-> **Status: no machine can host a rental yet.** The microVM runtime the agent drives (`gpu-agent-kata`, `gpu-agent-mkdisk`, `gpu-agent-injectkey`) is not part of any release. Until it is, every machine reports *not ready*, and the marketplace neither shows it to renters nor accepts orders for it. Up to v0.1.5 the agent answered rental requests with a stub that reported success and created nothing; that stub is gone. See [Can this machine host a rental?](#can-this-machine-host-a-rental)
+> **Status: a machine is offered to renters only after it has proven it can host.** The agent carries its own microVM runtime (QEMU/KVM, GPU passthrough over VFIO, a per-rental encrypted disk). A machine reports *ready* only when every hosting check passes **and** it has passed a real test boot on its own hardware (`sudo gpu-agent check --boot`); until then the marketplace neither shows it to renters nor accepts orders for it. Up to v0.1.5 the agent answered rental requests with a stub that reported success and created nothing; that stub is gone. See [Can this machine host a rental?](#can-this-machine-host-a-rental)
 
 ## How It Works
 
@@ -55,6 +55,8 @@ sudo gpu-agent start
 |---------|-------------|
 | `gpu-agent register --code <code>` | Register this host (latency test, key generation, listing) |
 | `gpu-agent check` | Check whether this machine can host a rental, and show what a tenant is fenced off from (`--rules` prints the exact firewall rules) |
+| `gpu-agent runtime prepare` | Install the microVM runtime (`--install-deps`) and build the rental base image with the NVIDIA driver (`--driver 580-server-open`) |
+| `gpu-agent check --boot` | Boot a real test rental with the GPU passed through, check what it can and cannot reach, tear it down, and record the result |
 | `gpu-agent install` | Install as a system service (systemd/launchd/Windows Service) |
 | `gpu-agent remove` | Withdraw the listing, revoke relay access and delete the agent completely (`--yes` skips the prompt) |
 | `gpu-agent uninstall` | Remove the system service only — keys, token and listing stay; use `remove` to take everything off |
@@ -120,7 +122,10 @@ Every one of these must hold, and `check` lists every one that does not:
 - **Linux with KVM** (`/dev/kvm`). Rentals run in a microVM; Windows and macOS hosts cannot host.
 - **IOMMU enabled** (VT-d / AMD-Vi, or the SMMU on Arm), in firmware and on the kernel command line — without it no GPU can be handed to a microVM.
 - **An NVIDIA or AMD GPU the agent can pass through.** Discrete GPUs report their own memory. **Unified-memory GPUs are supported too:** the NVIDIA GB10 in a DGX Spark (and the other GB10 boxes) has no separate GPU memory — `nvidia-smi` shows `[N/A]` — because the machine's memory is one pool used by both the CPU and the GPU. The agent knows this: it reports that pool as the GPU's memory, marks it unified so it is not counted twice, and a rental gets the pool as both its system and its GPU memory. A GPU that reports no memory and is *not* a known unified part is refused rather than guessed at. **Apple Silicon** cannot host: it has no way to pass its GPU through to a microVM.
-- **The rental runtime** — `gpu-agent-kata`, `gpu-agent-mkdisk`, `gpu-agent-injectkey`, plus `cryptsetup` and `nft`. Not yet released (see Status above).
+- **The rental runtime installed and its base image built** — QEMU, UEFI firmware (OVMF/AAVMF), `cloud-image-utils`, `cryptsetup` and `nftables`. `sudo gpu-agent runtime prepare --install-deps` installs them with apt and builds the base image: Ubuntu 24.04's official cloud image, verified against Canonical's published checksums, with the NVIDIA driver baked in.
+- **No GPU in use on the host** while a rental starts — the GPU is handed to the microVM whole, so anything using it (a desktop session, a container) must be stopped first. The agent refuses and names what holds it.
+- **Enough memory and disk** — at least 6 GB of memory and 20 GB free under `/var/lib/gpu-agent`. A rental gets the machine's memory less a tenth (never under 4 GB) for the host.
+- **A passing test boot on this machine.** `sudo gpu-agent check --boot` runs a real rental for a few minutes with a key nobody holds: the VM reports the GPU it sees, that it reaches the internet, and that your machine, its address and its gateway are unreachable; it is then torn down and the GPU checked. The result is recorded and must be for the agent version you are running.
 
 ## What the agent does on your machine
 
@@ -131,7 +136,7 @@ firewall rules and creating an encrypted disk all need it. Concretely:
 - **Listens on loopback only.** `127.0.0.1:9101` is the control channel; `127.0.0.1:9100` is the legacy stats endpoint (only when `config.yaml` exists). Nothing on your LAN can reach either.
 - **The control channel does four things:** provision, teardown, status, health. Every call but health needs the bearer token minted for this machine at register. There is no command execution, no file access, no shell, and no way for anyone at the marketplace to log in to your machine — nobody asks for, or gets, an account on it.
 - **Hosting checks are local.** `check` reads `/dev/kvm`, `/sys/kernel/iommu_groups`, `nvidia-smi`/`rocm-smi` and your `PATH`, and reports the result. It changes nothing.
-- **Files:** the binary (`/usr/local/bin/gpu-agent`), `/etc/gpu-agent` (the agent's SSH key, control token, registration and tunnel config, all `0600`), `/var/lib/gpu-agent` (rental disks, once the runtime exists), and the service unit. It adds no users, kernel modules, drivers or packages; the installer only installs the OpenSSH client if it is missing.
+- **Files:** the binary (`/usr/local/bin/gpu-agent`), `/etc/gpu-agent` (the agent's SSH key, control token, registration and tunnel config, all `0600`), `/var/lib/gpu-agent` (the rental base image, the test-boot result and, while rented, the encrypted rental disk), and the service unit. The installer adds no users, kernel modules or drivers and installs only the OpenSSH client if it is missing; `gpu-agent runtime prepare --install-deps` additionally installs QEMU, UEFI firmware, `cloud-image-utils`, `cryptsetup-bin` and `nftables` with apt — nothing else, and nothing without that flag. While a rental runs, the agent also creates the `gpurent0` bridge, one nftables table, and (only if Docker or a firewall has set iptables' FORWARD policy to DROP) two accept rules for that bridge; all of them are removed when the rental ends.
 
 ## What a tenant can reach
 
@@ -237,7 +242,7 @@ Provider (behind NAT)              Hub Servers (5 locations)
 - **Agent**: Single Go binary using [kardianos/service](https://github.com/kardianos/service) for cross-platform service management
 - **Tunnel**: persistent reverse SSH tunnel (autossh-style), NAT-friendly (outbound only), relay host key pinned
 - **Relay selection**: the control plane returns the account's relay list at register time; the agent TCP-probes them and prompts the provider to pick a location (closest preselected), then reports the choice back for slot allocation
-- **Isolation**: each rental runs in a Kata microVM with the GPUs passed through via VFIO, behind a verified nftables fence; the disk is wiped and the GPU reset on turnover, failing closed. A machine that fails its hosting checks refuses rentals and reports why
+- **Isolation**: each rental runs in a QEMU/KVM microVM (`-nodefaults`, seccomp sandbox, its own transient systemd unit) with the GPU's whole IOMMU group passed through via VFIO, behind a verified nftables fence with NAT to the internet only; its disk is dm-crypt with a key that never leaves memory; on turnover the key is discarded, the GPU reset, returned to its driver and checked, failing closed. Every step is recorded so a crash or reboot is torn down exactly. A machine that fails its hosting checks or its test boot refuses rentals and reports why
 - **Control path**: the control plane reaches an agent only through the relay manager's `/agent/<listing_id>/{health,status,provision,teardown}` proxy, which forwards to that listing's own loopback slot and passes the bearer token through untouched
 - **GPU detection**: NVIDIA (nvidia-smi), AMD (rocm-smi), Apple Silicon (system_profiler)
 
