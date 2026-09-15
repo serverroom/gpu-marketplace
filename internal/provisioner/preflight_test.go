@@ -334,7 +334,42 @@ func TestDetectReportsIdentityAndDesktopOnDemand(t *testing.T) {
 		t.Error("the runtime of a Spark does not close its desktop on demand")
 	}
 	data, _ := json.Marshal(c)
-	if !strings.Contains(string(data), `"identity":{"sys_vendor":"NVIDIA","product_name":"NVIDIA DGX Spark","product_family":"DGX Spark","confirmed_dgx_spark":true}`) {
+	if !strings.Contains(string(data), `"identity":{"sys_vendor":"NVIDIA","product_name":"NVIDIA DGX Spark","board_name":"","product_family":"DGX Spark","confirmed_dgx_spark":true,"reason":""}`) {
 		t.Errorf("capability JSON = %s", data)
+	}
+}
+
+// The pair checks ride along with every capability report, and never change
+// whether the machine can host a single rental.
+func TestDetectReportsThePairHalfWithoutTouchingTheSingleOne(t *testing.T) {
+	h := goodHost(t, "0000000F:01:00.0, NVIDIA GB10, [N/A]\n")
+	h.Files["/proc/meminfo"] = []byte("MemTotal:       128000000 kB\n")
+	h.Files[dataDir] = nil
+	h.Outputs["df --output=avail"] = " Avail\n  900G\n"
+	h.Files["/sys/class/dmi/id/sys_vendor"] = []byte("NVIDIA\n")
+	h.Files["/sys/class/dmi/id/product_name"] = []byte("DGX Spark\n")
+	h.Files["/usr/share/AAVMF/AAVMF_CODE.fd"] = nil
+	h.Files["/usr/share/AAVMF/AAVMF_VARS.fd"] = nil
+	arm, _ := json.Marshal(vmrt.GoldenInfo{Base: "resolute-server-cloudimg-arm64.img"})
+	h.Files[filepath.Join(dataDir, "golden.img")+".json"] = arm
+	h.NIC("0000:01:00.0", "enp1s0f0np0", "58:a2:e1:00:00:01", "MT2412X00001", "0000:01:00.0")
+	h.NIC("0002:01:00.0", "enP2p1s0f0np0", "58:a2:e1:00:00:03", "MT2412X00001", "0002:01:00.0")
+	orig := RelayAddrs
+	RelayAddrs = func() []string { return nil }
+	t.Cleanup(func() { RelayAddrs = orig })
+
+	p := Detect(h, "linux", "arm64", dataDir, version)
+	c := p.Capability()
+	if !c.Ready {
+		t.Fatalf("the single half changed: %v", c.Reasons)
+	}
+	if c.Identity == nil || !c.Identity.ConfirmedDGXSpark || c.Interconnect == nil || !c.Interconnect.Supported {
+		t.Fatalf("identity=%+v interconnect=%+v", c.Identity, c.Interconnect)
+	}
+	if c.Interconnect.Ready || len(c.Interconnect.Ports) != 2 {
+		t.Errorf("interconnect = %+v (no RDMA image, no pair test: not ready)", c.Interconnect)
+	}
+	if got := strings.Join(p.Runtime().Spec().NICs, " "); got != "0000:01:00.0 0002:01:00.0" {
+		t.Errorf("spec NICs = %s", got)
 	}
 }

@@ -387,3 +387,9 @@ func DesktopOnGPUProblem(desktop []string) string {
 	return fmt.Sprintf("this machine's desktop is running on the GPU (%s); a hosting machine runs without one: "+
 		"run 'sudo gpu-agent runtime prepare --headless', then try again", strings.Join(desktop, ", "))
 }
+
+// RDMAHolders are the host processes with an RDMA device (/dev/infiniband/*)
+// open. A ConnectX card that something holds cannot be handed to a microVM.
+func RDMAHolders(h Host) []string {
+	return DeviceHolders(h, "/dev/infiniband/", nil)
+}

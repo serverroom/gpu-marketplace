@@ -47,8 +47,14 @@ func runCheck(svc service.Service, args []string) {
 	rules := fs.Bool("rules", false, "print the exact nftables rules a rental runs behind")
 	boot := fs.Bool("boot", false, "boot a real test rental with the GPU passed through, and record the result")
 	yes := fs.Bool("yes", false, "with --boot: do not ask for confirmation")
+	pair := fs.Bool("pair", false, "check whether this machine can be half of a linked pair of DGX Sparks (read-only); with --boot, run the pair test boot")
+	jsonOut := fs.Bool("json", false, "with --pair: print the identity and interconnect report as JSON")
 	fs.Parse(args)
 
+	if *pair && !*boot {
+		runCheckPair(*jsonOut)
+		return
+	}
 	if *boot {
 		runSelfTest(svc, *yes)
 		return

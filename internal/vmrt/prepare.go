@@ -41,6 +41,9 @@ type GoldenInfo struct {
 	DriverSource string `json:"driver_source,omitempty"`
 	// HostDriver is the host's own NVIDIA driver when the image was built.
 	HostDriver string `json:"host_driver,omitempty"`
+	// Extras are optional additions baked in besides the driver: "rdma" (the
+	// RDMA userspace tools and the mlx5_ib module a linked pair needs).
+	Extras []string `json:"extras,omitempty"`
 }
 
 // LoadGoldenInfo reads the record next to the baked image.
@@ -52,6 +55,25 @@ func LoadGoldenInfo(h Host, spec Spec) (GoldenInfo, error) {
 	}
 	err = json.Unmarshal(data, &info)
 	return info, err
+}
+
+// ExtraRDMA marks a base image with the RDMA tools baked in.
+const ExtraRDMA = "rdma"
+
+// GoldenHasExtra reports whether the baked image on disk records extra. Only a
+// linked pair needs any; GoldenProblem, which every rental checks, does not
+// look at extras, so a single machine never has to rebuild for them.
+func GoldenHasExtra(h Host, spec Spec, extra string) bool {
+	info, err := LoadGoldenInfo(h, spec)
+	if err != nil {
+		return false
+	}
+	for _, e := range info.Extras {
+		if e == extra {
+			return true
+		}
+	}
+	return false
 }
 
 // GoldenProblem says why the baked image on disk is not the one this agent

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/interconnect"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
@@ -111,6 +112,14 @@ type Provisioner struct {
 	// withdrawn: the host removed the machine in the control panel. Nothing
 	// makes it ready again in this agent's lifetime.
 	withdrawn bool
+
+	// The linked-pair half (pair.go). host is nil in tests that build a
+	// provisioner by hand, which then has no pair runtime to offer.
+	host     vmrt.Host
+	dataDir  string
+	version  string
+	pairOpts interconnect.Options
+	pair     interconnect.Report
 }
 
 // Withdraw stops this machine hosting: every rental is refused from now on,

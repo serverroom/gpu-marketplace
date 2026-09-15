@@ -47,6 +47,16 @@ type Host struct {
 	OnSleep func(h *Host)
 
 	home map[string]string // bdf -> driver the device binds to with no override
+	nics map[string]*nicDev
+}
+
+// nicDev is the network interface a NIC function has while its home driver
+// holds it. Unbinding the function takes the interface away; binding it back
+// brings it back, with whatever MAC it has by then, unless it was lost.
+type nicDev struct {
+	netdev string
+	mac    string
+	lost   bool
 }
 
 // New returns an empty fake host.
@@ -60,6 +70,7 @@ func New() *Host {
 		Dial:      map[string]bool{},
 		Downloads: map[string][]byte{},
 		home:      map[string]string{},
+		nics:      map[string]*nicDev{},
 	}
 }
 
@@ -160,6 +171,7 @@ func (h *Host) WriteFile(p string, data []byte, perm os.FileMode) error {
 	switch {
 	case strings.HasPrefix(p, "/sys/bus/pci/drivers/") && strings.HasSuffix(p, "/unbind"):
 		delete(h.Links, driverLink(value))
+		h.dropNetdev(value)
 	case p == "/sys/bus/pci/drivers_probe":
 		if _, bound := h.Links[driverLink(value)]; bound {
 			break
@@ -169,6 +181,7 @@ func (h *Host) WriteFile(p string, data []byte, perm os.FileMode) error {
 			h.Links[driverLink(value)] = "../../../bus/pci/drivers/" + override
 		} else if home := h.home[value]; home != "" {
 			h.Links[driverLink(value)] = "../../../bus/pci/drivers/" + home
+			h.raiseNetdev(value)
 		}
 	default:
 		h.Files[p] = append([]byte(nil), data...)
@@ -188,6 +201,74 @@ func (h *Host) PCI(bdf, driver, class string, group ...string) {
 	h.Files[pciDevices+bdf+"/reset"] = nil
 	for _, m := range group {
 		h.Files[pciDevices+bdf+"/iommu_group/devices/"+m] = nil
+	}
+}
+
+// NIC registers a ConnectX-7 function on mlx5_core with one network interface
+// that has carrier at 200 GbE and nothing configured on it: its PCI identity
+// and IOMMU group, its sysfs netdev, and canned answers for `ethtool -i`,
+// `devlink dev info`, `ip -j addr/route`, `mstconfig q` and `nmcli` (unmanaged).
+func (h *Host) NIC(bdf, netdev, mac, serial string, group ...string) {
+	h.PCI(bdf, "mlx5_core", "0x020000", group...)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Files[pciDevices+bdf+"/vendor"] = []byte("0x15b3\n")
+	h.Files[pciDevices+bdf+"/device"] = []byte("0x1021\n")
+	h.nics[bdf] = &nicDev{netdev: netdev, mac: mac}
+	h.raiseNetdev(bdf)
+	h.Outputs["ethtool -i "+netdev] = "driver: mlx5_core\nversion: 26.04\nfirmware-version: 28.40.1000 (NVD0000000033)\nbus-info: " + bdf + "\n"
+	h.Outputs["devlink -j dev info pci/"+bdf] = `{"info":{"pci/` + bdf + `":{"driver":"mlx5_core","serial_number":"` + serial + `","versions":{"fixed":{"fw.psid":"NVD0000000033"}}}}}`
+	h.Outputs["ip -j addr show dev "+netdev] = `[{"ifindex":5,"ifname":"` + netdev + `","flags":["BROADCAST","MULTICAST"],"mtu":1500,"addr_info":[]}]`
+	h.Outputs["ip -j route show dev "+netdev] = "[]"
+	h.Outputs["ip -6 -j route show dev "+netdev] = `[{"dst":"fe80::/64","protocol":"kernel","metric":256,"flags":[],"pref":"medium"}]`
+	h.Outputs["mstconfig -d "+bdf+" q"] = "\nDevice #1:\n----------\n\nDevice type:        ConnectX7\nPCI device:         " + bdf + "\n\nConfigurations:                          Next Boot\n        SRIOV_EN                            False(0)\n        LINK_TYPE_P1                        ETH(2)\n"
+	h.Outputs["nmcli -t -f DEVICE,STATE device"] += netdev + ":unmanaged\n"
+}
+
+func (h *Host) raiseNetdev(bdf string) {
+	n := h.nics[bdf]
+	if n == nil || n.lost {
+		return
+	}
+	h.Files[pciDevices+bdf+"/net/"+n.netdev] = nil
+	for attr, v := range map[string]string{"address": n.mac, "carrier": "1", "speed": "200000", "mtu": "1500", "operstate": "up", "flags": "0x1003"} {
+		h.Files["/sys/class/net/"+n.netdev+"/"+attr] = []byte(v + "\n")
+	}
+}
+
+func (h *Host) dropNetdev(bdf string) {
+	n := h.nics[bdf]
+	if n == nil {
+		return
+	}
+	delete(h.Files, pciDevices+bdf+"/net/"+n.netdev)
+	for k := range h.Files {
+		if strings.HasPrefix(k, "/sys/class/net/"+n.netdev+"/") {
+			delete(h.Files, k)
+		}
+	}
+}
+
+// SetNICMAC changes the MAC a NIC function's interface comes back with the
+// next time its driver binds it (and now, if it is bound).
+func (h *Host) SetNICMAC(bdf, mac string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if n := h.nics[bdf]; n != nil {
+		n.mac = mac
+		if _, ok := h.Files["/sys/class/net/"+n.netdev+"/address"]; ok {
+			h.Files["/sys/class/net/"+n.netdev+"/address"] = []byte(mac + "\n")
+		}
+	}
+}
+
+// LoseNetdev makes a NIC function come back from its next unbind with no
+// network interface at all.
+func (h *Host) LoseNetdev(bdf string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if n := h.nics[bdf]; n != nil {
+		n.lost = true
 	}
 }
 

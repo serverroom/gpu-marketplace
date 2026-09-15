@@ -31,7 +31,10 @@ type Spec struct {
 	GoldenImage string   // the baked rental base image (qcow2)
 	Firmware    Firmware // found by FindFirmware
 	GPUs        []string // primary GPU functions, as PCI addresses
-	Unified     bool     // the GPUs use the machine's memory pool (GB10)
+	// NICs are every PCI function of the machine's ConnectX cards. A linked-pair
+	// rental hands all of them to its VM; a single rental never touches them.
+	NICs    []string
+	Unified bool // the GPUs use the machine's memory pool (GB10)
 	// DesktopOnDemand: a confirmed DGX Spark that was not made headless on
 	// purpose. Its desktop closes while the GPU is rented or tested and comes
 	// back after; on any other machine a desktop on the GPU refuses the rental.

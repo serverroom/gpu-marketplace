@@ -4,13 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"net"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/interconnect"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
+	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/stats"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
@@ -48,6 +52,7 @@ type Finding struct {
 type HostReport struct {
 	Vendor   GPUVendor
 	BDFs     []string
+	Models   []string // GPU model names, as the vendor tool reports them
 	Unified  bool
 	Firmware vmrt.Firmware
 	Reasons  []string
@@ -97,6 +102,7 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	if nv, ok := detectNVIDIA(h); ok {
 		rep.Vendor = VendorNVIDIA
 		rep.BDFs = nv.bdfs
+		rep.Models = nv.names
 		rep.Unified = nv.unified
 		gpuNames = nv.names
 		for _, g := range nv.noMemory {
@@ -187,11 +193,23 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	spec.Firmware = rep.Firmware
 	spec.DesktopOnDemand = rep.DesktopOnDemand
 
+	// The pair checks never change whether this machine can host a single
+	// rental; they only say whether it can also be half of a linked pair.
+	pairOpts := interconnect.Options{GOOS: goos, Arch: arch, Spec: spec, Version: version, GPUModels: rep.Models, RelayAddrs: RelayAddrs}
+	pair := interconnect.Preflight(h, pairOpts)
+	spec.NICs = pair.Functions()
+
 	fence := netguard.New(h, netguard.Bridge, vmrt.GuestSubnet, netguard.HostNetworks)
 	rt := vmrt.New(h, spec, fence, gpuVerifier(h, rep.Vendor, rep.Unified, rep.BDFs))
 	p := New(rt, rep.Vendor, rep.BDFs, rep.Unified)
 	p.runtime = rt
 	p.findings = rep.Findings
+	p.host = h
+	p.dataDir = dataDir
+	p.version = version
+	p.pairOpts = pairOpts
+	p.pair = pair
+	_, ic := pair.Capability(interconnect.RecentPeers(interconnect.LoadPeers(h, dataDir), time.Now().Unix(), pair.PortMACs()))
 	p.capability = control.Capability{
 		Ready:         len(rep.Reasons) == 0,
 		Kind:          KindQEMUVFIO,
@@ -200,8 +218,27 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		UnifiedMemory: rep.Unified,
 		VMUser:        vmrt.VMUser,
 		Identity:      rep.Identity,
+		Interconnect:  ic,
 	}
 	return p
+}
+
+// RelayAddrs resolves the relay this agent tunnels to, so the pair preflight can
+// refuse a ConnectX-7 port that is the host's own route to it. A variable so
+// tests never read this machine's tunnel config or DNS.
+var RelayAddrs = func() []string {
+	cfg, err := register.LoadTunnelConfig()
+	if err != nil || cfg == nil || cfg.RelayHost == "" {
+		return nil
+	}
+	if ip := net.ParseIP(cfg.RelayHost); ip != nil {
+		return []string{ip.String()}
+	}
+	addrs, err := net.LookupHost(cfg.RelayHost)
+	if err != nil {
+		return nil
+	}
+	return addrs
 }
 
 func hostMemoryMB(h vmrt.Host) int {
