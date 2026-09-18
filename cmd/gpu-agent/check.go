@@ -51,10 +51,15 @@ func runCheck(svc service.Service, args []string) {
 	yes := fs.Bool("yes", false, "with --boot: do not ask for confirmation")
 	pair := fs.Bool("pair", false, "check whether this machine can be half of a linked pair of DGX Sparks (read-only); with --boot, run the pair test boot")
 	jsonOut := fs.Bool("json", false, "with --pair: print the identity and interconnect report as JSON")
+	minRDMA := fs.Float64("min-rdma-gbps", vmrt.DefaultMinRDMAGbps, "with --boot --pair: the RDMA write bandwidth every link must reach, in Gb/s")
 	fs.Parse(args)
 
 	if *pair && !*boot {
 		runCheckPair(*jsonOut)
+		return
+	}
+	if *pair {
+		runPairSelfTest(svc, *yes, *minRDMA)
 		return
 	}
 	if *boot {

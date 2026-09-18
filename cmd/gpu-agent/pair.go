@@ -5,10 +5,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/kardianos/service"
+
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/interconnect"
+	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 )
 
 // runCheckPair shows whether this machine can be half of a linked pair: what it
@@ -83,4 +88,80 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// runPairSelfTest runs the pair test boot on this machine; the host runs it on
+// the other machine of the pair within ten minutes. Each finds the other on
+// the cable, both boot a test VM with the GPU and the ConnectX card, the VMs
+// measure every link against each other, and each machine records its verdict.
+func runPairSelfTest(svc service.Service, yes bool, minRDMA float64) {
+	if runtime.GOOS != "linux" {
+		fmt.Fprintln(os.Stderr, "a pair test boot needs a Linux KVM host")
+		os.Exit(1)
+	}
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "check --boot --pair needs root: run 'sudo gpu-agent check --boot --pair'")
+		os.Exit(1)
+	}
+	if minRDMA <= 0 {
+		fmt.Fprintln(os.Stderr, "--min-rdma-gbps must be above 0")
+		os.Exit(1)
+	}
+	p := detectProvisioner()
+	rt := p.Runtime()
+	if rt.Present() {
+		fmt.Fprintln(os.Stderr, "a rental (or the leftover of one) is on this machine; a pair test boot cannot run now")
+		os.Exit(1)
+	}
+	if blockers := p.PairTestBlockers(); len(blockers) > 0 {
+		fmt.Println("This machine cannot run a pair test boot yet:")
+		for _, r := range blockers {
+			fmt.Printf("  - %s\n", r)
+		}
+		os.Exit(2)
+	}
+
+	spec := rt.Spec()
+	fmt.Println("This boots a pair test rental for a few minutes, together with the other machine of the pair:")
+	fmt.Printf("  - run the same command on the other machine within %v; this one waits for it on the ConnectX-7 cable\n", provisioner.PairTestWait)
+	if len(spec.GPUs) > 0 {
+		fmt.Printf("  - the GPU (%s) and the whole ConnectX card are taken from this machine and given to a microVM\n", strings.Join(spec.GPUs, ", "))
+	} else {
+		fmt.Println("  - the whole ConnectX card is taken from this machine and given to a microVM")
+	}
+	fmt.Println("  - the two VMs check every link carries 9000-byte frames and measure RDMA over it; each link must reach")
+	fmt.Printf("    %g Gb/s; the VM also checks what it can reach, like 'check --boot'\n", minRDMA)
+	fmt.Println("  - then it is destroyed, and the GPU and the card are given back and checked")
+	if !yes && !confirm("Run the pair test boot? [y/N]: ") {
+		fmt.Println("Nothing was changed.")
+		return
+	}
+	fmt.Println()
+	fmt.Printf("Waiting for the other machine on the cable (up to %v) ...\n", provisioner.PairTestWait)
+	res, err := p.PairSelfTest(provisioner.PairTestRun{MinRDMAGbps: minRDMA, Found: func(plan interconnect.PairPlan) {
+		fmt.Printf("Found listing %s over %d link(s); this machine is node %s. Booting (the first boot can take several minutes) ...\n",
+			plan.PeerListing, len(plan.Links), plan.Node)
+	}})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pair test boot: %v\n", err)
+		os.Exit(1)
+	}
+	if res.Passed {
+		var links []string
+		for i, mac := range res.LocalMACs {
+			links = append(links, fmt.Sprintf("%s at %.1f Gb/s", mac, res.RDMAGbps[i]))
+		}
+		fmt.Printf("PASSED: node %s, every link carried 9000-byte frames and RDMA: %s.\n", res.Node, strings.Join(links, "; "))
+		if _, err := svc.Status(); err == nil {
+			if err := service.Control(svc, "restart"); err == nil {
+				fmt.Println("The agent service was restarted so it reports this machine as ready for a pair.")
+			}
+		}
+		return
+	}
+	fmt.Println("FAILED:")
+	for _, problem := range res.Problems {
+		fmt.Printf("  - %s\n", problem)
+	}
+	os.Exit(2)
 }

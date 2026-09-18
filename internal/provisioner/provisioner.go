@@ -131,6 +131,8 @@ type Provisioner struct {
 	checking bool
 	frames   sync.WaitGroup
 	now      func() time.Time
+	// pairTest runs the pair test VM; nil means the runtime's own.
+	pairTest func(version string, o vmrt.PairSelfTestOptions) vmrt.PairTestResult
 }
 
 // Withdraw stops this machine hosting: every rental is refused from now on,

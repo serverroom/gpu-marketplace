@@ -17,6 +17,7 @@ type PairTestResult struct {
 	Passed       bool      `json:"passed"`
 	AgentVersion string    `json:"agent_version"`
 	Node         string    `json:"node,omitempty"`
+	PeerListing  string    `json:"peer_listing,omitempty"`
 	LocalMACs    []string  `json:"local_macs"`
 	PeerMACs     []string  `json:"peer_macs"`
 	RDMAGbps     []float64 `json:"rdma_gbps"`

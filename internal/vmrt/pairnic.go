@@ -205,6 +205,19 @@ const guestLogTail = 64 << 10
 // ParseGuestLinks counts a pair VM's link-check markers: for each link index
 // below links, the last "GPUAGENT-LINK ok|fail <i>" said.
 func ParseGuestLinks(log string, links int) (ok, fail int) {
+	for _, v := range GuestLinkStates(log, links) {
+		if v == "ok" {
+			ok++
+		} else {
+			fail++
+		}
+	}
+	return ok, fail
+}
+
+// GuestLinkStates is the last link-check marker for each link below links:
+// link index -> "ok" or "fail".
+func GuestLinkStates(log string, links int) map[int]string {
 	last := map[int]string{}
 	for _, raw := range strings.Split(log, "\n") {
 		i := strings.Index(raw, markLink+" ")
@@ -221,14 +234,7 @@ func ParseGuestLinks(log string, links int) (ok, fail int) {
 		}
 		last[n] = f[0]
 	}
-	for _, v := range last {
-		if v == "ok" {
-			ok++
-		} else {
-			fail++
-		}
-	}
-	return ok, fail
+	return last
 }
 
 // PairRental is the pair rental on this machine and what its guest has said

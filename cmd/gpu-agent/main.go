@@ -522,6 +522,8 @@ func printUsage() {
 	fmt.Println("  install          Install as a system service")
 	fmt.Println("  check            Check whether this machine can host a rental, and what a tenant is fenced off from (--rules)")
 	fmt.Println("  check --boot     Boot a real test rental with the GPU passed through and record the result")
+	fmt.Println("  check --pair     Check whether this machine can be half of a linked pair of DGX Sparks (--json)")
+	fmt.Println("  check --boot --pair  Run the pair test boot with the other machine of the pair (--min-rdma-gbps, --yes)")
 	fmt.Println("  setup            Finish this machine's setup now, with output (the agent does it by itself after linking)")
 	fmt.Println("  setup --status   Show the last setup attempt and whether the automatic setup is on")
 	fmt.Println("  setup --off|--on Turn the automatic setup off or back on")

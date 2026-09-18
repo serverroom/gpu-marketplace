@@ -340,3 +340,78 @@ func TestPairStatusReadsTheGuestsLinkCheck(t *testing.T) {
 		t.Errorf("pair status = %+v", ps)
 	}
 }
+
+func fastPairTest(t *testing.T) {
+	fastFrames(t)
+	wait, settle := PairTestWait, interconnect.PeerSettle
+	PairTestWait, interconnect.PeerSettle = 2*time.Second, 30*time.Millisecond
+	t.Cleanup(func() { PairTestWait, interconnect.PeerSettle = wait, settle })
+}
+
+// Both machines run the pair test: each finds the other, they agree on one
+// plan, and each boots its half with the whole card and every other port named.
+func TestPairTestFindsTheOtherMachineAndAgrees(t *testing.T) {
+	fastPairTest(t)
+	a, b, _ := sparkPair(t)
+	var got [2]vmrt.PairSelfTestOptions
+	for i, p := range []*Provisioner{a, b} {
+		i := i
+		p.pairTest = func(version string, o vmrt.PairSelfTestOptions) vmrt.PairTestResult {
+			got[i] = o
+			return vmrt.PairTestResult{Passed: true, AgentVersion: version, Node: o.Pair.Node}
+		}
+	}
+	var ra, rb vmrt.PairTestResult
+	var ea, eb error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); ra, ea = a.PairSelfTest(PairTestRun{MinRDMAGbps: 100}) }()
+	go func() { defer wg.Done(); rb, eb = b.PairSelfTest(PairTestRun{MinRDMAGbps: 100}) }()
+	wg.Wait()
+	if ea != nil || eb != nil || !ra.Passed || !rb.Passed {
+		t.Fatalf("A %+v %v / B %+v %v", ra, ea, rb, eb)
+	}
+	oa, ob := got[0], got[1]
+	if oa.ID != ob.ID || oa.Pair.Node != "a" || ob.Pair.Node != "b" || oa.PeerListing != listingB || ob.PeerListing != listingA {
+		t.Fatalf("plans: %+v / %+v", oa, ob)
+	}
+	if strings.Join(oa.Pair.Functions, " ") != strings.Join(sparkNICs, " ") || len(oa.Pair.Links) != 2 || oa.Pair.MTU != 9000 || oa.MinRDMAGbps != 100 {
+		t.Errorf("A's half = %+v", oa.Pair)
+	}
+	// The other machine is on the peer list now.
+	if peers := a.Capability().Interconnect.Peers; len(peers) != 2 || peers[0].ListingID != listingB {
+		t.Errorf("A's peers = %+v", peers)
+	}
+}
+
+func TestPairTestRefusalsAndFailures(t *testing.T) {
+	fastPairTest(t)
+	a, _, _ := sparkPair(t)
+	a.pairTest = func(string, vmrt.PairSelfTestOptions) vmrt.PairTestResult {
+		t.Fatal("a test VM booted")
+		return vmrt.PairTestResult{}
+	}
+	// Nobody on the other end: a recorded failure.
+	PairTestWait = 100 * time.Millisecond
+	res, err := a.PairSelfTest(PairTestRun{})
+	if err != nil || res.Passed || !strings.Contains(strings.Join(res.Problems, " "), "no other agent answered") {
+		t.Fatalf("res %+v err %v", res, err)
+	}
+	if saved, _ := vmrt.LoadPairTest(a.host, dataDir); saved == nil || saved.Passed || saved.MinRDMAGbps != vmrt.DefaultMinRDMAGbps {
+		t.Errorf("not recorded: %+v", saved)
+	}
+	if a.Capability().Interconnect.Ready {
+		t.Errorf("still ready for a pair after a failed pair test")
+	}
+
+	// Something that has to be fixed first: nothing runs, nothing is recorded.
+	h := a.host.(*fakehost.Host)
+	h.Outputs["ip -j addr show dev enP1p1s0f0np0"] = `[{"addr_info":[{"family":"inet","local":"10.9.9.9","prefixlen":24}]}]`
+	delete(h.Files, vmrt.PairTestPath(dataDir))
+	if _, err := a.PairSelfTest(PairTestRun{}); !errors.Is(err, ErrPairTestBlocked) || !strings.Contains(err.Error(), "10.9.9.9") {
+		t.Errorf("err = %v", err)
+	}
+	if saved, _ := vmrt.LoadPairTest(a.host, dataDir); saved != nil {
+		t.Errorf("a blocked test recorded %+v", saved)
+	}
+}
