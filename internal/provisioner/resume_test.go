@@ -112,6 +112,7 @@ func TestSetCapabilityNeverMakesAMachineReady(t *testing.T) {
 // While the automatic setup runs, the only VM on the machine is its own: no
 // rental starts, and a teardown does not reach the setup's VM.
 func TestSettingUpRefusesProvisionAndTeardown(t *testing.T) {
+	withFakeForward(t, nil) // no real listener left behind on the SSH port
 	m := &fakeMachine{}
 	p := readyProv(m)
 	if !p.BeginSetup() || p.BeginSetup() {
