@@ -285,9 +285,18 @@ func isAgentChild(h Host, pid string) bool {
 
 // gpuHolders are the host processes with an NVIDIA device open, as
 // "name (pid N)", other than NVIDIA's own services (the runtime stops those
-// itself): the machine's desktop, short-lived tools, and everything else.
+// itself): the machine's desktop (its display server and shell by name, and
+// everything running in a graphical login -- session.go), short-lived tools,
+// and everything else.
 type gpuHolders struct {
 	desktop, transient, other []string
+}
+
+// all is every holder.
+func (g gpuHolders) all() []string {
+	all := append(append([]string{}, g.desktop...), g.busy()...)
+	sort.Strings(all)
+	return all
 }
 
 // busy is every holder that is not the desktop.
@@ -301,6 +310,7 @@ func readGPUHolders(h Host) gpuHolders {
 	var g gpuHolders
 	fds, _ := h.Glob("/proc/[0-9]*/fd/*")
 	seen := map[string]bool{}
+	sess := newSessions(h)
 	for _, fd := range fds {
 		target, err := h.Readlink(fd)
 		if err != nil || !strings.HasPrefix(target, "/dev/nvidia") {
@@ -320,11 +330,15 @@ func readGPUHolders(h Host) gpuHolders {
 			continue
 		}
 		seen[who] = true
+		// Short-lived tools before the session: an nvidia-smi typed in a
+		// terminal on the desktop is waited for, not taken for the desktop.
 		switch {
 		case IsDesktopProcess(name):
 			g.desktop = append(g.desktop, who)
 		case IsTransientTool(name) || isAgentChild(h, pid):
 			g.transient = append(g.transient, who)
+		case sess.desktop(pid):
+			g.desktop = append(g.desktop, who)
 		default:
 			g.other = append(g.other, who)
 		}

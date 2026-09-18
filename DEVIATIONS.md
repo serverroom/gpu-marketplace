@@ -72,33 +72,51 @@ made asynchronous) and the transient `nvidia-smi` holder fix.
     (sys_vendor, product_name, product_family, confirmed_dgx_spark). The linked-pairs
     branch also has board_name and reason; merging it later only adds fields.
 
+16. **What counts as the desktop is decided by login session, not only by name**
+    (review fix): a GPU holder is the desktop when its cgroup is a graphical login's
+    `session-<N>.scope` (logind Type x11/wayland/mir, or Class greeter), an app unit under
+    `user@<uid>.service` of a user with such a login, or a descendant of the display
+    manager's main PID. So a Spark with browsers open is rented without a step. Order of
+    classification: desktop by name, then short-lived tools (an `nvidia-smi` in a desktop
+    terminal is still waited for on a workstation whose desktop is on another GPU), then
+    session, then everything else. On a Spark with its desktop up, the short-lived wait is
+    skipped: stopping the display manager takes those with it, and the wait afterwards
+    (30 s, a look every second) is for every holder. A holder outside any login is refused
+    before the desktop is touched; one still there after the desktop closed is named, the
+    display manager started again, and the start refused with "the GPU is still in use on
+    this machine by ... after its desktop was closed; the desktop is back" rather than the
+    `--headless` hint (a Spark host is not asked to do anything). Non-Spark hosts keep the
+    `--headless` refusal, now naming the desktop's apps too.
+17. **README tells hosts to save open work on a listed Spark** (its desktop closes during
+    test boots and rentals); the panel's test-boot line already says the desktop closes.
+
 ## Transient GPU holders (added during the build)
 
-16. **"Children of the gpu-agent process" is read as children of any gpu-agent process**
+18. **"Children of the gpu-agent process" is read as children of any gpu-agent process**
     (parent is this process, or a process whose executable is gpu-agent), so a
     `gpu-agent status` a person runs during a start does not fail it.
-17. **The stats pause waits at most 10 s** for a running query: a hung nvidia-smi must not
+19. **The stats pause waits at most 10 s** for a running query: a hung nvidia-smi must not
     hang a rental start. While paused, stats answer with the last GPUs read.
 
 ## Host controls, section A (added during the build)
 
-18. **`/update` is asynchronous** (the coordinator's change): statuses
+20. **`/update` is asynchronous** (the coordinator's change): statuses
     downloading -> verifying -> restarting -> ok | failed | rolled_back; the record stays
     "restarting" until the check 3 minutes later. A bad version string is 400 (the
     contract names no code); an update in progress blocks another for up to 10 minutes.
-19. **The rollback check is the previous binary**: `gpu-agent.prev update-check --to vX
+21. **The rollback check is the previous binary**: `gpu-agent.prev update-check --to vX
     --binary <path>` from a transient timer; the new binary may be the broken one. Unit
     names carry a timestamp and `--collect`, so a leftover unit never blocks the next
     update. Besides "service not active" and "binary reports another version", a service
     still running the replaced binary (`/proc/<MainPID>/exe` ends in " (deleted)") counts
     as not restarted and is rolled back.
-20. **The `-version` check requires the binary's exact output**, `gpu-agent vX.Y.Z`.
-21. **Withdrawn also closes the control channel**, and an agent that starts withdrawn
+22. **The `-version` check requires the binary's exact output**, `gpu-agent vX.Y.Z`.
+23. **Withdrawn also closes the control channel**, and an agent that starts withdrawn
     still runs its crash-resume teardown (so a Spark gets its desktop back) but nothing
     else. `gpu-agent remove` on a withdrawn machine revokes best-effort and reports the
     listing as already removed instead of "NOT withdrawn".
 
 ## Small things
 
-22. `Prepare` and `Stop` now name the last serial log the same way (a Windows-only test
+24. `Prepare` and `Stop` now name the last serial log the same way (a Windows-only test
     mismatch); `fakehost` gained OnSleep/SetLink/DeleteLink/Count/SleptFor for the tests.

@@ -103,8 +103,8 @@ func TestSparkDesktopThatWillNotLetGoIsRefusedAndRestarted(t *testing.T) {
 	delete(h.OnRun, "systemctl stop "+dm) // the desktop keeps the GPU open
 	rt, _ := sparkRuntime(h, nil)
 	err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)})
-	if err == nil || !strings.Contains(err.Error(), "desktop is running on the GPU") || !strings.Contains(err.Error(), "Xorg (pid 2558)") {
-		t.Fatalf("Start = %v, want the usual desktop refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "still in use on this machine by Xorg (pid 2558)") || !strings.Contains(err.Error(), "the desktop is back") {
+		t.Fatalf("Start = %v, want a refusal naming what still holds the GPU", err)
 	}
 	before(t, h, "run systemctl stop "+dm, "run systemctl start "+dm)
 	if h.SleptFor() < DesktopReleaseTimeout {

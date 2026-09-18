@@ -190,24 +190,26 @@ func (rt *Runtime) takeGPUs(st *State, r *Rental, save func() error) error {
 	if len(g.desktop) > 0 && !rt.spec.DesktopOnDemand {
 		return errors.New(DesktopOnGPUProblem(g.desktop))
 	}
+	// Anything outside the desktop that is not short-lived: refused before the
+	// desktop is touched, for a rental that could not start anyway.
 	if len(g.other) > 0 {
 		return gpuInUse(g.busy())
 	}
-	// Short-lived tools (an nvidia-smi) are given a moment to exit.
-	g = settleGPUHolders(rt.h)
-	if busy := g.busy(); len(busy) > 0 {
-		return gpuInUse(busy)
-	}
-	// A DGX Spark's desktop closes for the rental and comes back after it.
-	if len(g.desktop) > 0 {
-		if !rt.spec.DesktopOnDemand {
+	if len(g.desktop) == 0 {
+		// Short-lived tools (an nvidia-smi) are given a moment to exit.
+		g = settleGPUHolders(rt.h)
+		if busy := g.busy(); len(busy) > 0 {
+			return gpuInUse(busy)
+		}
+		if len(g.desktop) > 0 && !rt.spec.DesktopOnDemand {
 			return errors.New(DesktopOnGPUProblem(g.desktop))
 		}
+	}
+	// A DGX Spark's desktop closes for the rental and comes back after it --
+	// with everything in it, a tool typed in its terminal included.
+	if len(g.desktop) > 0 {
 		if err := rt.releaseDesktop(st, g.desktop, save); err != nil {
 			return err
-		}
-		if busy := settleGPUHolders(rt.h).busy(); len(busy) > 0 {
-			return gpuInUse(busy)
 		}
 	}
 	// NVIDIA's own services are stopped for the rental and started again when

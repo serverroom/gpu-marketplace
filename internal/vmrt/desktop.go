@@ -2,6 +2,7 @@ package vmrt
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -52,9 +53,10 @@ func ActiveDisplayManager(h Host) string {
 
 // releaseDesktop closes the desktop so it lets go of the GPU: it records the
 // display manager in the rental state first (so a crash at any later point
-// still starts it again), stops it, and waits up to DesktopReleaseTimeout for
-// the desktop's processes to close their GPU devices. If they do not, it
-// starts the display manager again and refuses with the usual message.
+// still starts it again), stops it -- which ends the graphical logins, and
+// the programs in them -- and waits up to DesktopReleaseTimeout for every
+// holder of the GPU to let go, looking again each second. If something still
+// holds it, it starts the display manager again and refuses, naming what.
 func (rt *Runtime) releaseDesktop(st *State, desktop []string, save func() error) error {
 	unit := ActiveDisplayManager(rt.h)
 	if unit == "" {
@@ -71,13 +73,14 @@ func (rt *Runtime) releaseDesktop(st *State, desktop []string, save func() error
 		return errors.New(DesktopOnGPUProblem(desktop))
 	}
 	for waited := time.Duration(0); ; waited += desktopPoll {
-		left, _ := ClassifyGPUHolders(rt.h)
+		left := readGPUHolders(rt.h).all()
 		if len(left) == 0 {
 			return nil
 		}
 		if waited >= DesktopReleaseTimeout {
 			rt.restoreDesktop(st, save)
-			return errors.New(DesktopOnGPUProblem(left))
+			return fmt.Errorf("the GPU is still in use on this machine by %s after its desktop was closed; "+
+				"the desktop is back. Stop them first", strings.Join(left, ", "))
 		}
 		rt.h.Sleep(desktopPoll)
 	}

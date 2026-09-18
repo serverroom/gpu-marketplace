@@ -197,13 +197,20 @@ lists it again (the record, `/var/lib/gpu-agent/withdrawn.json`, is cleared).
 A DGX Spark draws its desktop on its only GPU, the GB10. On a machine the agent
 confirms as a DGX Spark (Linux on arm64, DMI vendor NVIDIA, product "DGX Spark", a GB10
 GPU), the desktop is not a reason to refuse a rental: **the desktop closes while the
-Spark is rented or running its test rental, and comes back after.** The agent stops the
-display manager (`display-manager.service`, or `gdm3`), waits up to 30 seconds for the
-desktop to let go of the GPU, and starts the display manager again once the GPU is back
-with its driver — also after an agent crash or a reboot in the middle of a rental.
-Anything open on the Spark's screen closes with the desktop, so do not keep unsaved work
-on it while it is listed. If the desktop does not let go, the display manager is started
-again and the rental is refused. A Spark made headless on purpose
+Spark is rented or running its test rental, and comes back after.** Nothing to do: the
+desktop counts as everything running in a graphical login — the display server and shell,
+and the browsers and other apps open on it (the agent asks systemd and logind where each
+program using the GPU runs). The agent stops the display manager (`display-manager.service`,
+or `gdm3`), which ends those logins, waits up to 30 seconds for every program to let go of
+the GPU, and starts the display manager again once the GPU is back with its driver — also
+after an agent crash or a reboot in the middle of a rental. If something outside the
+desktop holds the GPU (a container's job), the rental is refused before the desktop is
+touched; if something still holds it after the desktop closed, the display manager is
+started again and the rental is refused, naming what holds it.
+
+**Save open work on a listed Spark:** its desktop, with everything open on it, closes
+during its test rentals and its rentals, and anything unsaved is lost. The control panel
+says so while a test runs. A Spark made headless on purpose
 (`runtime prepare --headless`) is left headless. The capability the agent reports carries
 the raw DMI strings (`identity`) so the match can be checked.
 
