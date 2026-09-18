@@ -25,7 +25,9 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
-var version = "dev"
+// version is set from the release tag at build time (-ldflags -X
+// main.version=...); a build from source says what it is on the way to.
+var version = "v0.2.0-dev"
 
 type gpuAgent struct {
 	cfg          *config.Config

@@ -147,3 +147,103 @@ made asynchronous) and the transient `nvidia-smi` holder fix.
   `runtime prepare --headless` (item 25), and the late restart timer (item 26).
 - Not yet on real hardware: anything DGX Spark (DMI match, desktop closing with its apps,
   GB10 handover), and the session-based desktop classification (325c3c9).
+
+# gpu-agent v0.2.0: where the implementation differs from the contracts
+
+Branch `linked-pairs` (v0.2.0-dev). Contracts: CONTRACT.md (s3 agent API), CONTRACT-v2.md (s1 CPU-only),
+DESIGN.md (reasoning). Everything not listed here is implemented as written.
+
+## Peer discovery (CONTRACT s3.1)
+
+1. **Announcements run on fixed UTC slots, not "every 6 h from start".** A cable carries frames only while
+   BOTH ends are up, and the agent keeps its ports down between runs, so two agents announcing 5 s every 6 h
+   from their own start times would practically never overlap. Every agent announces at 00:00, 06:00, 12:00
+   and 18:00 UTC (clock-synchronised machines hit the slot within a second of each other) and once at start.
+2. **A cable check that proves the peer also records it** in peers.json (the strongest sighting there is), so
+   a pair the control plane re-checks daily keeps its mutual peers fresh even if a slot is missed.
+
+## /link/verify (CONTRACT s3.2)
+
+3. **Classification details the contract leaves open** (all fail closed or are neutral):
+   - Frames from this machine's own ConnectX MACs are ignored (a multi-function NIC can echo one function's
+     frames to another); they are neither peer nor foreign.
+   - Ordinary (non-agent) frames from a source MAC that also sent authentic GPUAGENT-LINK1 frames for the
+     peer are not reported as `foreign_src` (e.g. a last IPv6 neighbour-discovery packet as the peer's IPv6
+     goes off). DESIGN s4.3 says "everything else -> foreign source MAC"; this narrows it to sources not
+     proven to be the peer. A switch still gives itself away by its own STP/LLDP/other hosts' traffic.
+   - The peer's own GPUAGENT-HELLO1 announcements (its slot can overlap a check) are ignored; a HELLO1 from
+     any other listing is a third machine and is reported in `foreign_src`.
+   - An authentic LINK1 frame naming a listing other than the peer is reported in `peer_frames` with that
+     listing, so the control plane's EvaluateLink refuses it as a third machine.
+   - The HMAC key is the challenge's 32 hex characters as ASCII bytes.
+4. **Only preflight-eligible ports are touched and reported** (no host address/route, not bonded, not the
+   management route, not NetworkManager's/netplan's, no RDMA users). A port the host uses is never brought
+   up or down by a check. The raw sockets are promiscuous per socket (PACKET_MR_PROMISC membership, dropped
+   with the socket), so STP and foreign unicast are seen without changing the interface.
+5. **Extra refusals:** 400 when `self` is not this machine's listing id (a misrouted check); 503 when this
+   agent cannot run the check at all; 500 when the ports could not be opened or put back.
+
+## /pair/provision (CONTRACT s3.2)
+
+6. **Strict body:** unknown JSON fields are refused with 400 on /pair/provision and /link/verify (the reason
+   /pair/provision exists is that /provision silently ignores fields). The control plane must send only the
+   contract's fields.
+7. **Stricter validation than the contract lists:** `peer_hostname` must be the other half of THIS rental
+   (`gpu-<same 8 hex>-<other node>`), the rental id must give a `gpu-<8 lowercase hex>` name (UUIDs do),
+   `intra_key.public` must be ssh-ed25519 and `intra_key.private_openssh` an unencrypted OpenSSH ed25519 key
+   whose public half matches (it is re-encoded canonically before it reaches the guest).
+8. **409 also** for a machine that is not free or has a cable check running (the contract names 409 only for
+   an unknown local MAC). 503 also when the pair preflight, re-run at request time, is not clean.
+
+## Pair guest (DESIGN s5.2)
+
+9. **/etc/hosts**: this machine's own name maps to its own first-link address (DESIGN: `127.0.1.1`), and
+   per-link names count from 1: `<name>-l1`, `<name>-l2` (DESIGN: `-l<i>` from 0). Requested by the website
+   track: the renter's page tells them to `ping -c 3 gpu-<8>-b` on machine a, which must resolve over the
+   cable. Interface names stay `cx7p0`, `cx7p1` (from 0, as DESIGN).
+10. **Unverified ConnectX ports** get `match` + `set-name` + `link-local: []` + `optional: true` (DESIGN: only
+    match + set-name), so they neither get an address nor hold the first boot.
+11. **The link check runs as its own unit** (`systemd-run --unit=gpuagent-linkcheck --no-block` from runcmd), so
+    the first boot is not held for up to 10 minutes while it waits for the other machine.
+12. **The intra-pair key files** are written base64-encoded with cloud-init `defer: true` (after root's SSH
+    directory exists).
+
+## Teardown (DESIGN s5.4)
+
+13. `StopResult.NICDirty` (true = the card did not verify) instead of DESIGN's `NICClean`, so every existing
+    `StopResult{Wiped: true, GPUClean: true}` keeps meaning clean. `Clean() = Wiped && GPUClean && !NICDirty`.
+
+## Pair test boot (DESIGN s5.6, CONTRACT s3.2 CLI)
+
+14. **The per-test intra key is a throwaway made on each machine**, not one shared key: the two agents have no
+    channel to share a secret before their VMs exist. It exercises the key path of the seed; the test VMs do
+    not log in to each other (the RDMA test does not need it).
+15. **RDMA:** `ib_write_bw -R` (RDMA CM picks the device and GID; no `-d`/`-x`), 5 s per link, node a serves and
+    node b connects on port 18515+i, one link at a time. Markers are `RDMA <i> <Gb/s>` and `RDMAFAIL <i> <why>`
+    (DESIGN: `RDMA <gbps>` without the link index).
+16. **The verdict also requires the rental's own link check** (`GPUAGENT-LINK ok <i>`) on every link.
+17. **At most two links are tested** (the first two by node a's MAC, as the control plane's GuestLinks numbers
+    a rental's), matching /pair/provision's 1..2 links.
+18. **A test that finds no peer is recorded as a failed pair test** (like a failed single test boot), which
+    takes interconnect.ready away until the test passes again. A test that cannot start at all (blocked by
+    other problems, a rental present, another check running) records nothing.
+
+## CPU-only (CONTRACT-v2 s1)
+
+19. **`gpu_count` is reported on Linux only** (`*int`, omitted on macOS/Windows) and `kind` stays `qemu-vfio`
+    there: ServCast treats an explicit `gpu_count: 0` as a machine without a GPU, and a Mac or Windows machine
+    cannot host at all. On Linux: `kind` "qemu" and `gpu_count` 0 without a GPU.
+20. **An NVIDIA GPU on the PCI bus that nvidia-smi does not see is refused**, not hosted as CPU-only (it would
+    rent out a GPU machine without its GPU). AMD GPUs are detected by rocm-smi only, as before: an AMD GPU
+    without ROCm is treated as no GPU (so a Ryzen's integrated GPU does not block CPU-only hosting).
+21. **`runtime prepare` driver:** with no `--driver`, the default branch on a machine with an NVIDIA GPU
+    (nvidia-smi or PCI) and none otherwise -- which includes AMD GPU hosts, which earlier versions baked the
+    (useless there) NVIDIA driver for. `--driver none` is accepted too.
+
+## Not a deviation, but changed
+
+- `TestPreflightNoKVMNoIOMMUNoGPU` asserted that a bare machine is refused for having no GPU and no IOMMU.
+  CONTRACT-v2 reverses that; the test now asserts the opposite for a GPU-less machine and keeps the IOMMU
+  refusal for a machine with a GPU.
+- `rentalDiskGB` looped forever on Windows when the data directory did not exist (`filepath.Dir` of the root is
+  the root there, never "/"). Found by a new test; fixed to stop at the root on any OS. No effect on Linux.
