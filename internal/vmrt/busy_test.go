@@ -98,7 +98,8 @@ func TestSetupVMIsOrphanedUnlessItsProcessLives(t *testing.T) {
 	if present, _ := rt.SetupVM(); present {
 		t.Error("a rental taken for a setup VM")
 	}
-	for id, want := range map[string]bool{"bake": true, "selftest-1726600000": true, "R1": false, "bakery": false} {
+	for id, want := range map[string]bool{"bake": true, "selftest-1726600000": true, "1a2b3c4d-pairtest": true,
+		"R1": false, "bakery": false, "1a2b3c4d-0000-4000-8000-000000000001": false} {
 		if IsSetupID(id) != want {
 			t.Errorf("IsSetupID(%q) = %v", id, !want)
 		}

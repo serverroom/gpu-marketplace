@@ -11,9 +11,12 @@ import (
 
 	"github.com/kardianos/service"
 
+	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/interconnect"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
+	"github.com/serverroom/gpu-marketplace/internal/register"
+	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
 // runCheckPair shows whether this machine can be half of a linked pair: what it
@@ -107,6 +110,10 @@ func runPairSelfTest(svc service.Service, yes bool, minRDMA float64) {
 		fmt.Fprintln(os.Stderr, "--min-rdma-gbps must be above 0")
 		os.Exit(1)
 	}
+	if register.LoadWithdrawn() != nil {
+		fmt.Println(register.WithdrawnMessage)
+		os.Exit(2)
+	}
 	p := detectProvisioner()
 	rt := p.Runtime()
 	if rt.Present() {
@@ -126,6 +133,9 @@ func runPairSelfTest(svc service.Service, yes bool, minRDMA float64) {
 	fmt.Printf("  - run the same command on the other machine within %v; this one waits for it on the ConnectX-7 cable\n", provisioner.PairTestWait)
 	if len(spec.GPUs) > 0 {
 		fmt.Printf("  - the GPU (%s) and the whole ConnectX card are taken from this machine and given to a microVM\n", strings.Join(spec.GPUs, ", "))
+		if spec.DesktopOnDemand {
+			fmt.Println("  - this machine's desktop closes for the test (anything open on its screen closes with it) and comes back after it")
+		}
 	} else {
 		fmt.Println("  - the whole ConnectX card is taken from this machine and given to a microVM")
 	}
@@ -136,12 +146,21 @@ func runPairSelfTest(svc service.Service, yes bool, minRDMA float64) {
 		fmt.Println("Nothing was changed.")
 		return
 	}
+	// The machine is this command's for the test: the agent's automatic setup,
+	// an update or another test boot waits for it, and an agent restart leaves
+	// its VM alone.
+	release, err := vmrt.AcquireBusy(vmrt.OSHost{}, config.DataDir(), os.Getpid(), "running a pair test boot")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v; 'gpu-agent setup --status' shows where it is\n", err)
+		os.Exit(1)
+	}
 	fmt.Println()
 	fmt.Printf("Waiting for the other machine on the cable (up to %v) ...\n", provisioner.PairTestWait)
 	res, err := p.PairSelfTest(provisioner.PairTestRun{MinRDMAGbps: minRDMA, Found: func(plan interconnect.PairPlan) {
 		fmt.Printf("Found listing %s over %d link(s); this machine is node %s. Booting (the first boot can take several minutes) ...\n",
 			plan.PeerListing, len(plan.Links), plan.Node)
 	}})
+	release()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pair test boot: %v\n", err)
 		os.Exit(1)

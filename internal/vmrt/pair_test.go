@@ -516,3 +516,27 @@ func TestPairHostsResolveOverTheCable(t *testing.T) {
 		}
 	}
 }
+
+// A pair rental on a DGX Spark whose desktop is up: the desktop closes for the
+// GPU as for any rental, the card goes after the GPU, and at the end both come
+// back and the desktop returns.
+func TestPairRentalOnASparkClosesItsDesktop(t *testing.T) {
+	h := sparkHost()
+	h.NIC(nic0, "enP1p1s0f0np0", nicMAC0, "MT2412X00001", nic0)
+	h.NIC(nic1, "enP1p1s0f1np1", nicMAC1, "MT2412X00001", nic1)
+	rt, _ := sparkRuntime(h, func() bool { return true })
+	p := goodPair(t)
+	p.OtherMACs = nil
+	if err := rt.Start(StartOptions{ID: pairID, Pubkey: key(t), Pair: p}); err != nil {
+		t.Fatalf("Start = %v", err)
+	}
+	before(t, h, "run systemctl stop "+dm, "write /sys/bus/pci/devices/"+testGPU+"/driver_override")
+	before(t, h, "write /sys/bus/pci/devices/"+testGPU+"/driver_override", "write /sys/bus/pci/devices/"+nic0+"/driver_override")
+	before(t, h, "write /sys/bus/pci/devices/"+nic1+"/driver_override", "run systemd-run")
+	if res := rt.Stop(); !res.Clean() {
+		t.Fatalf("Stop = %+v", res)
+	}
+	if !h.Ran("run systemctl start "+dm) || h.Driver(nic0) != "mlx5_core" || h.Driver(testGPU) != "nvidia" {
+		t.Errorf("desktop back=%v nic0=%s gpu=%s", h.Ran("run systemctl start "+dm), h.Driver(nic0), h.Driver(testGPU))
+	}
+}

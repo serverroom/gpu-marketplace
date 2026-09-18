@@ -115,6 +115,9 @@ func TestPairTestWithNobodyOnTheCable(t *testing.T) {
 
 func TestPairTestRefusesASwitch(t *testing.T) {
 	settleFast(t)
+	// Long enough that every machine on the switch is heard even on a busy
+	// test runner.
+	interconnect.PeerSettle = 300 * time.Millisecond
 	a, b, w := cabled()
 	third := sparkSide("58:a2:e1:00:07:0")
 	// All of A's port 0, B's port 0 and a third machine on one switch.
@@ -123,9 +126,10 @@ func TestPairTestRefusesASwitch(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = interconnect.FindPeer(third.h, w.Opener("C"), third.ports[:1], "listing-c", 300*time.Millisecond, own(third), "")
+		_, _ = interconnect.FindPeer(third.h, w.Opener("C"), third.ports[:1], "listing-c", 2*time.Second, own(third), "")
 	}()
-	ra, _ := findBoth(a, b, w, 300*time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // the third machine is already on the switch
+	ra, _ := findBoth(a, b, w, 2*time.Second)
 	wg.Wait()
 	if ra.err == nil || !strings.Contains(ra.err.Error(), "more than one other machine") {
 		t.Fatalf("err = %v", ra.err)

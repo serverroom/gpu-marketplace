@@ -57,6 +57,14 @@ func (p *Provisioner) beginFrames() (func(), error) {
 	}
 	p.mu.Lock()
 	switch {
+	case p.withdrawn:
+		p.mu.Unlock()
+		unlock()
+		return nil, control.Unavailable("this machine was removed from the marketplace")
+	case p.settingUp:
+		p.mu.Unlock()
+		unlock()
+		return nil, control.Conflict("the agent is setting this machine up; the cable is checked once that has finished")
 	case p.status != StatusFree:
 		status := p.status
 		p.mu.Unlock()
@@ -191,7 +199,7 @@ func (p *Provisioner) DiscoverPeers() (ran, changed bool, err error) {
 		return false, false, nil
 	}
 	p.mu.Lock()
-	busy := p.status != StatusFree || p.checking
+	busy := p.status != StatusFree || p.checking || p.settingUp || p.withdrawn
 	p.mu.Unlock()
 	if busy || p.machine.Present() {
 		return false, false, nil

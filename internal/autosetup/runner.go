@@ -192,7 +192,11 @@ func (r *Runner) step(ctx context.Context, s Step, a Attempt) error {
 		if !res.Passed {
 			return fmt.Errorf("the test boot failed: %s", strings.Join(res.Problems, "; "))
 		}
-		r.log("Test boot passed: the VM saw %s.", strings.Join(res.GuestGPUs, "; "))
+		if len(res.GuestGPUs) > 0 {
+			r.log("Test boot passed: the VM saw %s.", strings.Join(res.GuestGPUs, "; "))
+		} else {
+			r.log("Test boot passed.")
+		}
 		return nil
 	}
 	return fmt.Errorf("unknown setup step %q", s)

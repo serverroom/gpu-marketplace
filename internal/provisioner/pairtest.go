@@ -35,10 +35,13 @@ var ErrPairTestBlocked = errors.New("this machine cannot run a pair test boot ye
 // staging machine that is not a Spark still proves the runtime).
 func (p *Provisioner) PairTestBlockers() []string {
 	var out []string
-	for _, r := range p.Capability().Reasons {
-		if !strings.Contains(r, "check --boot") {
-			out = append(out, r)
+	for _, f := range p.Findings() {
+		if f.Kind != ReasonTestBoot {
+			out = append(out, f.Text)
 		}
+	}
+	if p.Withdrawn() {
+		out = append(out, "this machine was removed from the marketplace")
 	}
 	if p.host == nil {
 		return append(out, "this agent has no pair runtime on this machine")

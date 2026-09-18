@@ -434,3 +434,38 @@ func TestRecoverPortsLeavesARunningTestAlone(t *testing.T) {
 		t.Errorf("not recovered: %v", h.Calls)
 	}
 }
+
+// While the automatic setup works on the machine, or after it was removed from
+// the marketplace, nothing puts frames on the cable and no pair rental starts.
+func TestCableAndPairRentalsWaitForTheSetupAndStopWhenWithdrawn(t *testing.T) {
+	fastFrames(t)
+	a, _, w := sparkPair(t)
+	req := control.LinkVerifyRequest{Challenge: challenge, Self: listingA, Peer: listingB}
+	pr := pairRequest("58:a2:e1:00:00:01")
+	pr.RenterPubkey = renterKey(t)
+
+	if !a.BeginSetup() {
+		t.Fatal("setup did not begin")
+	}
+	if _, err := a.LinkVerify(req); code(err) != http.StatusConflict {
+		t.Errorf("cable check during the setup: %v", err)
+	}
+	if ran, _, _ := a.DiscoverPeers(); ran {
+		t.Errorf("peer announcement during the setup")
+	}
+	if err := a.PairProvision(pr); code(err) != http.StatusServiceUnavailable {
+		t.Errorf("pair rental during the setup: %v", err)
+	}
+	a.EndSetup()
+
+	a.Withdraw("removed")
+	if _, err := a.LinkVerify(req); code(err) != http.StatusServiceUnavailable {
+		t.Errorf("cable check on a withdrawn machine: %v", err)
+	}
+	if ran, _, _ := a.DiscoverPeers(); ran {
+		t.Errorf("peer announcement on a withdrawn machine")
+	}
+	if len(w.Opened()) != 0 {
+		t.Errorf("sockets opened: %v", w.Opened())
+	}
+}

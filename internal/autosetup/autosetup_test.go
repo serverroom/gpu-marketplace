@@ -122,11 +122,18 @@ func newRig(t *testing.T, h *fakehost.Host) *rig {
 				image(h, "resolute-server-cloudimg-amd64.img", drv.Driver)
 				return nil
 			},
-			TestBoot: func(context.Context, *vmrt.Runtime) vmrt.SelfTestResult {
+			TestBoot: func(_ context.Context, rt *vmrt.Runtime) vmrt.SelfTestResult {
 				if err := r.did(StepTestBoot); err != nil {
 					return vmrt.SelfTestResult{Problems: []string{err.Error()}}
 				}
-				passed(h, version)
+				// The test boot records the GPUs the runtime passed through
+				// (none on a machine without a GPU).
+				gpus := rt.Spec().GPUs
+				res, _ := json.Marshal(vmrt.SelfTestResult{Passed: true, AgentVersion: version, HostGPUs: gpus})
+				h.SetFile(vmrt.SelfTestPath(dataDir), res)
+				if len(gpus) == 0 {
+					return vmrt.SelfTestResult{Passed: true}
+				}
 				return vmrt.SelfTestResult{Passed: true, GuestGPUs: []string{"NVIDIA CMP 170HX"}}
 			},
 		},

@@ -265,6 +265,7 @@ func (p *Provisioner) Adopt(q *Provisioner) (adopted bool) {
 	q.mu.Lock()
 	machine, rt, vendor, bdfs, unified := q.machine, q.runtime, q.vendor, q.gpuBDFs, q.unified
 	c, findings := q.capability, q.findings
+	pairOpts, pair := q.pairOpts, q.pair
 	q.mu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -273,6 +274,11 @@ func (p *Provisioner) Adopt(q *Provisioner) (adopted bool) {
 	}
 	p.machine, p.runtime, p.vendor, p.gpuBDFs, p.unified = machine, rt, vendor, bdfs, unified
 	p.capability, p.findings = c, findings
+	// The pair half follows the machine: the setup can change what it is
+	// checked against (the base image, above all).
+	if q.host != nil {
+		p.pairOpts, p.pair = pairOpts, pair
+	}
 	return true
 }
 

@@ -106,7 +106,7 @@ func (a *gpuAgent) stopHosting() {
 // foreground.
 func runUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
-	to := fs.String("version", "", "the release to update to, e.g. v0.1.11 (default: the latest release)")
+	to := fs.String("version", "", "the release to update to, e.g. v0.2.1 (default: the latest release)")
 	fs.Parse(args)
 
 	if runtime.GOOS != "linux" {

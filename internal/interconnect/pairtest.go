@@ -190,7 +190,7 @@ func PlanPairTest(f *FoundPeer) PairPlan {
 		}
 		fmt.Fprintf(sum, "%s|%s;", aMAC(l), b)
 	}
-	id := hex.EncodeToString(sum.Sum(nil))[:8] + "-pairtest"
+	id := hex.EncodeToString(sum.Sum(nil))[:8] + vmrt.PairTestSuffix
 	plan := PairPlan{ID: id, Node: node, PeerListing: f.Listing}
 	other := "b"
 	if node == "b" {

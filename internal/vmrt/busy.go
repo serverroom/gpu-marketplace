@@ -89,15 +89,20 @@ func AcquireBusy(h Host, dataDir string, self int, what string) (release func(),
 	}, nil
 }
 
-// The rental ids the runtime uses for its own VMs: the base image build and
-// test boots. Neither is anybody's rental.
+// The rental ids the runtime uses for its own VMs: the base image build, test
+// boots and pair test boots. None is anybody's rental.
 const (
 	BakeID         = "bake"
 	SelfTestPrefix = "selftest-"
+	// PairTestSuffix ends a pair test boot's id: "<8 hex>-pairtest", so the
+	// VM still has the gpu-<8 hex>-a|b name a pair's VMs need.
+	PairTestSuffix = "-pairtest"
 )
 
 // IsSetupID reports whether a rental id is one of the runtime's own VMs.
-func IsSetupID(id string) bool { return id == BakeID || strings.HasPrefix(id, SelfTestPrefix) }
+func IsSetupID(id string) bool {
+	return id == BakeID || strings.HasPrefix(id, SelfTestPrefix) || strings.HasSuffix(id, PairTestSuffix)
+}
 
 // SetupVM reports whether the state on disk is a base image build or a test
 // boot rather than a rental, and whether a live process other than this one

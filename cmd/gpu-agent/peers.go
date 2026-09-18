@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
-	"github.com/serverroom/gpu-marketplace/internal/register"
 )
 
 // PeerInterval is how often the agent announces itself on its ConnectX-7 ports
@@ -46,7 +45,7 @@ func (a *gpuAgent) announceOnce() {
 	if !changed {
 		return
 	}
-	if _, err := register.ReportCapability(a.prov.Capability()); err != nil {
+	if _, err := a.report(a.prov.Capability()); err != nil {
 		a.warn("report the pair capability: %v", err)
 	}
 }

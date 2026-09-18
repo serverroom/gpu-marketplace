@@ -7,6 +7,10 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/vmrt/fakehost"
 )
 
+// pairTestID is a pair test boot's id: the rental name gpu-1a2b3c4d, and the
+// suffix that marks it as the runtime's own VM.
+const pairTestID = "1a2b3c4d" + PairTestSuffix
+
 const goodPairSerial = "GPUAGENT-SELFTEST BEGIN\n" +
 	"GPUAGENT-SELFTEST GPU 00000000:06:00.0, NVIDIA GB10, [N/A]\n" +
 	"GPUAGENT-SELFTEST INTERNET ok\n" +
@@ -121,7 +125,7 @@ func TestPairSelfTestEndToEnd(t *testing.T) {
 		h.SetFile(NewRental(dataDir, id).SerialLog, []byte(goodPairSerial+"GPUAGENT-SELFTEST BLOCKED 192.168.1.50:22\n"))
 	}
 	rt, _ := newRuntime(h, func() bool { return true })
-	res := rt.PairSelfTest("v0.2.0-dev", PairSelfTestOptions{ID: pairID, Pair: testPair(), MinRDMAGbps: 100,
+	res := rt.PairSelfTest("v0.2.0-dev", PairSelfTestOptions{ID: pairTestID, Pair: testPair(), MinRDMAGbps: 100,
 		PeerMACs: []string{"58:a2:e1:00:01:01", "58:a2:e1:00:01:02"}, PeerListing: "B"})
 	if !res.Passed {
 		t.Fatalf("pair test failed: %v", res.Problems)
@@ -136,7 +140,7 @@ func TestPairSelfTestEndToEnd(t *testing.T) {
 	if h.Driver(nic0) != "mlx5_core" || h.Driver(testGPU) != "nvidia" {
 		t.Errorf("not given back: nic %s gpu %s", h.Driver(nic0), h.Driver(testGPU))
 	}
-	ud := string(h.Files[NewRental(dataDir, pairID).Dir+"/user-data"])
+	ud := string(h.Files[NewRental(dataDir, pairTestID).Dir+"/user-data"])
 	if ud != "" {
 		t.Errorf("the rental directory outlived the test")
 	}
@@ -146,7 +150,7 @@ func TestPairSelfTestThatCannotStartIsRecorded(t *testing.T) {
 	h := pairHost()
 	h.Fail["cloud-localds"] = fakehostErr("cloud-localds: not found")
 	rt, _ := newRuntime(h, nil)
-	res := rt.PairSelfTest("v0.2.0-dev", PairSelfTestOptions{ID: pairID, Pair: testPair()})
+	res := rt.PairSelfTest("v0.2.0-dev", PairSelfTestOptions{ID: pairTestID, Pair: testPair()})
 	if res.Passed || !strings.Contains(strings.Join(res.Problems, " "), "did not start") || len(res.LocalMACs) != 2 {
 		t.Fatalf("result = %+v", res)
 	}

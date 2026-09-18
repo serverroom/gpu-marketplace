@@ -48,6 +48,7 @@ func (a *gpuAgent) Start(s service.Service) error {
 	// until it is registered again: no tunnel, no reports, no rentals.
 	if register.LoadWithdrawn() != nil {
 		a.prov = detectProvisioner()
+		a.prov.RecoverPorts()
 		a.prov.Resume()
 		a.prov.Withdraw(register.WithdrawnMessage)
 		a.say("%s", register.WithdrawnMessage)

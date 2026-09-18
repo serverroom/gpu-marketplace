@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/serverroom/gpu-marketplace/internal/stats"
 )
 
 // PairTestTimeout bounds a pair test VM: its boot, up to ten minutes waiting
@@ -150,6 +152,12 @@ func (rt *Runtime) PairSelfTest(version string, o PairSelfTestOptions) PairTestR
 	if o.Pair == nil {
 		return fail("no pair to test")
 	}
+	if !IsSetupID(o.ID) {
+		return fail("a pair test boot's id must end in " + PairTestSuffix)
+	}
+	// No GPU query of the agent's own runs while the GPU is being tested.
+	resume := stats.PauseGPUQueries()
+	defer resume()
 	pub, err := ThrowawayPubkey()
 	if err != nil {
 		return fail("could not make a test key: " + err.Error())
