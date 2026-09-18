@@ -1,6 +1,7 @@
 package interconnect
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -51,7 +52,7 @@ func (f *FoundPeer) Peers(now time.Time) []control.Peer {
 // heard and PeerSettle has passed, or wait runs out. It fails when nobody
 // answers, when more than one other machine does, or when the cabling is not
 // port to port.
-func FindPeer(h vmrt.Host, open Opener, ports []FramePort, self string, wait time.Duration, ownMACs map[string]bool, journal string) (*FoundPeer, error) {
+func FindPeer(ctx context.Context, h vmrt.Host, open Opener, ports []FramePort, self string, wait time.Duration, ownMACs map[string]bool, journal string) (*FoundPeer, error) {
 	if len(ports) == 0 {
 		return nil, fmt.Errorf("no ConnectX-7 port on this machine can be used for a pair (see 'gpu-agent check --pair')")
 	}
@@ -86,12 +87,18 @@ func FindPeer(h vmrt.Host, open Opener, ports []FramePort, self string, wait tim
 			}
 		},
 		func() bool {
+			if ctx.Err() != nil {
+				return true
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			return !first.IsZero() && time.Since(first) >= PeerSettle
 		})
 	if problems := s.Close(); len(problems) > 0 {
 		return nil, fmt.Errorf("the ports were not all put back: %s", strings.Join(problems, "; "))
+	}
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("the pair test was stopped while waiting for the other machine")
 	}
 
 	listings := map[string]bool{}

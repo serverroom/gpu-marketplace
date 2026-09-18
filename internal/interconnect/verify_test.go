@@ -394,6 +394,96 @@ func TestRecoverPortsFromAnUnfinishedRun(t *testing.T) {
 	}
 }
 
+// A record left by an earlier run means the ports are not in their original
+// state: a new run refuses to start (and to overwrite or remove that record)
+// rather than record the changed state as the original.
+func TestARunRefusesWhileAnEarlierRecordIsThere(t *testing.T) {
+	a, _, w := cabled()
+	journal := interconnect.JournalPath("/var/lib/gpu-agent")
+	left := []byte(`{"boot_id":"b1","ports":[{"netdev":"enp1s0f0np0","was_up":false}]}`)
+	a.h.Files[journal] = left
+	_, _, err := interconnect.VerifyPorts(a.h, w.Opener("A"), a.ports, interconnect.VerifyInput{
+		Challenge: challenge, Self: listingA, Peer: listingB, Seconds: 1, OwnMACs: own(a), Journal: journal})
+	if !errors.Is(err, interconnect.ErrUnfinishedRun) {
+		t.Fatalf("err = %v", err)
+	}
+	if string(a.h.Files[journal]) != string(left) {
+		t.Errorf("the earlier record was changed: %s", a.h.Files[journal])
+	}
+	for _, c := range a.h.Calls {
+		if strings.HasPrefix(c, "run ip ") || strings.HasPrefix(c, "write /proc/sys/net/ipv6") {
+			t.Errorf("a port was touched: %q", c)
+		}
+	}
+	if len(w.Opened()) != 0 {
+		t.Errorf("sockets opened: %v", w.Opened())
+	}
+}
+
+// A run that fails before it records anything (a bad port name) leaves an
+// earlier run's record alone.
+func TestAFailedStartKeepsAnotherRunsRecord(t *testing.T) {
+	a, _, w := cabled()
+	journal := interconnect.JournalPath("/var/lib/gpu-agent")
+	bad := []interconnect.FramePort{{Netdev: "x; reboot", MAC: "58:a2:e1:00:00:01"}}
+	if _, err := interconnect.Open(a.h, w.Opener("A"), bad, journal); err == nil {
+		t.Fatal("a bad port name was accepted")
+	}
+	a.h.Files[journal] = []byte(`{"ports":[]}`)
+	if _, err := interconnect.Open(a.h, w.Opener("A"), bad, ""); err == nil {
+		t.Fatal("a bad port name was accepted")
+	}
+	if !a.h.Exists(journal) {
+		t.Errorf("a record this run did not write was removed")
+	}
+}
+
+// A record from an earlier boot has nothing to restore -- the restart reset
+// the ports -- and is dropped without touching them.
+func TestRecoverPortsDropsARecordFromAnEarlierBoot(t *testing.T) {
+	h := fakehost.New()
+	h.NIC("0000:01:00.0", "enp1s0f0np0", "58:a2:e1:00:00:01", "MT1", "0000:01:00.0")
+	h.Files["/sys/class/net/enp1s0f0np0"] = nil
+	h.Files["/proc/sys/kernel/random/boot_id"] = []byte("boot-2\n")
+	journal := interconnect.JournalPath("/var/lib/gpu-agent")
+	h.Files[journal] = []byte(`{"boot_id":"boot-1","ports":[{"netdev":"enp1s0f0np0","was_up":false,` +
+		`"ipv6_path":"/proc/sys/net/ipv6/conf/enp1s0f0np0/disable_ipv6","ipv6_orig":"0"}]}`)
+	if problems := interconnect.RecoverPorts(h, "/var/lib/gpu-agent"); len(problems) != 0 {
+		t.Fatalf("problems = %v", problems)
+	}
+	if h.Ran("run ip link set dev enp1s0f0np0 down") || h.Exists("/proc/sys/net/ipv6/conf/enp1s0f0np0/disable_ipv6") {
+		t.Errorf("a port was changed from an earlier boot's record: %v", h.Calls)
+	}
+	if h.Exists(journal) {
+		t.Errorf("an earlier boot's record was kept")
+	}
+
+	// The same boot: played back.
+	h.Files[journal] = []byte(`{"boot_id":"boot-2","ports":[{"netdev":"enp1s0f0np0","was_up":false}]}`)
+	interconnect.RecoverPorts(h, "/var/lib/gpu-agent")
+	if !h.Ran("run ip link set dev enp1s0f0np0 down") {
+		t.Errorf("this boot's record was not played back: %v", h.Calls)
+	}
+}
+
+// A run records the boot it belongs to.
+func TestTheRecordNamesTheBoot(t *testing.T) {
+	fast(t)
+	a, _, w := cabled()
+	a.h.Files["/proc/sys/kernel/random/boot_id"] = []byte("boot-7\n")
+	journal := interconnect.JournalPath("/var/lib/gpu-agent")
+	s, err := interconnect.Open(a.h, w.Opener("A"), a.ports, journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(a.h.Files[journal]), `"boot_id":"boot-7"`) {
+		t.Errorf("record = %s", a.h.Files[journal])
+	}
+	if problems := s.Close(); len(problems) != 0 || a.h.Exists(journal) {
+		t.Errorf("problems %v, record kept %v", problems, a.h.Exists(journal))
+	}
+}
+
 func TestHelloFindsTheOtherAgent(t *testing.T) {
 	fast(t)
 	a, b, w := cabled()

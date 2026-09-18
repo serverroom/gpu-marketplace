@@ -1,6 +1,7 @@
 package vmrt
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -118,6 +119,9 @@ func EvaluatePair(single SerialReport, pair PairSerialReport, guestOK map[int]bo
 
 // PairSelfTestOptions is one machine's side of a pair test.
 type PairSelfTestOptions struct {
+	// Ctx stops the test early: the VM is torn down as at the end of a test
+	// and the result says it was stopped. Nil: never.
+	Ctx         context.Context
 	ID          string       // the same on both machines
 	Pair        *PairOptions // node, links, peer name, the card's functions
 	Plan        PairTestPlan
@@ -152,6 +156,13 @@ func (rt *Runtime) PairSelfTest(version string, o PairSelfTestOptions) PairTestR
 	if o.Pair == nil {
 		return fail("no pair to test")
 	}
+	ctx := o.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return fail("the pair test boot was stopped before it started")
+	}
 	if !IsSetupID(o.ID) {
 		return fail("a pair test boot's id must end in " + PairTestSuffix)
 	}
@@ -185,7 +196,7 @@ func (rt *Runtime) PairSelfTest(version string, o PairSelfTestOptions) PairTestR
 	var pair PairSerialReport
 	guestOK := map[int]bool{}
 	sshOpened := false
-	for waited := time.Duration(0); waited < PairTestTimeout; waited += pollInterval {
+	for waited := time.Duration(0); waited < PairTestTimeout && ctx.Err() == nil; waited += pollInterval {
 		if !sshOpened && rt.h.DialTCP(net.JoinHostPort(GuestIP, "22"), 3*time.Second) == nil {
 			sshOpened = true
 		}
@@ -203,9 +214,14 @@ func (rt *Runtime) PairSelfTest(version string, o PairSelfTestOptions) PairTestR
 		rt.h.Sleep(pollInterval)
 	}
 
+	stopped := ctx.Err() != nil && !(single.End && pair.End && sshOpened)
 	stop := rt.Stop()
 	res := EvaluatePair(single, pair, guestOK, rt.spec.GPUs, probes, sshOpened, stop, o.Pair, o.PeerMACs, minGbps, version, now)
 	res.PeerListing = o.PeerListing
+	if stopped {
+		res.Passed = false
+		res.Problems = append([]string{"the pair test boot was stopped before it finished"}, res.Problems...)
+	}
 	_ = SavePairTest(rt.h, rt.spec.DataDir, res)
 	return res
 }

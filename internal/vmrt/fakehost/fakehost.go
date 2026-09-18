@@ -228,7 +228,7 @@ func (h *Host) NIC(bdf, netdev, mac, serial string, group ...string) {
 	h.nics[bdf] = &nicDev{netdev: netdev, mac: mac}
 	h.raiseNetdev(bdf)
 	h.Outputs["ethtool -i "+netdev] = "driver: mlx5_core\nversion: 26.04\nfirmware-version: 28.40.1000 (NVD0000000033)\nbus-info: " + bdf + "\n"
-	h.Outputs["devlink -j dev info pci/"+bdf] = `{"info":{"pci/` + bdf + `":{"driver":"mlx5_core","serial_number":"` + serial + `","versions":{"fixed":{"fw.psid":"NVD0000000033"}}}}}`
+	h.Outputs["devlink -j dev info pci/"+bdf] = `{"info":{"pci/` + bdf + `":{"driver":"mlx5_core","serial_number":"` + serial + `","versions":{"fixed":{"fw.psid":"NVD0000000033"},"running":{"fw.version":"28.40.1000"},"stored":{"fw.version":"28.40.1000"}}}}}`
 	h.Outputs["ip -j addr show dev "+netdev] = `[{"ifindex":5,"ifname":"` + netdev + `","flags":["BROADCAST","MULTICAST"],"mtu":1500,"addr_info":[]}]`
 	h.Outputs["ip -j route show dev "+netdev] = "[]"
 	h.Outputs["ip -6 -j route show dev "+netdev] = `[{"dst":"fe80::/64","protocol":"kernel","metric":256,"flags":[],"pref":"medium"}]`

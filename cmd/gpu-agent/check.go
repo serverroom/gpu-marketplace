@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/kardianos/service"
 
@@ -167,8 +170,12 @@ func runSelfTest(svc service.Service, yes bool) {
 		os.Exit(1)
 	}
 	fmt.Println()
-	fmt.Println("Booting ... (the first boot can take several minutes)")
-	res := rt.SelfTest(version)
+	// Ctrl-C ends the test the clean way: the VM is torn down and the GPU
+	// given back and checked, instead of left running.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Println("Booting ... (the first boot can take several minutes; Ctrl-C stops the test cleanly)")
+	res := rt.SelfTestContext(ctx, version)
 	release()
 	if res.Passed {
 		if len(gpus) > 0 {

@@ -259,19 +259,34 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	p.openPacket = interconnect.OpenPacket
 	p.lockFrames = func() (func(), bool, error) { return interconnect.TryLock(dataDir) }
 	p.now = time.Now
+	p.redetect = func() *Provisioner { return Detect(h, goos, arch, dataDir, version) }
 	_, ic := pair.Capability(interconnect.RecentPeers(interconnect.LoadPeers(h, dataDir), time.Now().Unix(), pair.PortMACs()))
 	kind := KindQEMUVFIO
 	var gpuCount *int
 	var guest *control.Guest
+	// A rental (or its leftover) holds the GPU and the card: no driver sees
+	// them, so what the checks say about GPUs is not the machine. The count
+	// is left out, a machine whose rental took GPUs is never called GPU-less,
+	// and it is all read again once the rental has gone (afterRental).
+	midRental := goos == "linux" && rt.Present()
+	if midRental && rep.Vendor == VendorNone && rentalTookGPUs(h, dataDir) {
+		text := "a rental holds this machine's GPU, so the agent cannot check it now; it checks the machine again once the rental has ended"
+		rep.Reasons = append(rep.Reasons, text)
+		rep.Findings = append(rep.Findings, Finding{Kind: ReasonHuman, Text: text})
+		p.findings = rep.Findings
+	}
 	if goos == "linux" {
-		n := rep.GPUCount
-		gpuCount = &n
-		if rep.Vendor == VendorNone {
+		if !midRental {
+			n := rep.GPUCount
+			gpuCount = &n
+		}
+		if rep.Vendor == VendorNone && !(midRental && rentalTookGPUs(h, dataDir)) {
 			kind = KindQEMU
 		}
 		// What the renter gets, from the sizing the VM itself uses.
 		guest = &control.Guest{VCPUs: spec.GuestCPUs(), MemoryGB: spec.GuestMemoryMB() / 1024, DiskGB: spec.DiskGB, CPU: spec.GuestCPUName}
 	}
+	p.midRental = midRental
 	p.capability = control.Capability{
 		Ready:         len(rep.Reasons) == 0,
 		Kind:          kind,
@@ -467,4 +482,11 @@ func NormalizeBDF(s string) string {
 		parts[0] = parts[0][4:]
 	}
 	return strings.Join(parts, ":")
+}
+
+// rentalTookGPUs reports whether the rental state on disk handed GPUs to its
+// VM (an unreadable state counts as yes: fail closed).
+func rentalTookGPUs(h vmrt.Host, dataDir string) bool {
+	st, err := vmrt.LoadState(h, dataDir)
+	return err != nil || (st != nil && len(st.Devices) > 0)
 }

@@ -288,6 +288,11 @@ func TestPairProvisionRefusals(t *testing.T) {
 			r.Links[0].CIDR = "10.200.0.1/29"
 			return r
 		}(), http.StatusBadRequest, "/30"},
+		{"an id the agent keeps for its pair test", nil, func() control.PairProvisionRequest {
+			r := pairRequest("58:a2:e1:00:00:01")
+			r.RentalID = "1a2b3c4d" + vmrt.PairTestSuffix
+			return r
+		}(), http.StatusBadRequest, "test boots"},
 		{"no pair test any more", func(p *Provisioner) {
 			delete(p.host.(*fakehost.Host).Files, vmrt.PairTestPath(dataDir))
 		}, pairRequest("58:a2:e1:00:00:01"), http.StatusServiceUnavailable, "pair test"},
@@ -432,6 +437,35 @@ func TestRecoverPortsLeavesARunningTestAlone(t *testing.T) {
 	a.RecoverPorts()
 	if !h.Ran("run ip link set dev enP1p1s0f0np0 down") || h.Exists(journal) {
 		t.Errorf("not recovered: %v", h.Calls)
+	}
+}
+
+// A cable check starts from the ports' original state: a record an unfinished
+// run left is played back first, and while it cannot be the check refuses
+// (and changes nothing) instead of taking the changed state as the original.
+func TestACableCheckPlaysBackAnUnfinishedRunFirst(t *testing.T) {
+	fastFrames(t)
+	a, _, _ := sparkPair(t)
+	h := a.host.(*fakehost.Host)
+	journal := interconnect.JournalPath(dataDir)
+	req := control.LinkVerifyRequest{Challenge: challenge, Self: listingA, Peer: listingB}
+
+	h.Files[journal] = []byte(`{"ports":[{"netdev":"enP1p1s0f0np0","was_up":false}]}`)
+	h.SetFail("ip link set dev enP1p1s0f0np0 down", errors.New("RTNETLINK answers: Operation not permitted"))
+	_, err := a.LinkVerify(req)
+	if code(err) != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "restart this machine") {
+		t.Fatalf("an unrecoverable record: %v", err)
+	}
+	if !h.Exists(journal) || h.Ran("run ip link set dev enP1p1s0f1np1 up") {
+		t.Errorf("the check went ahead: %v", h.Calls)
+	}
+
+	h.SetFail("ip link set dev enP1p1s0f0np0 down", nil)
+	if _, err := a.LinkVerify(req); err != nil {
+		t.Fatalf("after the record could be played back: %v", err)
+	}
+	if h.Exists(journal) {
+		t.Errorf("the record outlived the check")
 	}
 }
 

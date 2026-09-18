@@ -1,6 +1,7 @@
 package provisioner
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -20,6 +21,9 @@ var PairTestWait = 10 * time.Minute
 // PairTestRun is one pair test boot, as `gpu-agent check --boot --pair` asks
 // for it.
 type PairTestRun struct {
+	// Ctx stops the test early (Ctrl-C): the wait for the other machine ends,
+	// and a test VM is torn down as at the end of a test. Nil: never.
+	Ctx         context.Context
 	MinRDMAGbps float64
 	// Found is told when the other machine has been heard and the plan made.
 	Found func(plan interconnect.PairPlan)
@@ -58,10 +62,11 @@ func (p *Provisioner) PairTestBlockers() []string {
 // records the verdict in pairtest.json -- a failure too. The error is for a
 // test that could not run at all, which records nothing.
 func (p *Provisioner) PairSelfTest(o PairTestRun) (vmrt.PairTestResult, error) {
-	if !p.hasPairRuntime() || p.runtime == nil {
+	v := p.view()
+	if !p.hasPairRuntime() || v.runtime == nil {
 		return vmrt.PairTestResult{}, errors.New("this agent has no pair runtime on this machine")
 	}
-	if p.machine.Present() {
+	if v.machine.Present() {
 		return vmrt.PairTestResult{}, errors.New("a rental (or the leftover of one) is on this machine; a pair test boot cannot run now")
 	}
 	if blockers := p.PairTestBlockers(); len(blockers) > 0 {
@@ -75,6 +80,13 @@ func (p *Provisioner) PairSelfTest(o PairTestRun) (vmrt.PairTestResult, error) {
 		return vmrt.PairTestResult{}, errors.New("a cable check is running on this machine; try again in a minute")
 	}
 	defer unlock()
+	if err := p.recoverPortsLocked(); err != nil {
+		return vmrt.PairTestResult{}, err
+	}
+	ctx := o.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	min := o.MinRDMAGbps
 	if min <= 0 {
@@ -95,7 +107,7 @@ func (p *Provisioner) PairSelfTest(o PairTestRun) (vmrt.PairTestResult, error) {
 		p.RefreshPair()
 		return res
 	}
-	found, err := interconnect.FindPeer(p.host, p.openPacket, rep.FramePorts(), self, PairTestWait, rep.OwnMACs(),
+	found, err := interconnect.FindPeer(ctx, p.host, p.openPacket, rep.FramePorts(), self, PairTestWait, rep.OwnMACs(),
 		interconnect.JournalPath(p.dataDir))
 	if err != nil {
 		return failed(err.Error()), nil
@@ -120,9 +132,9 @@ func (p *Provisioner) PairSelfTest(o PairTestRun) (vmrt.PairTestResult, error) {
 	}
 	run := p.pairTest
 	if run == nil {
-		run = p.runtime.PairSelfTest
+		run = v.runtime.PairSelfTest
 	}
-	res := run(p.version, vmrt.PairSelfTestOptions{ID: plan.ID, Pair: opts, MinRDMAGbps: min,
+	res := run(p.version, vmrt.PairSelfTestOptions{Ctx: ctx, ID: plan.ID, Pair: opts, MinRDMAGbps: min,
 		PeerMACs: plan.PeerMACs, PeerListing: plan.PeerListing})
 	p.RefreshPair()
 	return res, nil

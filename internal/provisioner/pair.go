@@ -82,13 +82,34 @@ func (p *Provisioner) beginFrames() (func(), error) {
 	p.checking = true
 	p.frames.Add(1)
 	p.mu.Unlock()
-	return func() {
+	done := func() {
 		p.mu.Lock()
 		p.checking = false
 		p.mu.Unlock()
 		p.frames.Done()
 		unlock()
-	}, nil
+	}
+	if err := p.recoverPortsLocked(); err != nil {
+		done()
+		return nil, control.Unavailable("%v", err)
+	}
+	return done, nil
+}
+
+// recoverPortsLocked plays back a record an unfinished run left, holding the
+// frame lock: a new run starts only from the ports' original state.
+func (p *Provisioner) recoverPortsLocked() error {
+	problems := interconnect.RecoverPorts(p.host, p.dataDir)
+	if len(problems) == 0 && !p.host.Exists(interconnect.JournalPath(p.dataDir)) {
+		return nil
+	}
+	for _, problem := range problems {
+		log.Printf("restoring a ConnectX-7 port after an unfinished cable check: %s", problem)
+	}
+	if len(problems) == 0 {
+		return interconnect.ErrUnfinishedRun
+	}
+	return fmt.Errorf("%w (%s)", interconnect.ErrUnfinishedRun, strings.Join(problems, "; "))
 }
 
 // WaitFrames waits up to timeout for a raw-frame run in progress to put its
@@ -105,7 +126,7 @@ func (p *Provisioner) WaitFrames(timeout time.Duration) {
 // freshPair re-runs the pair preflight: carrier, addresses and the ports
 // themselves can change while the agent runs.
 func (p *Provisioner) freshPair() interconnect.Report {
-	rep := interconnect.Preflight(p.host, p.pairOpts)
+	rep := interconnect.Preflight(p.host, p.view().pairOpts)
 	p.mu.Lock()
 	p.pair = rep
 	p.mu.Unlock()
@@ -200,8 +221,9 @@ func (p *Provisioner) DiscoverPeers() (ran, changed bool, err error) {
 	}
 	p.mu.Lock()
 	busy := p.status != StatusFree || p.checking || p.settingUp || p.withdrawn
+	machine := p.machine
 	p.mu.Unlock()
-	if busy || p.machine.Present() {
+	if busy || machine.Present() {
 		return false, false, nil
 	}
 	rep := p.freshPair()

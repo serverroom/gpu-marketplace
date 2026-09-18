@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kardianos/service"
@@ -155,8 +158,12 @@ func runPairSelfTest(svc service.Service, yes bool, minRDMA float64) {
 		os.Exit(1)
 	}
 	fmt.Println()
-	fmt.Printf("Waiting for the other machine on the cable (up to %v) ...\n", provisioner.PairTestWait)
-	res, err := p.PairSelfTest(provisioner.PairTestRun{MinRDMAGbps: minRDMA, Found: func(plan interconnect.PairPlan) {
+	// Ctrl-C (or the machine shutting down) ends the test the clean way: the
+	// ports go back, and a test VM is torn down and the GPU and card checked.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Printf("Waiting for the other machine on the cable (up to %v; Ctrl-C stops the test cleanly) ...\n", provisioner.PairTestWait)
+	res, err := p.PairSelfTest(provisioner.PairTestRun{Ctx: ctx, MinRDMAGbps: minRDMA, Found: func(plan interconnect.PairPlan) {
 		fmt.Printf("Found listing %s over %d link(s); this machine is node %s. Booting (the first boot can take several minutes) ...\n",
 			plan.PeerListing, len(plan.Links), plan.Node)
 	}})

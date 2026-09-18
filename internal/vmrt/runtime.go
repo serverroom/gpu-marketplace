@@ -141,6 +141,14 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 		return err
 	}
 
+	// A pair rental's card is checked and recorded before anything is taken
+	// from the host: a card that cannot go must not close a desktop first.
+	var nics []string
+	if o.Pair != nil {
+		if nics, err = rt.planNICs(st, o.Pair.Functions, save); err != nil {
+			return err
+		}
+	}
 	if len(rt.spec.GPUs) > 0 {
 		// Saved even when it fails: the teardown works from what is on disk,
 		// and must give back exactly what was taken -- functions already on
@@ -156,7 +164,7 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	// The host keeps the cable until the last moment: the card leaves it after
 	// the GPU, right before the VM boots.
 	if o.Pair != nil {
-		if err = rt.takeNICs(st, &r, o.Pair.Functions, save); err != nil {
+		if err = rt.takeNICs(st, &r, nics, save); err != nil {
 			return err
 		}
 	}
@@ -237,20 +245,28 @@ func (rt *Runtime) takeGPUs(st *State, r *Rental, save func() error) error {
 	// NVIDIA's own services are stopped for the rental and started again when
 	// it ends. Recorded one at a time, so a start that dies halfway restarts
 	// exactly the ones it stopped.
+	// Each is recorded (and saved) before it is stopped: starting a service
+	// that is already running is harmless, one never started again is not.
 	for _, svc := range NVIDIAServices {
 		if rt.h.Run("systemctl", "is-active", "--quiet", svc.Unit) != nil {
 			continue
 		}
+		st.StoppedServices = append(st.StoppedServices, svc.Unit)
+		if err := save(); err != nil {
+			return err
+		}
 		if err := rt.h.Run("systemctl", "stop", svc.Unit); err != nil {
 			return fmt.Errorf("stop %s: %w", svc.Unit, err)
 		}
-		st.StoppedServices = append(st.StoppedServices, svc.Unit)
 	}
 	funcs, err := GroupFunctions(rt.h, rt.spec.GPUs)
 	if err != nil {
 		return err
 	}
-	st.Devices, err = BindVFIO(rt.h, funcs)
+	st.Devices, err = BindVFIO(rt.h, funcs, func(b []BoundDevice) error {
+		st.Devices = b
+		return save()
+	})
 	if err != nil {
 		return fmt.Errorf("hand the GPU to the microVM: %w", err)
 	}

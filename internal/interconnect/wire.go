@@ -127,8 +127,11 @@ type Session struct {
 	h       vmrt.Host
 	open    Opener
 	journal string
-	states  []*portState
-	conns   []PacketConn
+	// wrote: this session wrote the journal, so it is this session's to
+	// remove. A journal left by an earlier run is never touched here.
+	wrote  bool
+	states []*portState
+	conns  []PacketConn
 }
 
 // journalEntry is one port's original state, written to disk before anything
@@ -141,11 +144,33 @@ type journalEntry struct {
 	IPv6Orig string `json:"ipv6_orig,omitempty"`
 }
 
+// journal is the record on disk: the ports' original state, and the boot it
+// belongs to -- a restart puts every port back by itself, so a record from an
+// earlier boot has nothing left to restore.
+type journal struct {
+	BootID string         `json:"boot_id,omitempty"`
+	Ports  []journalEntry `json:"ports"`
+}
+
 // JournalPath is where a run in progress records the ports' original state.
 func JournalPath(dataDir string) string { return filepath.Join(dataDir, "frames-journal.json") }
 
+// ErrUnfinishedRun: an earlier cable check's record of the ports is still on
+// disk, so their original state is not what they show now; nothing may change
+// them until that record has been played back (RecoverPorts).
+var ErrUnfinishedRun = errors.New("a cable check that did not finish left this machine's ConnectX-7 ports changed, and they could not all be put back; restart this machine to reset them")
+
+// bootID is this boot's id ("" when it cannot be read).
+func bootID(h vmrt.Host) string {
+	data, err := h.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 func writeJournal(h vmrt.Host, path string, entries []journalEntry) error {
-	data, err := json.Marshal(entries)
+	data, err := json.Marshal(journal{BootID: bootID(h), Ports: entries})
 	if err != nil {
 		return err
 	}
@@ -155,21 +180,41 @@ func writeJournal(h vmrt.Host, path string, entries []journalEntry) error {
 	return h.WriteFile(path, data, 0600)
 }
 
-// RecoverPorts puts back ports a run that never finished left changed. Safe to
-// run any time no run is in progress: it only restores recorded originals.
+// readJournal reads the record; ok is false when it cannot be read.
+func readJournal(data []byte) (journal, bool) {
+	var j journal
+	if json.Unmarshal(data, &j) == nil {
+		return j, true
+	}
+	// The first form of the record: the port list alone.
+	if json.Unmarshal(data, &j.Ports) == nil {
+		return j, true
+	}
+	return journal{}, false
+}
+
+// RecoverPorts puts back ports a run that never finished left changed, and
+// removes the record once everything is back. Call it only while holding the
+// frame lock (TryLock), so no run is in progress: it restores recorded
+// originals. A record from an earlier boot is dropped -- the restart reset the
+// ports, and whatever has set them up since is left alone.
 func RecoverPorts(h vmrt.Host, dataDir string) []string {
 	path := JournalPath(dataDir)
 	data, err := h.ReadFile(path)
 	if err != nil {
 		return nil
 	}
-	var entries []journalEntry
-	if json.Unmarshal(data, &entries) != nil {
+	j, ok := readJournal(data)
+	if !ok {
 		_ = h.Remove(path)
 		return []string{"an unreadable record of a cable check was discarded"}
 	}
+	if now := bootID(h); j.BootID != "" && now != "" && j.BootID != now {
+		_ = h.Remove(path)
+		return nil
+	}
 	var problems []string
-	for _, e := range entries {
+	for _, e := range j.Ports {
 		if !ValidNetdev(e.Netdev) {
 			continue
 		}
@@ -194,7 +239,10 @@ var netdevPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 // Open brings every port up (none left changed on error) and opens a raw
 // socket on each, then waits up to CarrierWait for carrier on all of them.
 // With a journal path, the ports' original state is on disk before anything
-// changes and is removed once Close has put everything back.
+// changes and is removed once Close has put everything back; a record an
+// earlier run left there means the ports are not in their original state, so
+// Open refuses (ErrUnfinishedRun) rather than record the changed state as the
+// original. The caller plays such a record back first (RecoverPorts).
 func Open(h vmrt.Host, open Opener, ports []FramePort, journal string) (*Session, error) {
 	s := &Session{h: h, open: open, journal: journal}
 	fail := func(err error) (*Session, error) {
@@ -209,6 +257,9 @@ func Open(h vmrt.Host, open Opener, ports []FramePort, journal string) (*Session
 		}
 	}
 	if journal != "" {
+		if h.Exists(journal) {
+			return nil, ErrUnfinishedRun
+		}
 		var entries []journalEntry
 		for _, p := range ports {
 			up, err := adminUp(h, p.Netdev)
@@ -223,8 +274,10 @@ func Open(h vmrt.Host, open Opener, ports []FramePort, journal string) (*Session
 			entries = append(entries, e)
 		}
 		if err := writeJournal(h, journal, entries); err != nil {
+			_ = h.Remove(journal)
 			return fail(fmt.Errorf("record the ports' state: %w", err))
 		}
+		s.wrote = true
 	}
 	for _, p := range ports {
 		st, err := bringUp(h, p)
@@ -268,8 +321,9 @@ func (s *Session) Close() []string {
 		problems = append(problems, st.restore(s.h)...)
 	}
 	s.states = nil
-	if s.journal != "" && len(problems) == 0 {
+	if s.wrote && len(problems) == 0 {
 		_ = s.h.Remove(s.journal)
+		s.wrote = false
 	}
 	return problems
 }

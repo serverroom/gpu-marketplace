@@ -140,6 +140,41 @@ type Provisioner struct {
 	now      func() time.Time
 	// pairTest runs the pair test VM; nil means the runtime's own.
 	pairTest func(version string, o vmrt.PairSelfTestOptions) vmrt.PairTestResult
+
+	// midRental: the checks ran while a rental (or its leftover) held the
+	// machine, so its GPU and ConnectX card could not be read; redetect runs
+	// them again once the rental has gone (Detect sets it).
+	midRental bool
+	redetect  func() *Provisioner
+	// onChange is told when the capability changed by itself (after a
+	// rental), so the agent reports it; nil: nobody.
+	onChange func()
+}
+
+// OnCapabilityChange sets what is told when the capability changes after a
+// rental has left the machine.
+func (p *Provisioner) OnCapabilityChange(f func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onChange = f
+}
+
+// afterRental reads the machine again once a rental has left it: the ConnectX
+// ports are back on the host, and checks that ran while the rental held the
+// GPU could not see it.
+func (p *Provisioner) afterRental() {
+	p.mu.Lock()
+	redo, again, notify := p.redetect, p.midRental, p.onChange
+	p.mu.Unlock()
+	changed := false
+	if again && redo != nil {
+		changed = p.Adopt(redo())
+	} else {
+		changed = p.RefreshPair()
+	}
+	if changed && notify != nil {
+		notify()
+	}
 }
 
 // Withdraw stops this machine hosting: every rental is refused from now on,
@@ -274,6 +309,7 @@ func (p *Provisioner) Adopt(q *Provisioner) (adopted bool) {
 	}
 	p.machine, p.runtime, p.vendor, p.gpuBDFs, p.unified = machine, rt, vendor, bdfs, unified
 	p.capability, p.findings = c, findings
+	p.midRental = q.midRental
 	// The pair half follows the machine: the setup can change what it is
 	// checked against (the base image, above all).
 	if q.host != nil {
@@ -287,6 +323,20 @@ func (p *Provisioner) Runtime() *vmrt.Runtime {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.runtime
+}
+
+// machineView is what Adopt can swap, read together under p.mu.
+type machineView struct {
+	runtime  *vmrt.Runtime
+	machine  Machine
+	vendor   GPUVendor
+	pairOpts interconnect.Options
+}
+
+func (p *Provisioner) view() machineView {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return machineView{runtime: p.runtime, machine: p.machine, vendor: p.vendor, pairOpts: p.pairOpts}
 }
 
 // Provision checks the request and starts the rental in the background:
@@ -305,6 +355,9 @@ func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
 	}
 	if !control.ValidRentalID(rentalID) {
 		return fmt.Errorf("invalid rental id %q", rentalID)
+	}
+	if vmrt.IsSetupID(rentalID) {
+		return fmt.Errorf("rental id %q is one this agent keeps for its own test boots", rentalID)
 	}
 	if _, err := vmrt.NormalizePubkey(renterPubkey); err != nil {
 		return fmt.Errorf("renter key: %w", err)
@@ -389,12 +442,14 @@ func (p *Provisioner) Teardown(rentalID string) error {
 	res := machine.Stop()
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if res.Clean() {
 		p.status = StatusFree
 		p.lastErr = ""
+		p.mu.Unlock()
+		p.afterRental()
 		return nil
 	}
+	defer p.mu.Unlock()
 	p.status = StatusDirty
 	p.lastErr = strings.Join(res.Detail, "; ")
 	log.Printf("teardown of %s NOT verified clean (wiped=%v gpuClean=%v nicDirty=%v); quarantined dirty: %s",
@@ -407,6 +462,14 @@ func (p *Provisioner) Teardown(rentalID string) error {
 // rental whose VM is gone -- the machine rebooted -- is torn down now; a dirty
 // leftover keeps the machine quarantined.
 func (p *Provisioner) Resume() {
+	if p.resume() {
+		p.afterRental()
+	}
+}
+
+// resume is Resume; freed says a rental (or setup VM) it found was torn down
+// clean, so the machine is to be read again.
+func (p *Provisioner) resume() (freed bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// A base image build or test boot is nobody's rental. One whose process
@@ -420,8 +483,9 @@ func (p *Provisioner) Resume() {
 			if res := p.machine.Stop(); !res.Clean() {
 				p.status = StatusDirty
 				p.lastErr = strings.Join(res.Detail, "; ")
+				return false
 			}
-			return
+			return true
 		}
 	}
 	switch {
@@ -441,11 +505,12 @@ func (p *Provisioner) Resume() {
 		res := p.machine.Stop()
 		if res.Clean() {
 			p.status = StatusFree
-		} else {
-			p.status = StatusDirty
-			p.lastErr = strings.Join(res.Detail, "; ")
+			return true
 		}
+		p.status = StatusDirty
+		p.lastErr = strings.Join(res.Detail, "; ")
 	}
+	return false
 }
 
 // verifySleep is how long the verifier waits between looks; a variable for tests.

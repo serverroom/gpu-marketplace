@@ -353,6 +353,11 @@ func TestPairTeardownCatchesAChangedCard(t *testing.T) {
 		"MAC changed": func(h *fakehost.Host) { h.SetNICMAC(nic0, "58:a2:e1:00:00:ff") },
 		"firmware":    func(h *fakehost.Host) { h.Outputs["ethtool -i enP1p1s0f0np0"] = "firmware-version: 28.99.9999\n" },
 		"NV config":   func(h *fakehost.Host) { h.Outputs["mstconfig -d "+nic1+" q"] = "Configurations:\n SRIOV_EN True(1)\n" },
+		// A flashed image runs only after a reset: the running version is
+		// unchanged, the stored one is not.
+		"stored firmware": func(h *fakehost.Host) {
+			h.Outputs["devlink -j dev info pci/"+nic0] = `{"info":{"pci/` + nic0 + `":{"versions":{"running":{"fw.version":"28.40.1000"},"stored":{"fw.version":"28.99.9999"}}}}}`
+		},
 		"host address": func(h *fakehost.Host) {
 			h.Outputs["ip -j addr show dev enP1p1s0f1np1"] = `[{"addr_info":[{"family":"inet","local":"169.254.3.1","scope":"link"}]}]`
 		},

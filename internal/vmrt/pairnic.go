@@ -30,13 +30,44 @@ type NICBaseline struct {
 	// NVConfig is the fingerprint of each function's persistent configuration
 	// (mstconfig q).
 	NVConfig map[string]string `json:"nv_config"`
+	// StoredFirmware is the firmware image stored on the card -- the one it
+	// runs from its next reset -- per function (devlink's "stored" versions),
+	// "" where the card does not say. A guest that flashes a new image leaves
+	// the running version alone until a reset; this is where it shows.
+	StoredFirmware map[string]string `json:"stored_firmware,omitempty"`
+}
+
+// NICStoredFirmware is the stored (next-boot) firmware version devlink
+// reports for a function, or "" when it reports none.
+func NICStoredFirmware(h Host, bdf string) string {
+	out, err := h.Output("devlink", "-j", "dev", "info", "pci/"+bdf)
+	if err != nil {
+		return ""
+	}
+	var info struct {
+		Info map[string]struct {
+			Versions struct {
+				Stored map[string]string `json:"stored"`
+			} `json:"versions"`
+		} `json:"info"`
+	}
+	if json.Unmarshal([]byte(out), &info) != nil {
+		return ""
+	}
+	stored := info.Info["pci/"+bdf].Versions.Stored
+	for _, key := range []string{"fw.version", "fw"} {
+		if v := strings.TrimSpace(stored[key]); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // RecordNICBaseline records the card's functions as they are now. Every
 // function must be on the host driver with an interface, or there is nothing
 // to compare the card with afterwards.
 func RecordNICBaseline(h Host, functions []string) (*NICBaseline, error) {
-	b := &NICBaseline{MACs: map[string]string{}, Firmware: map[string]string{}, NVConfig: map[string]string{}}
+	b := &NICBaseline{MACs: map[string]string{}, Firmware: map[string]string{}, NVConfig: map[string]string{}, StoredFirmware: map[string]string{}}
 	for _, bdf := range functions {
 		netdevs := NetdevsOf(h, bdf)
 		if len(netdevs) == 0 {
@@ -59,6 +90,7 @@ func RecordNICBaseline(h Host, functions []string) (*NICBaseline, error) {
 			return nil, fmt.Errorf("persistent configuration of %s: %w", bdf, err)
 		}
 		b.NVConfig[bdf] = hash
+		b.StoredFirmware[bdf] = NICStoredFirmware(h, bdf)
 	}
 	return b, nil
 }
@@ -111,6 +143,11 @@ func VerifyNICBaseline(h Host, b *NICBaseline) (bool, []string) {
 		if fw, err := NICFirmware(h, netdevs[0]); err != nil || fw != b.Firmware[bdf] {
 			detail = append(detail, fmt.Sprintf("the firmware of the ConnectX function %s changed during the rental (%s, now %q)", bdf, b.Firmware[bdf], fw))
 		}
+		if b.StoredFirmware != nil {
+			if stored := NICStoredFirmware(h, bdf); stored != b.StoredFirmware[bdf] {
+				detail = append(detail, fmt.Sprintf("the firmware stored on the ConnectX function %s changed during the rental (%q, now %q): it would run at the next restart", bdf, b.StoredFirmware[bdf], stored))
+			}
+		}
 		if hash, err := NVConfigHash(h, bdf); err != nil || hash != b.NVConfig[bdf] {
 			detail = append(detail, fmt.Sprintf("the persistent configuration of the ConnectX function %s changed during the rental (or cannot be read)", bdf))
 		}
@@ -151,26 +188,33 @@ func hostAddresses(h Host, netdev string) []string {
 	return addrs
 }
 
-// takeNICs hands the ConnectX card to the VM: nothing on the host may be using
-// its RDMA devices, the card's state is recorded (and saved) before anything
-// changes, and then every function of it -- with anything else in its IOMMU
-// groups that is not already going with the GPU -- moves to vfio-pci.
-func (rt *Runtime) takeNICs(st *State, r *Rental, functions []string, save func() error) error {
+// planNICs checks, before anything is taken from the host, that the ConnectX
+// card can go to a pair rental: nothing on the host may be using its RDMA
+// devices, and its state is recorded (and saved) for the teardown to verify.
+// It returns every function to move -- the card's, with anything else in their
+// IOMMU groups that is not already going with the GPU.
+func (rt *Runtime) planNICs(st *State, functions []string, save func() error) ([]string, error) {
 	if len(functions) == 0 {
-		return fmt.Errorf("this machine has no ConnectX card to hand to a pair rental")
+		return nil, fmt.Errorf("this machine has no ConnectX card to hand to a pair rental")
 	}
 	if holders := RDMAHolders(rt.h); len(holders) > 0 {
-		return fmt.Errorf("the ConnectX card's RDMA devices are in use on this machine by %s; stop them first", strings.Join(holders, ", "))
+		return nil, fmt.Errorf("the ConnectX card's RDMA devices are in use on this machine by %s; stop them first", strings.Join(holders, ", "))
 	}
 	have := map[string]bool{}
-	for _, f := range r.VFIO {
-		have[f] = true
+	if len(rt.spec.GPUs) > 0 {
+		gpuFuncs, err := GroupFunctions(rt.h, rt.spec.GPUs)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range gpuFuncs {
+			have[f] = true
+		}
 	}
 	var take []string
 	for _, f := range functions {
 		members, err := GroupMembers(rt.h, f)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, m := range members {
 			if !have[m] {
@@ -182,13 +226,28 @@ func (rt *Runtime) takeNICs(st *State, r *Rental, functions []string, save func(
 	sort.Strings(take)
 	base, err := RecordNICBaseline(rt.h, functions)
 	if err != nil {
-		return fmt.Errorf("record the ConnectX card before the rental: %w", err)
+		return nil, fmt.Errorf("record the ConnectX card before the rental: %w", err)
 	}
 	st.NICBaseline = base
 	if err := save(); err != nil {
-		return err
+		return nil, err
 	}
-	st.NICDevices, err = BindVFIO(rt.h, take)
+	return take, nil
+}
+
+// takeNICs hands the functions planNICs chose to the VM, right before it
+// boots: the host keeps the cable until the last moment. The RDMA check runs
+// again -- the GPU handover can take a while -- and each function is recorded
+// before it moves.
+func (rt *Runtime) takeNICs(st *State, r *Rental, take []string, save func() error) error {
+	if holders := RDMAHolders(rt.h); len(holders) > 0 {
+		return fmt.Errorf("the ConnectX card's RDMA devices are in use on this machine by %s; stop them first", strings.Join(holders, ", "))
+	}
+	var err error
+	st.NICDevices, err = BindVFIO(rt.h, take, func(b []BoundDevice) error {
+		st.NICDevices = b
+		return save()
+	})
 	if serr := save(); err == nil {
 		err = serr
 	}

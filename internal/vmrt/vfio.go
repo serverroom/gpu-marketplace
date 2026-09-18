@@ -86,8 +86,11 @@ func GroupProblems(h Host, gpus []string) []string {
 }
 
 // BindVFIO moves each function to vfio-pci. It returns what it bound so far
-// even on error, so the caller can give back exactly that.
-func BindVFIO(h Host, functions []string) ([]BoundDevice, error) {
+// even on error, so the caller can give back exactly that. record (nil: none)
+// is given the list, this function included, before each function is touched
+// -- the caller saves it, so an agent killed halfway knows every function it
+// may have moved and the driver each came from; an error from it stops there.
+func BindVFIO(h Host, functions []string, record func([]BoundDevice) error) ([]BoundDevice, error) {
 	if err := h.Run("modprobe", "vfio-pci"); err != nil {
 		return nil, fmt.Errorf("load vfio-pci: %w", err)
 	}
@@ -97,6 +100,11 @@ func BindVFIO(h Host, functions []string) ([]BoundDevice, error) {
 		bound = append(bound, BoundDevice{BDF: bdf, Driver: orig})
 		if orig == "vfio-pci" {
 			continue
+		}
+		if record != nil {
+			if err := record(bound); err != nil {
+				return bound, fmt.Errorf("record %s before moving it: %w", bdf, err)
+			}
 		}
 		if err := h.WriteFile(devPath(bdf)+"/driver_override", []byte("vfio-pci"), 0200); err != nil {
 			return bound, fmt.Errorf("claim %s: %w", bdf, err)
@@ -118,19 +126,31 @@ func BindVFIO(h Host, functions []string) ([]BoundDevice, error) {
 
 // ReleaseVFIO gives every function back: off vfio-pci, override cleared, a
 // function-level reset where the device offers one, then back to the driver it
-// came from. ok is false if any of that did not verify.
+// came from. A function already on a host driver -- given back by an earlier
+// teardown, or never moved -- is left alone: resetting a device under its
+// live driver could hang it. ok is false if any of that did not verify.
 func ReleaseVFIO(h Host, bound []BoundDevice) (ok bool, detail []string) {
 	ok = true
 	for _, d := range bound {
 		if d.Driver == "vfio-pci" {
 			continue
 		}
-		if driverOf(h, d.BDF) == "vfio-pci" {
+		switch cur := driverOf(h, d.BDF); cur {
+		case "vfio-pci":
 			if err := h.WriteFile("/sys/bus/pci/drivers/vfio-pci/unbind", []byte(d.BDF), 0200); err != nil {
 				ok = false
 				detail = append(detail, fmt.Sprintf("release %s from vfio-pci: %v", d.BDF, err))
 				continue
 			}
+		case "":
+			// Off every driver: reset and probed below.
+		default:
+			_ = h.WriteFile(devPath(d.BDF)+"/driver_override", []byte("\n"), 0200)
+			if d.Driver != "" && cur != d.Driver {
+				ok = false
+				detail = append(detail, fmt.Sprintf("%s is on %q, not %s", d.BDF, cur, d.Driver))
+			}
+			continue
 		}
 		_ = h.WriteFile(devPath(d.BDF)+"/driver_override", []byte("\n"), 0200)
 		if h.Exists(devPath(d.BDF) + "/reset") {

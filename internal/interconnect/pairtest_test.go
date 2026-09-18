@@ -1,6 +1,7 @@
 package interconnect_test
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -31,13 +32,13 @@ func findBoth(a, b side, w interface {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		ra.found, ra.err = interconnect.FindPeer(a.h, w.Opener("A"), a.ports, listingA, wait, own(a), "")
+		ra.found, ra.err = interconnect.FindPeer(context.Background(), a.h, w.Opener("A"), a.ports, listingA, wait, own(a), "")
 	}()
 	go func() {
 		defer wg.Done()
 		// The other machine's command is typed a little later.
 		time.Sleep(20 * time.Millisecond)
-		rb.found, rb.err = interconnect.FindPeer(b.h, w.Opener("B"), b.ports, listingB, wait, own(b), "")
+		rb.found, rb.err = interconnect.FindPeer(context.Background(), b.h, w.Opener("B"), b.ports, listingB, wait, own(b), "")
 	}()
 	wg.Wait()
 	return ra, rb
@@ -96,10 +97,30 @@ func TestPlanNumbersLinksByNodeAsMAC(t *testing.T) {
 	}
 }
 
+// Ctrl-C while waiting for the other machine ends the wait at once, and the
+// ports go back as they were.
+func TestPairTestWaitStopsWhenCancelled(t *testing.T) {
+	settleFast(t)
+	a, _, w := cabled()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	start := time.Now()
+	_, err := interconnect.FindPeer(ctx, a.h, w.Opener("A"), a.ports, listingA, time.Minute, own(a), "")
+	if err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Errorf("the wait went on for %v after a stop", time.Since(start))
+	}
+	if string(a.h.Files["/proc/sys/net/ipv6/conf/enp1s0f0np0/disable_ipv6"]) != "0" || len(w.Opened()) != 0 {
+		t.Errorf("port not put back: %v", a.h.Calls)
+	}
+}
+
 func TestPairTestWithNobodyOnTheCable(t *testing.T) {
 	settleFast(t)
 	a, _, w := cabled()
-	_, err := interconnect.FindPeer(a.h, w.Opener("A"), a.ports, listingA, 80*time.Millisecond, own(a), "")
+	_, err := interconnect.FindPeer(context.Background(), a.h, w.Opener("A"), a.ports, listingA, 80*time.Millisecond, own(a), "")
 	if err == nil || !strings.Contains(err.Error(), "run the same command on the other machine") {
 		t.Fatalf("err = %v", err)
 	}
@@ -126,7 +147,7 @@ func TestPairTestRefusesASwitch(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = interconnect.FindPeer(third.h, w.Opener("C"), third.ports[:1], "listing-c", 2*time.Second, own(third), "")
+		_, _ = interconnect.FindPeer(context.Background(), third.h, w.Opener("C"), third.ports[:1], "listing-c", 2*time.Second, own(third), "")
 	}()
 	time.Sleep(50 * time.Millisecond) // the third machine is already on the switch
 	ra, _ := findBoth(a, b, w, 2*time.Second)

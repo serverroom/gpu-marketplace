@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt/fakehost"
 )
@@ -130,5 +131,51 @@ func TestCheckBakeDriver(t *testing.T) {
 		if err := CheckBakeDriver(flag); (err == nil) != ok {
 			t.Errorf("CheckBakeDriver(%q) = %v", flag, err)
 		}
+	}
+}
+
+// An agent that starts while a rental holds the GPU cannot see the GPU: it
+// never calls the machine GPU-less, leaves the count out, and reads the
+// machine again once the rental has gone -- and says so.
+func TestAMachineReadMidRentalIsReadAgainAfterIt(t *testing.T) {
+	noRelay(t)
+	h := cpuHost(t)
+	h.Files[vmrt.StatePath(dataDir)] = []byte(`{"rental_id":"R1","devices":[{"bdf":"0000:05:00.0","driver":"amdgpu"}]}`)
+	p := Detect(h, "linux", "amd64", dataDir, version)
+	c := p.Capability()
+	if c.Ready || c.Kind != KindQEMUVFIO || c.GPUCount != nil || !strings.Contains(strings.Join(c.Reasons, ";"), "a rental holds this machine's GPU") {
+		t.Fatalf("mid-rental capability = %+v", c)
+	}
+
+	changed := 0
+	p.OnCapabilityChange(func() { changed++ })
+	m := &fakeMachine{stopRes: clean(), present: true}
+	p.machine, p.status = m, StatusRented
+	delete(h.Files, vmrt.StatePath(dataDir)) // the teardown removes the state
+	if err := p.Teardown("R1"); err != nil {
+		t.Fatal(err)
+	}
+	c = p.Capability()
+	if !c.Ready || c.Kind != KindQEMU || c.GPUCount == nil || changed != 1 {
+		t.Errorf("after the rental: %+v (reported %d)", c, changed)
+	}
+}
+
+// Ids the agent keeps for its own VMs are never a renter's.
+func TestSetupIDsAreNeverRentals(t *testing.T) {
+	noRelay(t)
+	p := Detect(cpuHost(t), "linux", "amd64", dataDir, version)
+	m := &fakeMachine{stopRes: clean()}
+	p.machine, p.async = m, false
+	for _, id := range []string{vmrt.SelfTestPrefix + "1", "abcd1234" + vmrt.PairTestSuffix, vmrt.BakeID} {
+		if !control.ValidRentalID(id) {
+			continue
+		}
+		if err := p.Provision(id, renterKey(t)); err == nil || !strings.Contains(err.Error(), "test boots") {
+			t.Errorf("%s: %v", id, err)
+		}
+	}
+	if m.started != 0 {
+		t.Errorf("started %d", m.started)
 	}
 }

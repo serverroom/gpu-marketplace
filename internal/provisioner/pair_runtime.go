@@ -16,17 +16,21 @@ import (
 // right now, 400 for any field that does not validate, and 409 for a link on
 // a port this machine does not have or a machine that is not free.
 func (p *Provisioner) PairProvision(req control.PairProvisionRequest) error {
-	if !p.hasPairRuntime() || p.runtime == nil {
+	v := p.view()
+	if !p.hasPairRuntime() || v.runtime == nil {
 		return control.Unavailable("this agent cannot host a pair rental on this machine")
 	}
-	if !p.vendor.CanHost() {
-		return control.Unavailable("%v (vendor %s)", ErrVendorCannotIsolate, p.vendor)
+	if !v.vendor.CanHost() {
+		return control.Unavailable("%v (vendor %s)", ErrVendorCannotIsolate, v.vendor)
 	}
 	if c := p.Capability(); !c.Ready {
 		return control.Unavailable("%v: %s", ErrNotReady, strings.Join(c.Reasons, "; "))
 	}
 	if !control.ValidRentalID(req.RentalID) {
 		return control.Invalid("rental_id %q is not a rental id", req.RentalID)
+	}
+	if vmrt.IsSetupID(req.RentalID) {
+		return control.Invalid("rental_id %q is one this agent keeps for its own test boots", req.RentalID)
 	}
 	key, err := vmrt.NormalizePubkey(req.RenterPubkey)
 	if err != nil {
@@ -112,10 +116,11 @@ func (p *Provisioner) PairProvision(req control.PairProvisionRequest) error {
 // PairStatus is the pair rental on this machine for /status: its node and what
 // its guest has said about each link. nil when no pair rental is here.
 func (p *Provisioner) PairStatus() *control.PairStatus {
-	if p.runtime == nil {
+	rt := p.Runtime()
+	if rt == nil {
 		return nil
 	}
-	pair, ok, fail := p.runtime.PairRental()
+	pair, ok, fail := rt.PairRental()
 	if pair == nil {
 		return nil
 	}
