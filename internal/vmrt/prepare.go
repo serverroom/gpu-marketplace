@@ -21,6 +21,10 @@ var (
 	DefaultDriver = "580-server-open"
 )
 
+// NoDriver is the driver of a base image baked without the NVIDIA driver: the
+// image of a machine that has no NVIDIA GPU.
+const NoDriver = "none"
+
 func cloudImageName(arch string) string {
 	return UbuntuRelease + "-server-cloudimg-" + arch + ".img"
 }
@@ -74,6 +78,17 @@ func GoldenHasExtra(h Host, spec Spec, extra string) bool {
 		}
 	}
 	return false
+}
+
+// GoldenDriver is the NVIDIA driver the baked image on disk records: a branch,
+// NoDriver, or "" when nothing is recorded.
+func GoldenDriver(h Host, spec Spec) string {
+	data, err := h.ReadFile(spec.GoldenImage + ".json")
+	var info GoldenInfo
+	if err != nil || json.Unmarshal(data, &info) != nil {
+		return ""
+	}
+	return info.Driver
 }
 
 // GoldenProblem says why the baked image on disk is not the one this agent
@@ -163,13 +178,16 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	host := ChooseDriver(h)
+	host := ChooseImageDriver(h)
 	switch {
 	case o.Driver == "":
 		o.Driver, o.DriverSource = host.Driver, host.Source
-		if host.Source == DriverFromHost {
+		switch host.Source {
+		case DriverFromHost:
 			log("This machine runs NVIDIA driver %s; the rental image gets %s to match.", host.Describe(), o.Driver)
-		} else {
+		case DriverNoGPU:
+			log("This machine has no NVIDIA GPU; the rental image gets no NVIDIA driver.")
+		default:
 			log("This machine's NVIDIA driver could not be read; the rental image gets %s.", o.Driver)
 		}
 	case o.DriverSource == "":
@@ -286,7 +304,11 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return err
 	}
 
-	log("Booting the base image to install NVIDIA driver %s and the RDMA tools (this takes a while) ...", o.Driver)
+	if o.Driver == NoDriver {
+		log("Booting the base image to install the RDMA tools, without an NVIDIA driver: this machine has no NVIDIA GPU (this takes a while) ...")
+	} else {
+		log("Booting the base image to install NVIDIA driver %s and the RDMA tools (this takes a while) ...", o.Driver)
+	}
 	if err := h.Run("systemd-run", LaunchArgs(spec, r)...); err != nil {
 		return fmt.Errorf("boot bake VM: %w", err)
 	}

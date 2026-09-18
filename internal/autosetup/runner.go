@@ -54,7 +54,7 @@ func AptGet(h vmrt.Host) bool {
 // Begin is a new attempt at plan: the driver the image gets (matched to the
 // host's), and the key it is for.
 func (r *Runner) Begin(plan Plan, gpus []string, by string) Attempt {
-	drv := vmrt.ChooseDriver(r.Host)
+	drv := vmrt.ChooseImageDriver(r.Host)
 	steps := make([]string, len(plan.Steps))
 	for i, s := range plan.Steps {
 		steps[i] = string(s)

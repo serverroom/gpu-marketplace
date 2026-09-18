@@ -41,6 +41,7 @@ func newHost() *fakehost.Host {
 	h := fakehost.New()
 	h.PCI(testGPU, "nvidia", "0x030200", testGPU, testAudio)
 	h.PCI(testAudio, "snd_hda_intel", "0x040300", testGPU, testAudio)
+	h.Files["/sys/bus/pci/devices/"+testGPU+"/vendor"] = []byte("0x10de")
 	h.Files["/proc/sys/net/ipv4/ip_forward"] = []byte("0\n")
 	h.Files["/usr/share/OVMF/OVMF_VARS_4M.fd"] = []byte("vars")
 	h.Outputs["losetup --find --show"] = "/dev/loop7\n"

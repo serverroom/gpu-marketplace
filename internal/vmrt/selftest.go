@@ -158,15 +158,22 @@ func LoadSelfTest(h Host, dataDir string) (*SelfTestResult, error) {
 
 // SelfTestProblem is the reason a machine is not ready on account of its self-
 // test, or "" when a passing test for this version and these GPUs is on disk.
+// A machine without a GPU passes with a test that had none; a machine with
+// GPUs needs a test that passed them through (a test from before it had them
+// does not count).
 func SelfTestProblem(res *SelfTestResult, version string, gpus []string) string {
 	const run = "run 'sudo gpu-agent check --boot'"
 	switch {
+	case res == nil && len(gpus) == 0:
+		return "this machine has not yet booted a test rental; " + run
 	case res == nil:
 		return "this machine has not yet booted a test rental with its GPU passed through; " + run
 	case !res.Passed:
 		return fmt.Sprintf("its last test boot failed (%s); fix that and %s", strings.Join(res.Problems, "; "), run)
 	case res.AgentVersion != version:
 		return fmt.Sprintf("its passing test boot was with agent %s, not %s; %s", res.AgentVersion, version, run)
+	case len(res.HostGPUs) == 0 && len(gpus) > 0:
+		return "this machine has a GPU now, and its last test boot had none; " + run
 	case !sameSet(res.HostGPUs, gpus):
 		return "its GPUs have changed since its last test boot; " + run
 	}

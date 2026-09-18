@@ -282,21 +282,26 @@ func ValidDriver(d string) bool { return driverPattern.MatchString(d) }
 // tools only -- no DOCA, no NCCL).
 var RDMAPackages = []string{"rdma-core", "ibverbs-utils", "perftest", "infiniband-diags", "rdmacm-utils", "ethtool"}
 
-// BakeUserData installs the NVIDIA driver and the RDMA tools into the base
-// image once (and the kernel's extra modules when the image's kernel lacks
-// mlx5_ib), then wipes cloud-init's memory of this boot (so every rental's
-// first boot is a first boot) and powers off. The host reads the result from
-// the serial console.
+// BakeUserData installs the NVIDIA driver (unless driver is NoDriver: a
+// machine without an NVIDIA GPU) and the RDMA tools into the base image once
+// (and the kernel's extra modules when the image's kernel lacks mlx5_ib), then
+// wipes cloud-init's memory of this boot (so every rental's first boot is a
+// first boot) and powers off. The host reads the result from the serial
+// console.
 func BakeUserData(driver string) (string, error) {
-	if !ValidDriver(driver) {
+	if driver != NoDriver && !ValidDriver(driver) {
 		return "", fmt.Errorf("invalid driver branch %q", driver)
 	}
-	branch := strings.TrimSuffix(strings.TrimSuffix(driver, "-open"), "-server")
-	utils := "nvidia-utils-" + branch
-	if strings.Contains(driver, "-server") {
-		utils += "-server"
-	}
 	install := "apt-get install -y --no-install-recommends"
+	nvidia := "true"
+	if driver != NoDriver {
+		branch := strings.TrimSuffix(strings.TrimSuffix(driver, "-open"), "-server")
+		utils := "nvidia-utils-" + branch
+		if strings.Contains(driver, "-server") {
+			utils += "-server"
+		}
+		nvidia = install + " linux-headers-generic nvidia-driver-" + driver + " " + utils + " || ok=0"
+	}
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
 	b.WriteString("ssh_pwauth: false\n")
@@ -308,7 +313,7 @@ func BakeUserData(driver string) (string, error) {
 		"export DEBIAN_FRONTEND=noninteractive",
 		"ok=1",
 		"apt-get update || ok=0",
-		install + " linux-headers-generic nvidia-driver-" + driver + " " + utils + " || ok=0",
+		nvidia,
 		install + " " + strings.Join(RDMAPackages, " ") + " || ok=0",
 		"modinfo mlx5_ib >/dev/null 2>&1 || " + install + " linux-modules-extra-$(uname -r) || ok=0",
 		"if [ $ok = 1 ]; then /usr/local/sbin/gpuagent-say '" + markBake + " DONE'; else /usr/local/sbin/gpuagent-say '" + markBake + " FAIL'; fi",

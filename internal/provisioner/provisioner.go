@@ -53,6 +53,9 @@ const (
 	// path, so there is no device to hand a guest. (Unified memory on its own is
 	// not the problem -- a GB10 has it and can host.)
 	VendorApple GPUVendor = "apple"
+	// VendorNone is a Linux machine without a GPU: it hosts too, renting its
+	// CPUs, memory and disk (CONTRACT-v2 s1).
+	VendorNone GPUVendor = "none"
 )
 
 // ErrVendorCannotIsolate is returned when the host's GPUs cannot be passed
@@ -68,6 +71,10 @@ var ErrNotReady = errors.New("this machine cannot host a rental")
 func (v GPUVendor) CanIsolate() bool {
 	return v == VendorNVIDIA || v == VendorAMD
 }
+
+// CanHost reports whether a machine with these GPUs -- or none -- can host a
+// rental: its GPUs can be isolated, or it has none to isolate.
+func (v GPUVendor) CanHost() bool { return v.CanIsolate() || v == VendorNone }
 
 // Machine is the rental runtime. *vmrt.Runtime is the real one.
 type Machine interface {
@@ -284,7 +291,7 @@ func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
 	p.mu.Lock()
 	vendor := p.vendor
 	p.mu.Unlock()
-	if !vendor.CanIsolate() {
+	if !vendor.CanHost() {
 		return fmt.Errorf("%w (vendor %s)", ErrVendorCannotIsolate, vendor)
 	}
 	if !c.Ready {

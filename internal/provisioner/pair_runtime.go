@@ -19,7 +19,7 @@ func (p *Provisioner) PairProvision(req control.PairProvisionRequest) error {
 	if !p.hasPairRuntime() || p.runtime == nil {
 		return control.Unavailable("this agent cannot host a pair rental on this machine")
 	}
-	if !p.vendor.CanIsolate() {
+	if !p.vendor.CanHost() {
 		return control.Unavailable("%v (vendor %s)", ErrVendorCannotIsolate, p.vendor)
 	}
 	if c := p.Capability(); !c.Ready {

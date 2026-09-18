@@ -171,3 +171,24 @@ func ForeignGroupMembers(h Host, devices []string, allowed func(bdf string) bool
 	sort.Strings(foreign)
 	return foreign, nil
 }
+
+// NVIDIAPCIGPUs are the NVIDIA display and 3D controllers on the PCI bus,
+// whatever driver has them. A machine where nvidia-smi sees none of them has
+// an NVIDIA GPU without a working driver -- not a machine without a GPU.
+func NVIDIAPCIGPUs(h Host) []string {
+	vendors, _ := h.Glob("/sys/bus/pci/devices/*/vendor")
+	var out []string
+	for _, v := range vendors {
+		bdf := path.Base(path.Dir(v))
+		data, err := h.ReadFile(v)
+		if err != nil || strings.ToLower(strings.TrimSpace(string(data))) != "0x10de" {
+			continue
+		}
+		class, err := h.ReadFile(devPath(bdf) + "/class")
+		if err == nil && strings.HasPrefix(strings.TrimSpace(string(class)), "0x03") {
+			out = append(out, bdf)
+		}
+	}
+	sort.Strings(out)
+	return out
+}

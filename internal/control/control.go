@@ -34,6 +34,11 @@ type Capability struct {
 	// VMUser: the login the rental's VM accepts the renter's key for. Absent from
 	// agents up to v0.1.7, whose VMs log in as renter.
 	VMUser string `json:"vm_user,omitempty"`
+	// GPUCount is how many GPUs a rental on this machine gets: 0 on a Linux
+	// machine without a GPU, which hosts CPU-only rentals. Absent where the
+	// agent cannot host at all (macOS, Windows) and from agents up to v0.1.9;
+	// the control plane treats only an explicit 0 as a machine without a GPU.
+	GPUCount *int `json:"gpu_count,omitempty"`
 	// Identity is what the machine says it is (DMI) and whether the agent
 	// confirmed it as an NVIDIA DGX Spark; Interconnect is whether it can be
 	// half of a linked pair. Absent from agents up to v0.1.9, and Identity

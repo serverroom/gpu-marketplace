@@ -146,13 +146,24 @@ func TestPreflightRefusesAGPUThatSharesItsGroup(t *testing.T) {
 	}
 }
 
+// A bare machine lacks KVM; since v0.2.0 it is not refused for having no GPU
+// (CONTRACT-v2 s1), and without a GPU it needs no IOMMU. A machine WITH a GPU
+// still needs the IOMMU.
 func TestPreflightNoKVMNoIOMMUNoGPU(t *testing.T) {
 	h := fakehost.New()
 	all := reasons(Preflight(h, "linux", spec(), version))
-	for _, want := range []string{"/dev/kvm", "IOMMU", "no NVIDIA or AMD GPU"} {
-		if !strings.Contains(all, want) {
-			t.Errorf("reasons missing %q: %s", want, all)
+	if !strings.Contains(all, "/dev/kvm") {
+		t.Errorf("reasons missing /dev/kvm: %s", all)
+	}
+	for _, unwanted := range []string{"IOMMU", "no NVIDIA or AMD GPU"} {
+		if strings.Contains(all, unwanted) {
+			t.Errorf("a machine without a GPU was refused for %q: %s", unwanted, all)
 		}
+	}
+	gpu := goodHost(t, "00000000:01:00.0, NVIDIA L4, 24564\n")
+	delete(gpu.Files, "/sys/kernel/iommu_groups/13")
+	if all := reasons(Preflight(gpu, "linux", spec(), version)); !strings.Contains(all, "the IOMMU is off") {
+		t.Errorf("a GPU machine without the IOMMU was not refused: %s", all)
 	}
 }
 

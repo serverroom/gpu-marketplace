@@ -230,7 +230,12 @@ func TestNothingRunsForAReasonOnlyAPersonCanFix(t *testing.T) {
 		},
 		"too little memory": func(h *fakehost.Host) { h.SetFile("/proc/meminfo", []byte("MemTotal: 4000000 kB\n")) },
 		"too little disk":   func(h *fakehost.Host) { h.Outputs["df --output=avail"] = " Avail\n  30G\n" },
-		"no GPU":            func(h *fakehost.Host) { delete(h.Outputs, "nvidia-smi --query-gpu=pci.bus_id,name") },
+		// Since v0.2.0 a machine without a GPU hosts; one whose NVIDIA GPU the
+		// driver cannot see needs a person (to install the driver).
+		"a GPU without its driver": func(h *fakehost.Host) {
+			delete(h.Outputs, "nvidia-smi --query-gpu=pci.bus_id,name")
+			h.SetFile("/sys/bus/pci/devices/"+gpu+"/vendor", []byte("0x10de\n"))
+		},
 		"a desktop, not a Spark": func(h *fakehost.Host) {
 			h.SetLink("/proc/2558/fd/7", "/dev/nvidia0")
 			h.SetFile("/proc/2558/comm", []byte("Xorg\n"))

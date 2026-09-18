@@ -19,9 +19,13 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
-// KindQEMUVFIO names the only way this agent hosts a rental: a QEMU/KVM microVM
-// with the GPUs handed to it over VFIO, behind the netguard fence.
-const KindQEMUVFIO = "qemu-vfio"
+// The ways this agent hosts a rental: a QEMU/KVM microVM behind the netguard
+// fence, with the machine's GPUs handed to it over VFIO (KindQEMUVFIO), or on
+// a machine without a GPU, with its CPUs, memory and disk only (KindQEMU).
+const (
+	KindQEMUVFIO = "qemu-vfio"
+	KindQEMU     = "qemu"
+)
 
 // ReasonKind says who can fix a reason this machine is not ready: the agent's
 // automatic setup, or a person.
@@ -63,14 +67,18 @@ type HostReport struct {
 	// DesktopOnDemand: a confirmed DGX Spark not made headless on purpose; its
 	// desktop closes while rented or tested rather than refusing the rental.
 	DesktopOnDemand bool
+	// GPUCount is how many GPUs the machine has: the ones a rental would get,
+	// or, when the vendor tool sees none, the NVIDIA GPUs on the PCI bus.
+	GPUCount int
 }
 
 // Preflight checks, without changing anything, whether this machine can host a
-// rental: a Linux KVM host with the IOMMU on, GPUs that can be passed through
-// on their own, the runtime's tools, firmware and base image installed, enough
-// memory and disk -- and, once all of that holds, a passing test boot on this
-// very machine for this agent version. Every failing check is reported in words
-// a provider can act on, not just the first.
+// rental: a Linux KVM host, with the IOMMU on and GPUs that can be passed
+// through on their own when it has GPUs (a machine without one hosts too), the
+// runtime's tools, firmware and base image installed, enough memory and disk
+// -- and, once all of that holds, a passing test boot on this very machine for
+// this agent version. Every failing check is reported in words a provider can
+// act on, not just the first.
 func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostReport {
 	var rep HostReport
 	addKind := func(kind ReasonKind, format string, a ...interface{}) {
@@ -94,9 +102,6 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	if !h.Exists("/dev/kvm") {
 		add("KVM is not available (/dev/kvm is missing): enable virtualisation in the firmware and load the kvm module")
 	}
-	if groups, _ := h.Glob("/sys/kernel/iommu_groups/*"); len(groups) == 0 {
-		add("the IOMMU is off, so no GPU can be handed to a microVM: enable VT-d / AMD-Vi (or the SMMU on Arm) in the firmware and on the kernel command line")
-	}
 
 	var gpuNames []string
 	if nv, ok := detectNVIDIA(h); ok {
@@ -111,8 +116,24 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	} else if bdfs, ok := detectAMD(h); ok {
 		rep.Vendor = VendorAMD
 		rep.BDFs = bdfs
+	} else if pci := vmrt.NVIDIAPCIGPUs(h); len(pci) > 0 {
+		// A GPU the driver cannot see is not a machine without a GPU: renting
+		// it out as one would hide the GPU the host means to rent.
+		rep.Vendor = VendorNVIDIA
+		rep.GPUCount = len(pci)
+		add("this machine has an NVIDIA GPU (PCI %s), but nvidia-smi does not see it: install the NVIDIA driver on this machine and check again", strings.Join(pci, ", "))
 	} else {
-		add("no NVIDIA or AMD GPU was detected")
+		// No GPU at all: the machine rents its CPUs, memory and disk.
+		rep.Vendor = VendorNone
+	}
+	if len(rep.BDFs) > 0 {
+		rep.GPUCount = len(rep.BDFs)
+	}
+	// The IOMMU is what hands a GPU to a microVM; without a GPU it is not needed.
+	if rep.GPUCount > 0 {
+		if groups, _ := h.Glob("/sys/kernel/iommu_groups/*"); len(groups) == 0 {
+			add("the IOMMU is off, so no GPU can be handed to a microVM: enable VT-d / AMD-Vi (or the SMMU on Arm) in the firmware and on the kernel command line")
+		}
 	}
 	if len(rep.BDFs) > 0 && len(rep.Reasons) == 0 {
 		for _, problem := range vmrt.GroupProblems(h, rep.BDFs) {
@@ -150,6 +171,8 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 		addKind(ReasonImage, "the rental base image has not been built; run 'sudo gpu-agent runtime prepare'")
 	} else if problem := vmrt.GoldenProblem(h, spec); problem != "" {
 		addKind(ReasonImage, "%s", problem)
+	} else if rep.Vendor == VendorNVIDIA && vmrt.GoldenDriver(h, spec) == vmrt.NoDriver {
+		addKind(ReasonImage, "the rental base image was built without the NVIDIA driver, when this machine had no NVIDIA GPU; rebuild it with 'sudo gpu-agent runtime prepare'")
 	} else if rep.Vendor == VendorNVIDIA {
 		if problem := vmrt.GoldenDriverProblem(h, spec, vmrt.ChooseDriver(h)); problem != "" {
 			addKind(ReasonImage, "%s", problem)
@@ -213,9 +236,19 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	p.lockFrames = func() (func(), bool, error) { return interconnect.TryLock(dataDir) }
 	p.now = time.Now
 	_, ic := pair.Capability(interconnect.RecentPeers(interconnect.LoadPeers(h, dataDir), time.Now().Unix(), pair.PortMACs()))
+	kind := KindQEMUVFIO
+	var gpuCount *int
+	if goos == "linux" {
+		n := rep.GPUCount
+		gpuCount = &n
+		if rep.Vendor == VendorNone {
+			kind = KindQEMU
+		}
+	}
 	p.capability = control.Capability{
 		Ready:         len(rep.Reasons) == 0,
-		Kind:          KindQEMUVFIO,
+		Kind:          kind,
+		GPUCount:      gpuCount,
 		Reasons:       rep.Reasons,
 		AgentVersion:  version,
 		UnifiedMemory: rep.Unified,
@@ -224,6 +257,20 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		Interconnect:  ic,
 	}
 	return p
+}
+
+// HasNVIDIAGPU reports whether this machine has an NVIDIA GPU: one nvidia-smi
+// sees, or one on the PCI bus without a working driver yet.
+func HasNVIDIAGPU(h vmrt.Host) bool { return vmrt.HasNVIDIAGPU(h) }
+
+// CheckBakeDriver accepts what --driver may name: nothing (match this
+// machine: its own driver branch, or none on a machine without an NVIDIA GPU),
+// a driver branch, or "none".
+func CheckBakeDriver(flag string) error {
+	if flag == "" || flag == vmrt.NoDriver || vmrt.ValidDriver(flag) {
+		return nil
+	}
+	return fmt.Errorf("invalid driver branch %q (for example %s, or none)", flag, vmrt.DefaultDriver)
 }
 
 // RelayAddrs resolves the relay this agent tunnels to, so the pair preflight can
@@ -262,8 +309,12 @@ func hostMemoryMB(h vmrt.Host) int {
 // nearest existing parent), less 20 GB for the host, capped at 500 GB.
 func rentalDiskGB(h vmrt.Host, dataDir string) int {
 	dir := dataDir
-	for dir != "" && dir != "/" && !h.Exists(dir) {
-		dir = filepath.Dir(dir)
+	for dir != "" && !h.Exists(dir) {
+		parent := filepath.Dir(dir)
+		if parent == dir { // the root, on any OS
+			break
+		}
+		dir = parent
 	}
 	out, err := h.Output("df", "--output=avail", "-B1G", dir)
 	if err != nil {

@@ -18,6 +18,8 @@ const (
 	DriverDefault = "default"
 	// DriverFromFlag: a person named it with --driver. Never second-guessed.
 	DriverFromFlag = "flag"
+	// DriverNoGPU: the machine has no NVIDIA GPU, so the image gets none.
+	DriverNoGPU = "no-gpu"
 )
 
 // NVIDIAVersionFile is where the loaded NVIDIA kernel module says what it is.
@@ -35,6 +37,9 @@ type DriverChoice struct {
 
 // Describe is the host driver in words, for logs and GoldenInfo.
 func (c DriverChoice) Describe() string {
+	if c.Source == DriverNoGPU {
+		return "no NVIDIA GPU"
+	}
 	if c.HostVersion == "" {
 		return "unknown"
 	}
@@ -87,4 +92,24 @@ func ChooseDriver(h Host) DriverChoice {
 	}
 	c.Source = DriverFromHost
 	return c
+}
+
+// HasNVIDIAGPU reports whether this machine has an NVIDIA GPU: one nvidia-smi
+// lists, or one on the PCI bus without a working driver yet.
+func HasNVIDIAGPU(h Host) bool {
+	out, err := h.Output("nvidia-smi", "--query-gpu=pci.bus_id,name,memory.total", "--format=csv,noheader,nounits")
+	if err == nil && strings.TrimSpace(out) != "" {
+		return true
+	}
+	return len(NVIDIAPCIGPUs(h)) > 0
+}
+
+// ChooseImageDriver is the driver a rental image gets on this machine:
+// NoDriver on a machine with no NVIDIA GPU at all (none nvidia-smi lists, none
+// on the PCI bus), else ChooseDriver's match to the host's own driver.
+func ChooseImageDriver(h Host) DriverChoice {
+	if !HasNVIDIAGPU(h) {
+		return DriverChoice{Driver: NoDriver, Source: DriverNoGPU}
+	}
+	return ChooseDriver(h)
 }

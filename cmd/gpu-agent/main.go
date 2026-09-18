@@ -315,7 +315,7 @@ func main() {
 
 		case "runtime":
 			if len(args) < 2 || args[1] != "prepare" {
-				fmt.Println("Usage: gpu-agent runtime prepare [--install-deps] [--driver 580-server-open]  |  gpu-agent runtime prepare --headless [--yes]")
+				fmt.Println("Usage: gpu-agent runtime prepare [--install-deps] [--driver 580-server-open|none]  |  gpu-agent runtime prepare --headless [--yes]")
 				os.Exit(1)
 			}
 			runPrepare(args[2:])
@@ -521,7 +521,7 @@ func printUsage() {
 	fmt.Println("  select-location  Redo the location choice for an existing registration")
 	fmt.Println("  install          Install as a system service")
 	fmt.Println("  check            Check whether this machine can host a rental, and what a tenant is fenced off from (--rules)")
-	fmt.Println("  check --boot     Boot a real test rental with the GPU passed through and record the result")
+	fmt.Println("  check --boot     Boot a real test rental (the GPU passed through, when there is one) and record the result")
 	fmt.Println("  check --pair     Check whether this machine can be half of a linked pair of DGX Sparks (--json)")
 	fmt.Println("  check --boot --pair  Run the pair test boot with the other machine of the pair (--min-rdma-gbps, --yes)")
 	fmt.Println("  setup            Finish this machine's setup now, with output (the agent does it by itself after linking)")

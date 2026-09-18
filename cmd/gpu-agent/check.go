@@ -28,6 +28,9 @@ func detectProvisioner() *provisioner.Provisioner {
 
 // printCapability writes the hosting half of status/check.
 func printCapability(c control.Capability) {
+	if c.GPUCount != nil && *c.GPUCount == 0 {
+		fmt.Println("GPU:          none — a rental on this machine gets its CPUs, memory and disk")
+	}
 	if c.UnifiedMemory {
 		fmt.Println("GPU memory:   unified — the GPU has no memory of its own; the machine's memory is one pool used by both CPU and GPU, and a rental gets that pool")
 	}
@@ -47,7 +50,7 @@ func printCapability(c control.Capability) {
 func runCheck(svc service.Service, args []string) {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	rules := fs.Bool("rules", false, "print the exact nftables rules a rental runs behind")
-	boot := fs.Bool("boot", false, "boot a real test rental with the GPU passed through, and record the result")
+	boot := fs.Bool("boot", false, "boot a real test rental (with the GPU passed through, on a machine that has one), and record the result")
 	yes := fs.Bool("yes", false, "with --boot: do not ask for confirmation")
 	pair := fs.Bool("pair", false, "check whether this machine can be half of a linked pair of DGX Sparks (read-only); with --boot, run the pair test boot")
 	jsonOut := fs.Bool("json", false, "with --pair: print the identity and interconnect report as JSON")
@@ -132,13 +135,20 @@ func runSelfTest(svc service.Service, yes bool) {
 		os.Exit(2)
 	}
 
+	gpus := rt.Spec().GPUs
 	fmt.Println("This boots a test rental for a few minutes:")
-	fmt.Printf("  - the GPU (%s) is taken from this machine and given to a microVM; anything using it must be stopped\n", strings.Join(rt.Spec().GPUs, ", "))
-	if rt.Spec().DesktopOnDemand {
-		fmt.Println("  - this machine's desktop closes for the test (anything open on its screen closes with it) and comes back after it")
+	if len(gpus) > 0 {
+		fmt.Printf("  - the GPU (%s) is taken from this machine and given to a microVM; anything using it must be stopped\n", strings.Join(gpus, ", "))
+		if rt.Spec().DesktopOnDemand {
+			fmt.Println("  - this machine's desktop closes for the test (anything open on its screen closes with it) and comes back after it")
+		}
+		fmt.Println("  - the VM reports what GPU it sees, whether it reaches the internet, and that it CANNOT reach this machine or its network")
+		fmt.Println("  - then it is destroyed, its disk key discarded, and the GPU given back and checked")
+	} else {
+		fmt.Println("  - a microVM is booted with a share of this machine's CPUs, memory and disk, as a rental gets them")
+		fmt.Println("  - the VM reports whether it reaches the internet, and that it CANNOT reach this machine or its network")
+		fmt.Println("  - then it is destroyed and its disk key discarded")
 	}
-	fmt.Println("  - the VM reports what GPU it sees, whether it reaches the internet, and that it CANNOT reach this machine or its network")
-	fmt.Println("  - then it is destroyed, its disk key discarded, and the GPU given back and checked")
 	if !yes && !confirm("Run the test boot? [y/N]: ") {
 		fmt.Println("Nothing was changed.")
 		return
@@ -153,8 +163,12 @@ func runSelfTest(svc service.Service, yes bool) {
 	res := rt.SelfTest(version)
 	release()
 	if res.Passed {
-		fmt.Printf("PASSED: the VM saw %s, reached the internet, and could not reach %s.\n",
-			strings.Join(res.GuestGPUs, "; "), strings.Join(res.Blocked, ", "))
+		if len(gpus) > 0 {
+			fmt.Printf("PASSED: the VM saw %s, reached the internet, and could not reach %s.\n",
+				strings.Join(res.GuestGPUs, "; "), strings.Join(res.Blocked, ", "))
+		} else {
+			fmt.Printf("PASSED: the VM booted, reached the internet, and could not reach %s.\n", strings.Join(res.Blocked, ", "))
+		}
 		if _, err := svc.Status(); err == nil {
 			if err := service.Control(svc, "restart"); err == nil {
 				fmt.Println("The agent service was restarted so it reports this machine as ready.")
@@ -227,7 +241,7 @@ func runHeadless(yes bool) {
 // the rental base image.
 func runPrepare(args []string) {
 	fs := flag.NewFlagSet("runtime prepare", flag.ExitOnError)
-	driver := fs.String("driver", "", "NVIDIA driver branch to bake into the rental image, e.g. 580-server-open or 580-server (default: match this machine's own driver)")
+	driver := fs.String("driver", "", "NVIDIA driver branch to bake into the rental image, e.g. 580-server-open or 580-server, or none (default: match this machine's own driver; none on a machine without an NVIDIA GPU)")
 	deps := fs.Bool("install-deps", false, "install QEMU, UEFI firmware, cloud-image-utils, cryptsetup and nftables with apt-get")
 	headless := fs.Bool("headless", false, "make this machine run without a desktop, so its GPU is free to rent (closes the desktop now); does nothing else")
 	yes := fs.Bool("yes", false, "with --headless: do not ask for confirmation")
@@ -244,6 +258,14 @@ func runPrepare(args []string) {
 	if *headless {
 		runHeadless(*yes)
 		return
+	}
+	if err := provisioner.CheckBakeDriver(*driver); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime prepare: %v\n", err)
+		os.Exit(1)
+	}
+	if *driver == "" && !provisioner.HasNVIDIAGPU(vmrt.OSHost{}) {
+		fmt.Println("This machine has no NVIDIA GPU: the base image is built without the NVIDIA driver.")
+		fmt.Println("If a GPU is added later, run 'sudo gpu-agent runtime prepare' again.")
 	}
 	release, err := vmrt.AcquireBusy(vmrt.OSHost{}, config.DataDir(), os.Getpid(), "building the rental image")
 	if err != nil {
