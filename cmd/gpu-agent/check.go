@@ -36,11 +36,19 @@ func printCapability(c control.Capability) {
 	}
 	if c.Ready {
 		fmt.Println("Hosting:      ready — this machine can host a rental")
-		return
+	} else {
+		fmt.Println("Hosting:      not ready — the marketplace will not offer this machine to renters:")
+		for _, r := range c.Reasons {
+			fmt.Printf("                - %s\n", r)
+		}
 	}
-	fmt.Println("Hosting:      not ready — the marketplace will not offer this machine to renters:")
-	for _, r := range c.Reasons {
-		fmt.Printf("                - %s\n", r)
+	// A DGX Spark can also be half of a linked pair; say where that stands.
+	if c.Identity != nil && c.Identity.ConfirmedDGXSpark && c.Interconnect != nil {
+		if c.Interconnect.Ready {
+			fmt.Println("Linked pair:  ready — this DGX Spark can be half of a linked pair")
+		} else {
+			fmt.Println("Linked pair:  not ready — 'sudo gpu-agent check --pair' says what is missing")
+		}
 	}
 }
 
