@@ -180,7 +180,7 @@ func (rt *Runtime) PairSelfTest(version string, o PairSelfTestOptions) PairTestR
 		return fail(problem)
 	}
 
-	r := NewRental(rt.spec.DataDir, o.ID)
+	r := NewRental(rt.spec.Storage(), o.ID)
 	var single SerialReport
 	var pair PairSerialReport
 	guestOK := map[int]bool{}

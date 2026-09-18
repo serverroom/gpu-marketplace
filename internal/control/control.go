@@ -39,12 +39,23 @@ type Capability struct {
 	// agent cannot host at all (macOS, Windows) and from agents up to v0.1.9;
 	// the control plane treats only an explicit 0 as a machine without a GPU.
 	GPUCount *int `json:"gpu_count,omitempty"`
+	// Guest is what a renter's VM gets on this machine (Linux only): the
+	// same figures the VM is sized with.
+	Guest *Guest `json:"guest,omitempty"`
 	// Identity is what the machine says it is (DMI) and whether the agent
 	// confirmed it as an NVIDIA DGX Spark; Interconnect is whether it can be
 	// half of a linked pair. Absent from agents up to v0.1.9, and Identity
 	// from hosts that are not Linux.
 	Identity     *Identity     `json:"identity,omitempty"`
 	Interconnect *Interconnect `json:"interconnect,omitempty"`
+}
+
+// Guest is a rental VM's size on this machine.
+type Guest struct {
+	VCPUs    int    `json:"vcpus"`
+	MemoryGB int    `json:"memory_gb"`
+	DiskGB   int    `json:"disk_gb"`
+	CPU      string `json:"cpu"`
 }
 
 // Provisioner is the agent action layer the control channel drives. The real

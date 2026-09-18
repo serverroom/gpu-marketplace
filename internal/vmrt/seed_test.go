@@ -140,7 +140,9 @@ func TestGuestSizing(t *testing.T) {
 	cases := []struct{ mem, cpus, wantMem, wantCPUs int }{
 		{32768, 12, 28672, 10},       // a 32 GB, 12-thread box keeps 4 GB and 2 threads
 		{128 * 1024, 20, 117965, 18}, // a DGX Spark keeps a tenth of its pool
-		{6000, 4, 0, 3},              // too small to host
+		{6000, 4, 3000, 3},           // under 8 GB the host keeps half
+		{4096, 4, 2048, 3},           // a 4 GB ARM board: 2 GB for the VM
+		{3500, 2, 0, 1},              // too small to host
 		{16384, 1, 12288, 1},
 	}
 	for _, c := range cases {

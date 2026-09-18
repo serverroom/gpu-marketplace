@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/kardianos/service"
@@ -14,6 +15,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/autosetup"
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
@@ -70,6 +72,7 @@ func runSetup(svc service.Service, args []string) {
 	status := fs.Bool("status", false, "print the last setup attempt and whether the automatic setup is on")
 	off := fs.Bool("off", false, "turn the automatic setup off (the agent then waits for the manual commands)")
 	on := fs.Bool("on", false, "turn the automatic setup back on")
+	dataDir := fs.String("data-dir", "", "keep the rental base image and the rentals' disks on another disk, e.g. an NVMe on a board with a small eMMC (never an SD card)")
 	fs.Parse(args)
 
 	if runtime.GOOS != "linux" {
@@ -81,6 +84,10 @@ func runSetup(svc service.Service, args []string) {
 	}
 	if os.Geteuid() != 0 {
 		exitf("setup needs root: run 'sudo gpu-agent setup'")
+	}
+	if *dataDir != "" {
+		runDataDir(svc, *dataDir)
+		return
 	}
 	if *off || *on {
 		if err := autosetup.SetEnabled(config.ConfigDir(), *on); err != nil {
@@ -142,7 +149,8 @@ func runSetup(svc service.Service, args []string) {
 		},
 	}
 	a := runner.Begin(plan, rt.Spec().GPUs, autosetup.ByCommand)
-	fmt.Printf("The rental image gets NVIDIA driver %s (this machine runs %s).\n", a.Driver, a.HostDriver)
+	line := a.DriverLine()
+	fmt.Printf("%s%s.\n", strings.ToUpper(line[:1]), line[1:])
 	a = runner.Run(ctx, a)
 	release()
 	fmt.Println()
@@ -154,6 +162,44 @@ func runSetup(svc service.Service, args []string) {
 	if _, err := svc.Status(); err == nil {
 		if err := service.Control(svc, "restart"); err == nil {
 			fmt.Println("The agent service was restarted so it reports this machine as ready.")
+		}
+	}
+}
+
+// runDataDir is `gpu-agent setup --data-dir <dir>`: the rental base image and
+// the rentals' disks move to another disk (a board's small eMMC root, say),
+// and the agent keeps them there from now on. The agent's state stays in its
+// data directory.
+func runDataDir(svc service.Service, dir string) {
+	h := vmrt.OSHost{}
+	p := detectProvisioner()
+	if p.RentalPresent() {
+		exitf("a rental (or the leftover of one, or a test boot) is on this machine; move the data once it is gone")
+	}
+	release, err := vmrt.AcquireBusy(h, config.DataDir(), os.Getpid(), "moving the rental data")
+	if err != nil {
+		exitf("%v; 'gpu-agent setup --status' shows where it is", err)
+	}
+	defer release()
+	target, err := provisioner.StorageTarget(h, dir)
+	if err != nil {
+		exitf("setup --data-dir: %v", err)
+	}
+	from := config.StorageDir()
+	if err := provisioner.MoveStorage(h, from, target); err != nil {
+		exitf("setup --data-dir: %v", err)
+	}
+	if err := config.SetStorageDir(target); err != nil {
+		exitf("setup --data-dir: could not record %s (%v)", target, err)
+	}
+	fmt.Printf("The rental base image and the rentals' disks now live in %s", target)
+	if from != target {
+		fmt.Printf(" (moved from %s)", from)
+	}
+	fmt.Println(".")
+	if _, err := svc.Status(); err == nil {
+		if err := service.Control(svc, "restart"); err == nil {
+			fmt.Println("The agent service was restarted: it checks the machine again, and finishes its setup if anything is left.")
 		}
 	}
 }

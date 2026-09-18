@@ -166,8 +166,7 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 	base := fresh.Capability()
 	desktopOnDemand := rt.Spec().DesktopOnDemand
 
-	d.say("Automatic setup: %d step(s) to make this machine ready; the rental image gets NVIDIA driver %s (this machine runs %s)",
-		len(plan.Steps), a.Driver, a.HostDriver)
+	d.say("Automatic setup: %d step(s) to make this machine ready; %s", len(plan.Steps), a.DriverLine())
 	runner := d.Runner
 	runner.OnStep = func(a Attempt) {
 		line := ProgressLine(a, desktopOnDemand)

@@ -219,7 +219,7 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return fmt.Errorf("%w (%s)", ErrRentalPresent, st.RentalID)
 	}
 
-	dir := filepath.Join(spec.DataDir, "images")
+	dir := filepath.Join(spec.Storage(), "images")
 	if err := h.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -264,7 +264,7 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	}
 	defer h.Remove(bake)
 
-	r := NewRental(spec.DataDir, BakeID)
+	r := NewRental(spec.Storage(), BakeID)
 	r.Disk = bake
 	r.DiskFormat = "qcow2"
 	r.MemoryMB = 4096

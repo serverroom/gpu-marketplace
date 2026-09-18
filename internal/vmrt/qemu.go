@@ -102,6 +102,12 @@ func QEMUArgs(s Spec, r Rental) []string {
 // renter's VM), stoppable by name, and with its stderr in the journal.
 func LaunchArgs(s Spec, r Rental) []string {
 	args := []string{"--unit=" + r.Unit, "--collect", "--property=Type=exec",
-		"--property=TimeoutStopSec=30", s.QEMUBinary()}
+		"--property=TimeoutStopSec=30"}
+	// Pinned to one core type: the QEMU process and every thread it starts,
+	// its vCPUs included, inherit the affinity.
+	if len(s.GuestCores) > 0 {
+		args = append(args, "--property=CPUAffinity="+cpuList(s.GuestCores))
+	}
+	args = append(args, s.QEMUBinary())
 	return append(args, QEMUArgs(s, r)...)
 }

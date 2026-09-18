@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/interconnect"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
@@ -100,7 +101,10 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	}
 
 	if !h.Exists("/dev/kvm") {
-		add("KVM is not available (/dev/kvm is missing): enable virtualisation in the firmware and load the kvm module")
+		add("%s", kvmMissing(h, spec.Arch))
+	}
+	for _, missing := range missingKernelFeatures(h) {
+		add("%s", missing)
 	}
 
 	var gpuNames []string
@@ -159,13 +163,21 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 		}
 	}
 
+	apt := AptDistro(h)
 	if missing := vmrt.MissingTools(h, spec.Arch); len(missing) > 0 {
-		addKind(ReasonTools, "the rental runtime's tools are missing (%s); run 'sudo gpu-agent runtime prepare --install-deps'", strings.Join(missing, ", "))
+		if apt {
+			addKind(ReasonTools, "the rental runtime's tools are missing (%s); run 'sudo gpu-agent runtime prepare --install-deps'", strings.Join(missing, ", "))
+		} else {
+			addKind(ReasonTools, "the rental runtime's tools are missing (%s): the agent installs them with apt-get on Ubuntu and Debian (Armbian too); "+
+				"on this system install QEMU, UEFI firmware for it, cloud-image-utils, cryptsetup and nftables with its own package manager", strings.Join(missing, ", "))
+		}
 	}
 	if fw, ok := vmrt.FindFirmware(h, spec.Arch); ok {
 		rep.Firmware = fw
-	} else {
+	} else if apt {
 		addKind(ReasonTools, "no UEFI firmware for microVMs is installed; run 'sudo gpu-agent runtime prepare --install-deps'")
+	} else {
+		addKind(ReasonTools, "no UEFI firmware for microVMs is installed (OVMF on x86, AAVMF on Arm): install it with this system's package manager")
 	}
 	if !h.Exists(spec.GoldenImage) {
 		addKind(ReasonImage, "the rental base image has not been built; run 'sudo gpu-agent runtime prepare'")
@@ -179,10 +191,13 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 		}
 	}
 	if spec.GuestMemoryMB() == 0 {
-		add("this machine has %d MB of memory, and a rental needs at least 6 GB", spec.TotalMemMB)
+		add("this machine has %d MB of memory, and a rental needs at least 4 GB: 2 GB for the rental, the rest kept for the machine", spec.TotalMemMB)
 	}
-	if spec.DiskGB < 20 {
-		add("there is not 20 GB free under %s for a rental's disk", spec.DataDir)
+	if n := spec.GuestCPUs(); n < 2 {
+		add("a rental on this machine would get %d CPU (what the machine keeps for itself taken off), and a rental needs at least 2", n)
+	}
+	for _, problem := range storageProblems(h, spec.Storage(), spec.DiskGB) {
+		add("%s", problem)
 	}
 
 	// A test boot proves what the checks above cannot: that this GPU really
@@ -202,13 +217,22 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 // runtime, whose Capability says what it found. It is the only constructor
 // production code should use.
 func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
+	storage := StorageDir(dataDir)
 	spec := vmrt.Spec{
 		Arch:        arch,
 		DataDir:     dataDir,
-		GoldenImage: filepath.Join(dataDir, "golden.img"),
+		GoldenImage: filepath.Join(storage, "golden.img"),
 		TotalMemMB:  hostMemoryMB(h),
 		CPUs:        runtime.NumCPU(),
-		DiskGB:      rentalDiskGB(h, dataDir),
+		DiskGB:      rentalDiskGB(h, storage),
+	}
+	if storage != dataDir {
+		spec.StorageDir = storage
+	}
+	if goos == "linux" {
+		// One core type on a machine with big and little cores.
+		cpus := vmrt.ChooseGuestCPUs(h, arch)
+		spec.GuestCores, spec.GuestCPUName = cpus.Cores, cpus.Name
 	}
 	rep := Preflight(h, goos, spec, version)
 	spec.GPUs = rep.BDFs
@@ -238,17 +262,21 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	_, ic := pair.Capability(interconnect.RecentPeers(interconnect.LoadPeers(h, dataDir), time.Now().Unix(), pair.PortMACs()))
 	kind := KindQEMUVFIO
 	var gpuCount *int
+	var guest *control.Guest
 	if goos == "linux" {
 		n := rep.GPUCount
 		gpuCount = &n
 		if rep.Vendor == VendorNone {
 			kind = KindQEMU
 		}
+		// What the renter gets, from the sizing the VM itself uses.
+		guest = &control.Guest{VCPUs: spec.GuestCPUs(), MemoryGB: spec.GuestMemoryMB() / 1024, DiskGB: spec.DiskGB, CPU: spec.GuestCPUName}
 	}
 	p.capability = control.Capability{
 		Ready:         len(rep.Reasons) == 0,
 		Kind:          kind,
 		GPUCount:      gpuCount,
+		Guest:         guest,
 		Reasons:       rep.Reasons,
 		AgentVersion:  version,
 		UnifiedMemory: rep.Unified,
@@ -271,6 +299,16 @@ func CheckBakeDriver(flag string) error {
 		return nil
 	}
 	return fmt.Errorf("invalid driver branch %q (for example %s, or none)", flag, vmrt.DefaultDriver)
+}
+
+// StorageDir is where the base image and the rentals' disks live: the directory
+// `gpu-agent setup --data-dir` chose, else dataDir. A variable so tests never
+// read this machine's configuration.
+var StorageDir = func(dataDir string) string {
+	if dir := config.StorageDir(); dir != config.DataDir() {
+		return dir
+	}
+	return dataDir
 }
 
 // RelayAddrs resolves the relay this agent tunnels to, so the pair preflight can

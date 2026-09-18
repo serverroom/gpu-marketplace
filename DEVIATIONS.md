@@ -291,3 +291,45 @@ DESIGN.md (reasoning). Everything not listed here is implemented as written.
   right as they stand, since no v0.1.10 was released. Test fixtures that use
   v0.1.10 -> v0.1.11 as "running -> newer" were left alone. The hardware-verified
   record above (SID 2457) is about the build stamped v0.1.10 and is kept as written.
+
+# ARM boards (CONTRACT-arm section A): where the build decided differently
+
+- **The storage directory is recorded in its own file**, `/etc/gpu-agent/storage.json`,
+  not in `config.yaml` (A5 says "persisted in the agent config"): `config.yaml`'s
+  presence is what starts the legacy stats server, so an agent that only moved its
+  data must not create it. State files (registration, busy.json, rental state,
+  journals) stay in `/var/lib/gpu-agent`; only the base image, the downloaded cloud
+  image and the rentals' disks move.
+- **`--data-dir` always ends in a directory called `gpu-agent`**: `--data-dir /mnt/nvme`
+  stores into `/mnt/nvme/gpu-agent`, so `gpu-agent remove` only ever deletes a
+  directory the agent made, never a disk's root.
+- **40 GB free, not 20 GB** (A7's README line): the runtime still keeps 20 GB free for
+  the machine itself beside a 20 GB rental disk, as it did before this release. The
+  README, the reasons and `setup --data-dir` all say 40 GB free. Lowering the machine's
+  own reserve on small boards was not done: an eMMC root that fills up bricks the board
+  until someone logs in.
+- **Memory floor:** the host keeps a tenth of its memory, never under 4 GB -- but on a
+  machine of less than 8 GB, half; the VM needs at least 2 GB. So a 4 GB board hosts
+  (2 GB VM) and a 16 GB board gives 12 GB. Before, a machine needed 6 GB. The x86 and
+  Spark numbers are unchanged (a tenth or 4 GB, whichever is more).
+- **SD cards are recognised two ways:** `/sys/block/<disk>/removable` = 1 (A5), and the
+  MMC device type `SD` (`/sys/block/<disk>/device/type`), because a board's own SD slot
+  is usually NOT marked removable. eMMC reports `MMC` and is allowed.
+- **Specs ride the capability report too.** A1's CPU model, cores and board were only
+  sent at registration, so an ARM host registered by an older agent would keep an empty
+  model forever. The capability report now carries `specs` next to `capability`; a
+  control plane that ignores the field loses nothing. ServCast must read it (part B).
+- **Spark rentals now get 10 vCPUs, not 18.** A2 pins every heterogeneous ARM machine's
+  VM to its fastest cluster, and a GB10's is its 10 Cortex-X925 cores (the 10
+  Cortex-A725 stay with the host). The capability's `guest.vcpus` says 10, so what a
+  renter is told matches. Not verified on a Spark: see the hardware list.
+- **An AMD GPU that `rocm-smi` does not list is treated as no GPU** (the machine hosts
+  CPU-only), unlike an NVIDIA GPU without its driver, which is refused. AMD's PCI vendor
+  id also covers the integrated Radeon in most Ryzen desktop CPUs, so refusing on it
+  would turn away ordinary GPU-less machines. A host who wants to rent an AMD GPU
+  installs ROCm first, as before.
+- **Mali and the NPU are never GPUs:** GPU detection only looks at NVIDIA (`nvidia-smi`,
+  PCI vendor 0x10de) and AMD (`rocm-smi`); platform devices are not on either list.
+- **Temperature** (A6) is the hottest `/sys/class/thermal` zone, read on every Linux
+  machine and reported as `specs.cpu.temp_c` (a GPU's own temperature stays in
+  `specs.gpus`); a zone reading 150 C or more is ignored as a broken sensor.

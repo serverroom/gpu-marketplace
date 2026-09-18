@@ -94,7 +94,7 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	resume := stats.PauseGPUQueries()
 	defer resume()
 
-	r := NewRental(rt.spec.DataDir, o.ID)
+	r := NewRental(rt.spec.Storage(), o.ID)
 	st := &State{RentalID: o.ID, Rental: r, StartedAt: time.Now().Unix(), Pair: o.Pair}
 	save := func() error { return SaveState(rt.h, rt.spec.DataDir, st) }
 	if err = save(); err != nil {
@@ -385,7 +385,13 @@ func (rt *Runtime) Stop() StopResult {
 	// Keep the last serial log for diagnosis; it holds nothing of the tenant's
 	// disk, only what the guest printed to its console.
 	if rt.h.Exists(st.Rental.SerialLog) {
-		_ = rt.h.Rename(st.Rental.SerialLog, lastSerialLog(rt.spec.DataDir))
+		if rt.h.Rename(st.Rental.SerialLog, lastSerialLog(rt.spec.DataDir)) != nil {
+			// The rentals may be on another disk (setup --data-dir), which a
+			// rename cannot cross: keep the log's end.
+			if tail, err := rt.h.ReadTail(st.Rental.SerialLog, 1<<20); err == nil {
+				_ = rt.h.WriteFile(lastSerialLog(rt.spec.DataDir), tail, 0600)
+			}
+		}
 	}
 	_ = rt.h.RemoveAll(st.Rental.Dir)
 

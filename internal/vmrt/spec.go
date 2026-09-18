@@ -42,6 +42,21 @@ type Spec struct {
 	TotalMemMB      int
 	CPUs            int
 	DiskGB          int
+	// GuestCores pins the VM to these host CPUs (one core type on a machine
+	// with big and little cores, ChooseGuestCPUs); nil: not pinned.
+	GuestCores []int
+	// GuestCPUName is the guest's CPU in words, for what the renter is told.
+	GuestCPUName string
+	// StorageDir holds the base image and the rentals' disks; "" is DataDir.
+	StorageDir string
+}
+
+// Storage is where the base image and the rentals' disks live.
+func (s Spec) Storage() string {
+	if s.StorageDir != "" {
+		return s.StorageDir
+	}
+	return s.DataDir
 }
 
 // QEMUBinary is the system emulator for this machine's architecture.
@@ -53,14 +68,19 @@ func (s Spec) QEMUBinary() string {
 }
 
 // GuestMemoryMB is the memory a rental gets: the machine's, less what the host
-// keeps to run itself (a tenth, and never under 4 GB). On a unified-memory
-// machine this is ALSO the GPU's memory -- inside the VM, as on the bare
-// machine, the GPU works in the same pool the system does. VFIO pins every
-// page of it for the life of the VM. 0 means the machine is too small.
+// keeps to run itself (a tenth, and never under 4 GB -- or half, on a machine
+// of less than 8 GB such as a small ARM board). On a unified-memory machine
+// this is ALSO the GPU's memory -- inside the VM, as on the bare machine, the
+// GPU works in the same pool the system does. VFIO pins every page of it for
+// the life of the VM. 0 means the machine is too small (under 2 GB for the VM).
 func (s Spec) GuestMemoryMB() int {
+	floor := 4096
+	if s.TotalMemMB/2 < floor {
+		floor = s.TotalMemMB / 2
+	}
 	reserve := s.TotalMemMB / 10
-	if reserve < 4096 {
-		reserve = 4096
+	if reserve < floor {
+		reserve = floor
 	}
 	m := s.TotalMemMB - reserve
 	if m < 2048 {
@@ -69,8 +89,13 @@ func (s Spec) GuestMemoryMB() int {
 	return m
 }
 
-// GuestCPUs leaves the host one CPU on a small machine and two on a larger one.
+// GuestCPUs is the vCPUs a rental gets: one per pinned core when the VM is
+// pinned (GuestCores), else all but one CPU on a small machine and two on a
+// larger one.
 func (s Spec) GuestCPUs() int {
+	if len(s.GuestCores) > 0 {
+		return len(s.GuestCores)
+	}
 	n := s.CPUs - 1
 	if s.CPUs > 8 {
 		n = s.CPUs - 2

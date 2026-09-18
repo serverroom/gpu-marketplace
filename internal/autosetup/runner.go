@@ -45,11 +45,9 @@ func (r *Runner) log(format string, args ...interface{}) {
 	}
 }
 
-// AptGet reports whether this machine installs packages with apt-get.
-func AptGet(h vmrt.Host) bool {
-	_, err := h.LookPath("apt-get")
-	return err == nil
-}
+// AptGet reports whether this machine installs packages the agent's way:
+// apt-get on Ubuntu, Debian or a system built on them (Armbian included).
+func AptGet(h vmrt.Host) bool { return provisioner.AptDistro(h) }
 
 // Begin is a new attempt at plan: the driver the image gets (matched to the
 // host's), and the key it is for.
@@ -69,6 +67,14 @@ func (r *Runner) Begin(plan Plan, gpus []string, by string) Attempt {
 		StartedAt:    r.now().Unix(),
 		By:           by,
 	}
+}
+
+// DriverLine is the attempt's driver choice in words.
+func (a Attempt) DriverLine() string {
+	if a.Driver == vmrt.NoDriver {
+		return "this machine has no NVIDIA GPU, so the rental image gets no NVIDIA driver"
+	}
+	return fmt.Sprintf("the rental image gets NVIDIA driver %s (this machine runs %s)", a.Driver, a.HostDriver)
 }
 
 func (a Attempt) driverChoice() vmrt.DriverChoice {

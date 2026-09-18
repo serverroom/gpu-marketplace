@@ -12,6 +12,7 @@ import (
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/speedtest"
+	"github.com/serverroom/gpu-marketplace/internal/stats"
 )
 
 var testTarget = speedtest.Target{
@@ -164,5 +165,36 @@ func TestPostMeasurement(t *testing.T) {
 	var ee *EndpointError
 	if !errors.As(err, &ee) || ee.Code != 219 {
 		t.Errorf("a 219 answer: got %v, want an EndpointError with code 219", err)
+	}
+}
+
+// Every capability report carries the machine's specs as they are now, so a
+// board registered by an older agent (with an empty CPU model) is described
+// properly from its next report.
+func TestReportCapabilityCarriesTheSpecs(t *testing.T) {
+	var got map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		io.WriteString(w, `{"status":"ok"}`)
+	}))
+	defer srv.Close()
+	registeredAt(t, srv.URL+"/api/marketplace/capability")
+	orig := collectSpecs
+	collectSpecs = func() (*stats.SystemStats, error) {
+		return &stats.SystemStats{Arch: "arm64", Board: "Radxa ROCK 5B",
+			CPU: stats.CPUInfo{Model: "Rockchip RK3588", CoresDetail: "4× Cortex-A76 + 4× Cortex-A55"}}, nil
+	}
+	t.Cleanup(func() { collectSpecs = orig })
+
+	if _, err := ReportCapability(control.Capability{Ready: true}); err != nil {
+		t.Fatal(err)
+	}
+	var specs stats.SystemStats
+	if err := json.Unmarshal(got["specs"], &specs); err != nil || specs.Board != "Radxa ROCK 5B" ||
+		specs.CPU.Model != "Rockchip RK3588" || specs.CPU.CoresDetail != "4× Cortex-A76 + 4× Cortex-A55" {
+		t.Errorf("specs = %s (%v)", got["specs"], err)
+	}
+	if len(got["capability"]) == 0 || string(got["listing_id"]) != `"L-42"` {
+		t.Errorf("body = %v", got)
 	}
 }

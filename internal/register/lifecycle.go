@@ -15,6 +15,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/speedtest"
+	"github.com/serverroom/gpu-marketplace/internal/stats"
 )
 
 // ErrNotRegistered is returned by calls that need a registration on disk.
@@ -103,10 +104,17 @@ func ReportCapability(c control.Capability) (*CapabilityResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	code, body, err := postBearer(url, token, map[string]interface{}{
+	payload := map[string]interface{}{
 		"listing_id": reg.ListingID,
 		"capability": c,
-	})
+	}
+	// The machine's specs as they are now (an ARM board's CPU and board name,
+	// say, which agents before v0.2.0 reported empty at register). A control
+	// plane that does not read them ignores them.
+	if st, err := collectSpecs(); err == nil {
+		payload["specs"] = st
+	}
+	code, body, err := postBearer(url, token, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +126,9 @@ func ReportCapability(c control.Capability) (*CapabilityResponse, error) {
 	_ = rememberSpeedtest(resp)
 	return resp, nil
 }
+
+// collectSpecs is stats.Collect; a variable so tests need not read the machine.
+var collectSpecs = func() (*stats.SystemStats, error) { return stats.Collect() }
 
 // parseCapabilityResponse reads the answer to a capability report. A control
 // plane older than the speed test answers with no body, or a body without

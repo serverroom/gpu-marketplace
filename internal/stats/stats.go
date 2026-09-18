@@ -12,6 +12,11 @@ type CPUInfo struct {
 	Cores    int     `json:"cores"`
 	Threads  int     `json:"threads"`
 	UsagePct float64 `json:"usage_pct"`
+	// CoresDetail is an ARM machine's core mix, "4× Cortex-A76 + 4× Cortex-A55"
+	// (omitted on x86).
+	CoresDetail string `json:"cores_detail,omitempty"`
+	// TempC is the hottest thermal zone (Linux), 0 when unknown.
+	TempC int `json:"temp_c,omitempty"`
 }
 
 // MemoryInfo holds memory details.
@@ -40,9 +45,12 @@ type DiskInfo struct {
 
 // SystemStats is the full stats response.
 type SystemStats struct {
-	Hostname      string     `json:"hostname"`
-	OS            string     `json:"os"`
-	Arch          string     `json:"arch"`
+	Hostname string `json:"hostname"`
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	// Board is what the machine is: the device tree's model on an ARM board
+	// ("Radxa ROCK 5B"), the DMI product name elsewhere; omitted when unknown.
+	Board         string     `json:"board,omitempty"`
 	CPU           CPUInfo    `json:"cpu"`
 	Memory        MemoryInfo `json:"memory"`
 	GPUs          []GPUInfo  `json:"gpus"`
@@ -68,6 +76,18 @@ func Collect() (*SystemStats, error) {
 
 	gpus := gatedGPUs(collectGPUs)
 	fillUnifiedMemory(gpus, mem)
+	board := ""
+	if runtime.GOOS == "linux" {
+		board = linuxBoard()
+		cpu.TempC = hottestZone()
+		if runtime.GOARCH == "arm64" {
+			var models []string
+			for _, g := range gpus {
+				models = append(models, g.Model)
+			}
+			cpu.Model, cpu.CoresDetail = linuxArmCPU(models)
+		}
+	}
 
 	disk, err := collectDisk()
 	if err != nil {
@@ -78,6 +98,7 @@ func Collect() (*SystemStats, error) {
 		Hostname:    hostname,
 		OS:          runtime.GOOS,
 		Arch:        runtime.GOARCH,
+		Board:       board,
 		CPU:         cpu,
 		Memory:      mem,
 		GPUs:        gpus,

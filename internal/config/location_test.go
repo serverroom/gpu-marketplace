@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestLocationLabelMapsKnownRelays(t *testing.T) {
 	for key, want := range map[string]string{
@@ -48,5 +52,25 @@ func TestLocationLabelPassesThroughHosts(t *testing.T) {
 		if got := LocationLabel(in); got != in {
 			t.Errorf("LocationLabel(%q) = %q, want it unchanged", in, got)
 		}
+	}
+}
+
+func TestStorageDirIsRecordedApartFromTheConfig(t *testing.T) {
+	t.Setenv(ConfigDirEnv, t.TempDir())
+	if StorageDir() != DataDir() {
+		t.Fatalf("default storage = %s, want the data dir", StorageDir())
+	}
+	dir := filepath.Join(t.TempDir(), "gpu-agent")
+	if err := SetStorageDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if StorageDir() != dir {
+		t.Errorf("storage = %s, want %s", StorageDir(), dir)
+	}
+	if _, err := os.Stat(ConfigPath()); !os.IsNotExist(err) {
+		t.Errorf("config.yaml was written (it starts the legacy stats server)")
+	}
+	if err := SetStorageDir(""); err != nil || StorageDir() != DataDir() {
+		t.Errorf("forgetting the storage dir: %v, %s", err, StorageDir())
 	}
 }

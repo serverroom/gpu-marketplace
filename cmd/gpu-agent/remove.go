@@ -114,7 +114,13 @@ func runRemove(svc service.Service, args []string) {
 			fmt.Println("          'sudo systemctl isolate graphical.target' brings it back now.")
 		}
 	}
+	// Rental data kept on another disk (setup --data-dir) goes too; read where
+	// before the configuration that records it is deleted.
+	storage := config.StorageDir()
 	removeTree("Rentals:  ", config.DataDir())
+	if storage != config.DataDir() {
+		removeTree("Storage:  ", storage)
+	}
 
 	// 4. Credentials and state.
 	removeTree("Config:   ", config.ConfigDir())

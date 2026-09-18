@@ -113,7 +113,7 @@ func TestPreflightRefusesUnknownGPUWithNoMemory(t *testing.T) {
 
 func TestPreflightNamesWhatToRunNext(t *testing.T) {
 	h := goodHost(t, "00000000:01:00.0, NVIDIA L4, 24564\n")
-	h.Tools = map[string]bool{"qemu-img": true}
+	h.Tools = map[string]bool{"qemu-img": true, "apt-get": true} // an Ubuntu/Debian machine
 	delete(h.Files, dataDir+"/golden.img")
 	all := reasons(Preflight(h, "linux", spec(), version))
 	for _, want := range []string{"qemu-system-x86_64", "runtime prepare --install-deps", "base image has not been built"} {
@@ -179,10 +179,10 @@ func TestPreflightNonLinux(t *testing.T) {
 func TestPreflightSmallMachine(t *testing.T) {
 	h := goodHost(t, "00000000:01:00.0, NVIDIA L4, 24564\n")
 	s := spec()
-	s.TotalMemMB = 4096
+	s.TotalMemMB = 3500 // since v0.2.0 a 4 GB machine can host (2 GB for the VM)
 	s.DiskGB = 5
 	all := reasons(Preflight(h, "linux", s, version))
-	if !strings.Contains(all, "4096 MB") || !strings.Contains(all, "20 GB free") {
+	if !strings.Contains(all, "3500 MB") || !strings.Contains(all, "20 GB free") {
 		t.Errorf("reasons = %s", all)
 	}
 }

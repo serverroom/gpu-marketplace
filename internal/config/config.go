@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -142,4 +143,41 @@ func Save(cfg *Config) error {
 		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
+}
+
+// StoragePath is where a storage directory chosen with `gpu-agent setup
+// --data-dir` is recorded. A file of its own, not config.yaml, whose presence
+// starts the legacy stats server.
+func StoragePath() string { return filepath.Join(ConfigDir(), "storage.json") }
+
+// StorageDir is where the big files live -- the rental base image and the
+// rentals' disks: the directory `gpu-agent setup --data-dir` recorded, else
+// DataDir. The agent's state files stay in DataDir either way.
+func StorageDir() string {
+	data, err := os.ReadFile(StoragePath())
+	if err != nil {
+		return DataDir()
+	}
+	var rec struct {
+		DataDir string `json:"data_dir"`
+	}
+	if json.Unmarshal(data, &rec) != nil || !filepath.IsAbs(rec.DataDir) {
+		return DataDir()
+	}
+	return filepath.Clean(rec.DataDir)
+}
+
+// SetStorageDir records dir as the storage directory ("" or DataDir forgets it).
+func SetStorageDir(dir string) error {
+	if dir == "" || filepath.Clean(dir) == DataDir() {
+		if err := os.Remove(StoragePath()); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(ConfigDir(), 0755); err != nil {
+		return err
+	}
+	data, _ := json.MarshalIndent(map[string]string{"data_dir": filepath.Clean(dir)}, "", "  ")
+	return os.WriteFile(StoragePath(), data, 0600)
 }

@@ -530,6 +530,7 @@ func printUsage() {
 	fmt.Println("  setup            Finish this machine's setup now, with output (the agent does it by itself after linking)")
 	fmt.Println("  setup --status   Show the last setup attempt and whether the automatic setup is on")
 	fmt.Println("  setup --off|--on Turn the automatic setup off or back on")
+	fmt.Println("  setup --data-dir Keep the rental image and disks on another disk (e.g. an NVMe; never an SD card)")
 	fmt.Println("  update           Update the agent to the latest release (--version vX.Y.Z), going back by itself if it does not come up")
 	fmt.Println("  runtime prepare  Install the microVM runtime (--install-deps) and bake the rental base image")
 	fmt.Println("  remove           Withdraw the listing, revoke relay access and delete the agent completely (--yes)")

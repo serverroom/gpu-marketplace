@@ -233,7 +233,7 @@ func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTest
 		return fail(problem)
 	}
 
-	r := NewRental(rt.spec.DataDir, id)
+	r := NewRental(rt.spec.Storage(), id)
 	var rep SerialReport
 	sshOpened := false
 	for waited := time.Duration(0); waited < SelfTestTimeout && ctx.Err() == nil; waited += pollInterval {

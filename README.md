@@ -59,6 +59,7 @@ sudo gpu-agent start
 | `gpu-agent setup` | Finish this machine's setup now, in the foreground with its output: the same steps the agent takes by itself after linking (for support) |
 | `gpu-agent setup --status` | Show the last setup attempt, and whether the automatic setup is on |
 | `gpu-agent setup --off` / `--on` | Turn the automatic setup off (the agent then waits for the manual commands below) or back on |
+| `gpu-agent setup --data-dir <dir>` | Keep the rental base image and the rentals' disks on another disk — an NVMe on a board whose eMMC is small, say (never an SD card); moves what is there already |
 | `gpu-agent runtime prepare` | Install the microVM runtime (`--install-deps`) and build the rental base image with the NVIDIA driver — by default the one matching this machine's own driver, and none on a machine without an NVIDIA GPU (`--driver 580-server` or `--driver none` picks) — and the RDMA tools |
 | `gpu-agent runtime prepare --headless` | Make a desktop machine (a workstation) start without its desktop, so the GPU is free to rent; closes the desktop now. `gpu-agent remove` brings the desktop back. A DGX Spark does not need it: its desktop closes only while it is rented or testing |
 | `gpu-agent check --boot` | Boot a real test rental (the GPU passed through, when the machine has one), check what it can and cannot reach, tear it down, and record the result |
@@ -260,7 +261,8 @@ Every one of these must hold, and `check` lists every one that does not:
 - **The rental runtime installed and its base image built** — QEMU, UEFI firmware (OVMF/AAVMF), `cloud-image-utils`, `cryptsetup` and `nftables`, and Ubuntu 26.04's official cloud image, verified against Canonical's published checksums, with the NVIDIA driver matching this machine's baked in (none on a machine without an NVIDIA GPU) and the RDMA tools. The agent does this by itself after linking; by hand, `sudo gpu-agent runtime prepare --install-deps`.
 - **No GPU in use on the host** while a rental starts — the GPU is handed to the microVM whole, so anything using it (a container, a training job) must be stopped first. The agent refuses and names what holds it. NVIDIA's own background services (`nvidia-persistenced`, `nvidia-powerd`, DCGM) are not a problem: the agent stops the running ones for the rental and starts them again afterwards. Short-lived tools (`nvidia-smi`, `dcgmi`, a bug report) are given up to 5 seconds to finish, and the agent pauses its own GPU queries while it takes the GPU.
 - **No desktop on the GPU** — except on a DGX Spark, whose desktop closes while it is rented and comes back after ([above](#dgx-spark-the-desktop-comes-and-goes-with-a-rental)). Any other machine that shows a desktop on its GPU (a workstation) holds it for as long as the desktop runs, so it cannot host until it runs without one. `sudo gpu-agent runtime prepare --headless` makes it start without a desktop from now on and closes the running one (anything open on its screen closes too, so run it over SSH or be ready to log in again on the text screen); `sudo gpu-agent remove` restores the desktop from the next start. `gpu-agent check` names the desktop processes while this is needed.
-- **Enough memory and disk** — at least 6 GB of memory and 20 GB free under `/var/lib/gpu-agent`. A rental gets the machine's memory less a tenth (never under 4 GB) for the host.
+- **Enough CPUs, memory and disk** — a rental gets at least 2 vCPUs and 2 GB of memory after what the machine keeps for itself: it keeps a tenth of its memory, never under 4 GB (on a machine of less than 8 GB, half), so a machine needs at least 4 GB. The rentals' disks need 20 GB free beyond 20 GB the machine keeps (40 GB free under `/var/lib/gpu-agent`, or wherever `setup --data-dir` put them), on fixed storage: a rental's disk never goes on an SD card or other removable media. When the machine's own disk is too small, `gpu-agent check` names the biggest disk that has room and the command that puts the rentals there.
+- **A Linux kernel with what the runtime needs** — KVM (`/dev/kvm`), TUN/TAP, bridges, nf_tables, dm-crypt and loop devices. Stock Ubuntu and Debian kernels have them all; `gpu-agent check` names each one a vendor kernel lacks ([ARM boards](#arm-boards-rk3588)).
 - **A passing test boot on this machine.** The automatic setup runs it; `sudo gpu-agent check --boot` runs it by hand: a real rental for a few minutes with a key nobody holds: the VM reports the GPU it sees (on a machine that has one), that it reaches the internet, and that your machine, its address and its gateway are unreachable; it is then torn down and the GPU checked. The result is recorded and must be for the agent version you are running.
 
 ## Hosting a machine without a GPU
@@ -272,8 +274,9 @@ larger machine, for the host), its memory less a tenth (never under 4 GB), and
 its disk.
 
 - It needs everything in the list above except the GPU and the IOMMU: KVM, the
-  runtime's tools and firmware, a base image, 6 GB of memory, 20 GB of disk, and
-  a passing test boot **on this machine** — it is not offered to renters before.
+  runtime's tools and firmware, a base image, 4 GB of memory, 40 GB free on fixed
+  storage, and a passing test boot **on this machine** — it is not offered to
+  renters before. ARM boards: see [below](#arm-boards-rk3588).
 - The automatic setup does all of it after linking, exactly as on a GPU machine:
   the runtime, a base image **without** the NVIDIA driver, and a test rental
   that checks what matters without a GPU — the VM boots, reaches the internet,
@@ -287,6 +290,50 @@ its disk.
   setup, or `sudo gpu-agent runtime prepare` then `sudo gpu-agent check --boot`).
 - The agent reports the machine with `gpu_count` 0, and the marketplace shows it
   as a machine without a GPU.
+
+## ARM boards (RK3588)
+
+Any 64-bit ARM Linux machine with KVM can host: Rockchip RK3588 and RK3588S boards
+(Radxa ROCK 5B, Orange Pi 5 and the like), Ampere and other Neoverse servers, and
+the DGX Spark. A board's Mali GPU and NPU are not GPUs a renter can be given, so an
+RK3588 board is a [machine without a GPU](#hosting-a-machine-without-a-gpu).
+
+**What it needs:**
+
+- 64-bit Linux (arm64) with KVM: `/dev/kvm` present. Many Rockchip vendor (BSP)
+  kernels ship without KVM; a mainline or Armbian "edge" kernel has it. If the
+  board's firmware starts Linux without virtualisation (the kernel log says "HYP mode
+  not available"), no kernel can help: use the board maker's or Armbian's current
+  image. `gpu-agent check` says which it is.
+- The kernel pieces a rental needs: TUN/TAP, bridges, nf_tables (the fence), dm-crypt
+  (the encrypted disk) and loop devices. `gpu-agent check` names each missing one.
+- At least 4 GB of memory.
+- At least 40 GB free on non-removable storage (eMMC, NVMe or SATA): 20 GB for a
+  rental's disk and 20 GB left for the board. A rental's disk never goes on an SD
+  card. On a board whose eMMC is small, put the rentals on its NVMe:
+  `sudo gpu-agent setup --data-dir /mnt/nvme` (the agent keeps them in
+  `/mnt/nvme/gpu-agent`, moves the base image there, and remembers it; its own state
+  stays in `/var/lib/gpu-agent`). `gpu-agent check` suggests the right disk.
+- Ubuntu, Debian or Armbian, for the automatic setup: it installs
+  `qemu-system-arm qemu-utils qemu-efi-aarch64 cloud-image-utils cryptsetup-bin
+  nftables iproute2 kmod` with apt-get (the same names on all three). On another
+  distribution, install QEMU for aarch64, its UEFI firmware (AAVMF), cloud-image-utils,
+  cryptsetup and nftables yourself; `gpu-agent check` says so.
+
+**What a renter gets.** A rental's vCPUs run on one core type: the fastest. An RK3588
+has four Cortex-A76 and four Cortex-A55 cores; the rental gets the four Cortex-A76
+cores (pinned), and the board keeps the Cortex-A55 cores for itself — a VM whose
+vCPUs moved between core types would see its CPU change under it. On a DGX Spark it
+is the Cortex-X925 cores; on a server with one core type, all but one or two. The VM
+gets the memory the board does not keep, and the disk. The agent reports exactly that
+to the marketplace (`guest`: vCPUs, memory, disk and the core type), and names the
+machine by its SoC ("Rockchip RK3588") and board ("Radxa ROCK 5B").
+
+**Steps:** install the agent, link it (`sudo gpu-agent register --code <code>`), and
+wait: the automatic setup installs the runtime, builds the rental image (no NVIDIA
+driver) and runs a test rental. `sudo gpu-agent status` shows how far it is, and
+anything it cannot fix by itself — a kernel without KVM, a too-small disk — with what
+to do about it.
 
 ## Linked pairs: two DGX Sparks rented as one
 
