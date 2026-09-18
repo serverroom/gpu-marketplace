@@ -142,9 +142,20 @@ func (a *gpuAgent) reported(err error) {
 	case errors.Is(err, register.ErrNotRegistered):
 	case errors.As(err, &ee) && ee.Code == http.StatusGone:
 		errs.Raise(control.AreaRegister, register.WithdrawnMessage, "")
-	case errors.As(err, &ee) && (ee.Code == http.StatusUnauthorized || ee.Code == http.StatusForbidden):
+	case errors.As(err, &ee) && ee.Code == http.StatusUnauthorized:
+		// The marketplace itself answers 401 when it no longer knows this
+		// machine's token; it never answers 403 to a report.
 		errs.Raise(control.AreaRegister, fmt.Sprintf("the marketplace no longer accepts this machine's registration (HTTP %d): "+
-			"register it again with a new code from your dashboard ('sudo gpu-agent register --code <code>')", ee.Code), ee.Body)
+			"register it again with a new code from your dashboard ('sudo gpu-agent register --code <code>')", ee.Code),
+			register.PlainBody(ee.Body))
+	case errors.As(err, &ee) && ee.Code == http.StatusForbidden:
+		// A 403 comes from a firewall on the way (an HTML page), not from the
+		// marketplace: registering again would not help.
+		errs.Raise(control.AreaReport, "a firewall between this machine and the marketplace refused its report (HTTP 403); "+
+			"the agent keeps trying", register.PlainBody(ee.Body))
+	case errors.As(err, &ee):
+		errs.Raise(control.AreaReport, "the agent could not report this machine to the marketplace; it keeps trying",
+			register.PlainBody(err.Error()))
 	default:
 		errs.Raise(control.AreaReport, "the agent could not report this machine to the marketplace; it keeps trying", err.Error())
 	}

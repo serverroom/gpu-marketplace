@@ -2,6 +2,7 @@ package register
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,7 +31,33 @@ type EndpointError struct {
 }
 
 func (e *EndpointError) Error() string {
-	return fmt.Sprintf("%s failed (%d): %s", e.Op, e.Code, strings.TrimSpace(e.Body))
+	return fmt.Sprintf("%s failed (%d): %s", e.Op, e.Code, PlainBody(e.Body))
+}
+
+// PlainBody is an endpoint's answer as one short line of text. A web server's
+// error page becomes its title: kept as HTML, it would be stored among this
+// machine's problems and sent back in every later report, where the same
+// firewall that wrote it refuses the report for carrying markup.
+func PlainBody(body string) string {
+	text := strings.TrimSpace(body)
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<body") {
+		title := ""
+		if i := strings.Index(lower, "<title>"); i >= 0 {
+			if j := strings.Index(lower[i:], "</title>"); j > len("<title>") {
+				title = strings.TrimSpace(text[i+len("<title>") : i+j])
+			}
+		}
+		if title == "" {
+			return "an error page from a web server"
+		}
+		text = "an error page from a web server: " + title
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if r := []rune(text); len(r) > 300 {
+		text = string(r[:297]) + "..."
+	}
+	return text
 }
 
 // endpointURL is where to send a lifecycle call. Registrations made by this
@@ -107,19 +134,36 @@ func ReportCapability(c control.Capability) (*CapabilityResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	payload := map[string]interface{}{
-		"listing_id": reg.ListingID,
+	report := map[string]interface{}{
 		"capability": c,
 	}
 	// The machine's specs as they are now (an ARM board's CPU and board name,
 	// say, which agents before v0.2.0 reported empty at register). A control
 	// plane that does not read them ignores them.
 	if st, err := collectSpecs(); err == nil {
-		payload["specs"] = st
+		report["specs"] = st
 	}
-	code, body, err := postBearer(url, token, payload)
+	// The report travels base64-wrapped: the marketplace's edge firewall reads
+	// every JSON string, and this machine's own plain-language problems ("...;
+	// 'sudo gpu-agent setup' shows the details") read to it as a shell command,
+	// so v0.2.0's clear reports were refused with a 403 before they arrived.
+	wrapped, err := json.Marshal(report)
 	if err != nil {
 		return nil, err
+	}
+	code, body, err := postBearer(url, token, map[string]interface{}{
+		"listing_id": reg.ListingID,
+		"report_b64": base64.StdEncoding.EncodeToString(wrapped),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if code == http.StatusBadRequest && strings.Contains(string(body), "capability must be an object") {
+		// A control plane from before the envelope: the same report in the clear.
+		report["listing_id"] = reg.ListingID
+		if code, body, err = postBearer(url, token, report); err != nil {
+			return nil, err
+		}
 	}
 	if code != http.StatusOK {
 		return nil, &EndpointError{Op: "capability report", Code: code, Body: string(body)}

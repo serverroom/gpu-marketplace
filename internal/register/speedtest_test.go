@@ -1,6 +1,7 @@
 package register
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
@@ -174,7 +176,12 @@ func TestPostMeasurement(t *testing.T) {
 func TestReportCapabilityCarriesTheSpecs(t *testing.T) {
 	var got map[string]json.RawMessage
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&got)
+		var wire map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&wire)
+		if len(wire) != 2 || wire["report_b64"] == nil || wire["capability"] != nil {
+			t.Errorf("on the wire = %v, want only listing_id and report_b64", wire)
+		}
+		got = openReport(wire)
 		io.WriteString(w, `{"status":"ok"}`)
 	}))
 	defer srv.Close()
@@ -196,5 +203,66 @@ func TestReportCapabilityCarriesTheSpecs(t *testing.T) {
 	}
 	if len(got["capability"]) == 0 || string(got["listing_id"]) != `"L-42"` {
 		t.Errorf("body = %v", got)
+	}
+}
+
+// openReport opens a report's base64 envelope the way the marketplace does,
+// keeping the outer listing_id; a clear body is returned as it is.
+func openReport(body map[string]json.RawMessage) map[string]json.RawMessage {
+	var wrapped string
+	if json.Unmarshal(body["report_b64"], &wrapped) != nil {
+		return body
+	}
+	raw, err := base64.StdEncoding.DecodeString(wrapped)
+	if err != nil {
+		return body
+	}
+	var inner map[string]json.RawMessage
+	if json.Unmarshal(raw, &inner) != nil {
+		return body
+	}
+	inner["listing_id"] = body["listing_id"]
+	return inner
+}
+
+// A marketplace from before the envelope refuses it with its 400 for a missing
+// capability; the agent then sends the same report in the clear, once.
+func TestReportCapabilityFallsBackToTheClearForm(t *testing.T) {
+	var bodies []map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		bodies = append(bodies, b)
+		if b["capability"] == nil {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, "capability must be an object")
+			return
+		}
+		io.WriteString(w, `{"status":"ok"}`)
+	}))
+	defer srv.Close()
+	registeredAt(t, srv.URL+"/api/marketplace/capability")
+	if _, err := ReportCapability(control.Capability{Ready: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 2 || bodies[0]["report_b64"] == nil || bodies[1]["capability"] == nil ||
+		string(bodies[1]["listing_id"]) != `"L-42"` {
+		t.Errorf("bodies = %v", bodies)
+	}
+}
+
+func TestPlainBodyKeepsNoMarkup(t *testing.T) {
+	page := "<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body>\r\n<center><h1>403 Forbidden</h1></center></body></html>"
+	for in, want := range map[string]string{
+		page:                            "an error page from a web server: 403 Forbidden",
+		"<!DOCTYPE html><body>x</body>": "an error page from a web server",
+		"  auth \n failed  ":            "auth failed",
+	} {
+		if got := PlainBody(in); got != want {
+			t.Errorf("PlainBody(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := PlainBody(strings.Repeat("a", 400)); len([]rune(got)) != 300 {
+		t.Errorf("long body kept %d characters", len([]rune(got)))
 	}
 }

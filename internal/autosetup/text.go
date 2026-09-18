@@ -32,12 +32,28 @@ func detailsCommand(s Step) string {
 	return "'sudo gpu-agent setup'"
 }
 
+// stoppedByAgent reports whether an attempt ended because the agent itself
+// stopped -- a restart, an update -- rather than because a step failed.
+func stoppedByAgent(a Attempt) bool { return strings.HasPrefix(a.Error, "the agent stopped") }
+
+// doing names what the attempt was doing, including before its first step.
+func doing(a Attempt) string {
+	if a.Step < 1 {
+		return "getting ready"
+	}
+	return a.CurrentStep().Doing()
+}
+
 // FailureLine is the one line a host sees after an attempt failed.
 func FailureLine(a Attempt) string {
 	s := a.CurrentStep()
+	if stoppedByAgent(a) {
+		return fmt.Sprintf("Automatic setup was stopped when the agent stopped or restarted, while %s (step %d of %d). "+
+			"It runs again when the agent starts; nothing needs doing.", doing(a), a.Step, len(a.Steps))
+	}
 	return fmt.Sprintf("Automatic setup failed while %s (step %d of %d): %s. "+
 		"The agent tries again after its next restart or in 6 hours; %s shows the details.",
-		s.Doing(), a.Step, len(a.Steps), Shorten(strings.TrimSuffix(a.Error, "."), 300), detailsCommand(s))
+		doing(a), a.Step, len(a.Steps), Shorten(strings.TrimSuffix(a.Error, "."), 300), detailsCommand(s))
 }
 
 // WaitingLine is the one line a host sees while a failed or interrupted
@@ -46,10 +62,9 @@ func WaitingLine(a Attempt, retryAt time.Time) string {
 	if a.Finished() {
 		return FailureLine(a)
 	}
-	s := a.CurrentStep()
 	return fmt.Sprintf("Automatic setup was interrupted while %s (step %d of %d, started %s); "+
 		"the agent tries again at %s. 'sudo gpu-agent setup' runs it now.",
-		s.Doing(), a.Step, len(a.Steps), clock(a.StartedAt), retryAt.UTC().Format("2006-01-02 15:04 UTC"))
+		doing(a), a.Step, len(a.Steps), clock(a.StartedAt), retryAt.UTC().Format("2006-01-02 15:04 UTC"))
 }
 
 // Describe is the last attempt for `gpu-agent setup --status` and `status`.
@@ -58,15 +73,17 @@ func Describe(a *Attempt) string {
 		return "has not run on this machine"
 	}
 	when := func(unix int64) string { return time.Unix(unix, 0).UTC().Format("2006-01-02 15:04 UTC") }
-	s := a.CurrentStep()
 	switch {
 	case !a.Finished():
 		return fmt.Sprintf("started %s by the %s: %s (step %d of %d, since %s), not finished",
-			when(a.StartedAt), a.By, s.Doing(), a.Step, len(a.Steps), clock(a.StepStartedAt))
+			when(a.StartedAt), a.By, doing(*a), a.Step, len(a.Steps), clock(a.StepStartedAt))
 	case a.Passed:
 		return fmt.Sprintf("passed %s (run by the %s, agent %s, rental image driver %s)", when(a.FinishedAt), a.By, a.AgentVersion, a.Driver)
+	case stoppedByAgent(*a):
+		return fmt.Sprintf("stopped %s (run by the %s) when the agent stopped or restarted, while %s (step %d of %d)",
+			when(a.FinishedAt), a.By, doing(*a), a.Step, len(a.Steps))
 	}
-	return fmt.Sprintf("failed %s (run by the %s) while %s (step %d of %d): %s", when(a.FinishedAt), a.By, s.Doing(), a.Step, len(a.Steps), a.Error)
+	return fmt.Sprintf("failed %s (run by the %s) while %s (step %d of %d): %s", when(a.FinishedAt), a.By, doing(*a), a.Step, len(a.Steps), a.Error)
 }
 
 // Shorten collapses whitespace and keeps a long message's start and end --

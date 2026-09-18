@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,6 +34,7 @@ type marketplace struct {
 func (m *marketplace) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var body map[string]json.RawMessage
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	body = openReport(body)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var c map[string]json.RawMessage
@@ -165,6 +167,49 @@ func TestTheAnswerOffersTheUpdate(t *testing.T) {
 	}
 	if s := a.host.AutoUpdateStatus(); s.LastCheck == 0 || s.Enabled {
 		t.Errorf("auto_update = %+v", s)
+	}
+}
+
+// openReport opens a report's base64 envelope the way the marketplace does,
+// keeping the outer listing_id; a clear body is returned as it is.
+func openReport(body map[string]json.RawMessage) map[string]json.RawMessage {
+	var wrapped string
+	if json.Unmarshal(body["report_b64"], &wrapped) != nil {
+		return body
+	}
+	raw, err := base64.StdEncoding.DecodeString(wrapped)
+	if err != nil {
+		return body
+	}
+	var inner map[string]json.RawMessage
+	if json.Unmarshal(raw, &inner) != nil {
+		return body
+	}
+	inner["listing_id"] = body["listing_id"]
+	return inner
+}
+
+// A 403 comes from a firewall on the way, not from the marketplace: it is a
+// report problem the agent keeps retrying, never "register again", and the
+// firewall's HTML page is not kept (it would get every later report refused).
+func TestAFirewall403IsNotARegistrationProblem(t *testing.T) {
+	m := &marketplace{code: 403}
+	a := opsAgent(t, m)
+	_, _ = a.report(control.Capability{})
+	var report bool
+	for _, e := range a.ops.errs.Entries() {
+		if e.Area == control.AreaRegister {
+			t.Errorf("a 403 was read as a refused registration: %+v", e)
+		}
+		if e.Area == control.AreaReport && strings.Contains(e.Message, "firewall") {
+			report = true
+			if strings.Contains(e.Detail, "<") {
+				t.Errorf("markup kept in the detail: %q", e.Detail)
+			}
+		}
+	}
+	if !report {
+		t.Errorf("problems = %+v", a.ops.errs.Entries())
 	}
 }
 
