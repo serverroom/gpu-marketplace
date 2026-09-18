@@ -1,6 +1,13 @@
-# v0.1.10: where the build decided differently from the brief
+# gpu-agent v0.2.0: where the build decided differently from its briefs
 
-Everything here is a decision taken while building release-v0.1.10, with the reason.
+v0.2.0 is one release for every machine: a single GPU, no GPU, a single DGX Spark, two
+linked DGX Sparks. It was built in two tracks that were merged before release: the
+automatic setup / Spark desktop / host controls track (built as "release-v0.1.10",
+never released on its own) and the linked-pairs / GPU-less track. The first part below
+is the first track's decisions, with the reason; the second part is the second track's,
+and the last part is what the merge itself decided.
+
+Everything in this first part is a decision taken while building that first track.
 The brief was: automatic setup after linking, DGX Spark desktop on demand; plus two
 additions during the work: host controls (section A of CONTRACT-hostcontrols.md, then
 made asynchronous) and the transient `nvidia-smi` holder fix.
@@ -148,9 +155,9 @@ made asynchronous) and the transient `nvidia-smi` holder fix.
 - Not yet on real hardware: anything DGX Spark (DMI match, desktop closing with its apps,
   GB10 handover), and the session-based desktop classification (325c3c9).
 
-# gpu-agent v0.2.0: where the implementation differs from the contracts
+# Linked pairs and machines without a GPU: where the implementation differs from the contracts
 
-Branch `linked-pairs` (v0.2.0-dev). Contracts: CONTRACT.md (s3 agent API), CONTRACT-v2.md (s1 CPU-only),
+Contracts: CONTRACT.md (s3 agent API), CONTRACT-v2.md (s1 CPU-only),
 DESIGN.md (reasoning). Everything not listed here is implemented as written.
 
 ## Peer discovery (CONTRACT s3.1)
@@ -255,3 +262,32 @@ DESIGN.md (reasoning). Everything not listed here is implemented as written.
   refusal for a machine with a GPU.
 - `rentalDiskGB` looped forever on Windows when the data directory did not exist (`filepath.Dir` of the root is
   the root there, never "/"). Found by a new test; fixed to stop at the root on any OS. No effect on Linux.
+
+# The merge: what integrating the two tracks decided
+
+- **One driver decision.** v0.1.10's `ChooseDriver` (match the host's own driver)
+  stays as it was; `vmrt.ChooseImageDriver` wraps it and returns "none" on a machine
+  where neither `nvidia-smi` nor the PCI bus shows an NVIDIA GPU. `runtime prepare`
+  (no `--driver`) and the automatic setup both use it, so a GPU-less machine sets
+  itself up with an image without a driver. The CLI's `--driver` accepts a branch or
+  `none`. Replaces the second track's `BakeDriver`.
+- **"No GPU" is no longer a reason only a person can fix** (it is a hostable machine);
+  an NVIDIA GPU the driver cannot see is (the setup cannot install host drivers).
+  The setup test that used "no GPU" as its person-only example now uses the latter.
+- **Capability locking:** the first track's `p.mu` guards the capability (its
+  `SetCapability`/`Adopt` rely on it); the second track's separate lock is gone.
+  `Adopt` also takes the fresh pair view.
+- **One DGX Spark matcher** (`interconnect.MatchIdentity`, which now also checks the
+  OS) serves the desktop rule and the pair checks; the capability's `identity` has
+  CONTRACT s3.1's shape, so it gained `board_name` and `reason` next to the first
+  track's four fields (a test pinned the four-field JSON and was updated).
+- **The pair test takes the busy record** (`busy.json`) like `check --boot`, and its
+  VM id ends in `-pairtest`, which the runtime counts as one of its own VMs: an agent
+  restart leaves it to the running test, or tears an orphaned one down.
+- **No cable check, peer announcement or pair rental while the automatic setup runs
+  or on a withdrawn machine** (409 / 503).
+- **Version wording:** "v0.1.10" became "v0.2.0" where it named the release to come
+  (README, help text); where comments say "absent from agents up to v0.1.9" they are
+  right as they stand, since no v0.1.10 was released. Test fixtures that use
+  v0.1.10 -> v0.1.11 as "running -> newer" were left alone. The hardware-verified
+  record above (SID 2457) is about the build stamped v0.1.10 and is kept as written.
