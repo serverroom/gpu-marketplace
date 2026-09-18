@@ -218,6 +218,8 @@ func Run(code string, capability control.Capability) error {
 	if err := saveRegistration(reg); err != nil {
 		return fmt.Errorf("save registration: %w", err)
 	}
+	// A new listing: whatever an earlier one was removed as, this one is not.
+	_ = ClearWithdrawn()
 	if resp.ControlToken != "" {
 		if err := saveControlToken(resp.ControlToken); err != nil {
 			return fmt.Errorf("save control token: %w", err)

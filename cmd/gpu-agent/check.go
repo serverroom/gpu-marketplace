@@ -13,6 +13,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
+	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
@@ -53,6 +54,10 @@ func runCheck(svc service.Service, args []string) {
 		return
 	}
 
+	if register.LoadWithdrawn() != nil {
+		fmt.Println(register.WithdrawnMessage)
+		os.Exit(2)
+	}
 	c := detectProvisioner().Capability()
 	printCapability(c)
 	printSetup()

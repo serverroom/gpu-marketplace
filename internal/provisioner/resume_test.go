@@ -136,3 +136,26 @@ func TestSettingUpRefusesProvisionAndTeardown(t *testing.T) {
 		t.Error("the setup began on a rented machine")
 	}
 }
+
+// A machine the host removed in the control panel refuses every rental, and
+// nothing makes it ready again: not the setup, not a fresh detect.
+func TestAWithdrawnMachineStaysWithdrawn(t *testing.T) {
+	p := readyProv(&fakeMachine{})
+	p.Withdraw("This machine was removed from the marketplace in the control panel.")
+	if c := p.Capability(); c.Ready || len(c.Reasons) != 1 || !strings.Contains(c.Reasons[0], "removed from the marketplace") || !p.Withdrawn() {
+		t.Fatalf("capability = %+v", c)
+	}
+	if err := p.Provision("R1", renterKey(t)); !errors.Is(err, ErrNotReady) {
+		t.Errorf("Provision = %v", err)
+	}
+	if p.BeginSetup() {
+		t.Error("the setup began on a withdrawn machine")
+	}
+	if p.Adopt(readyProv(&fakeMachine{})) || p.Capability().Ready {
+		t.Error("a fresh detect made a withdrawn machine ready")
+	}
+	p.SetCapability(control.Capability{Reasons: []string{"Setting up automatically: ..."}})
+	if !strings.Contains(p.Capability().Reasons[0], "removed from the marketplace") {
+		t.Error("the setup's progress replaced the withdrawn reason")
+	}
+}

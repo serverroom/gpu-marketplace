@@ -110,8 +110,8 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 		d.say("Automatic setup is off (%s says off); 'sudo gpu-agent setup --on' turns it on", OptOutPath(d.ConfigDir))
 		return
 	}
-	if d.Prov.Status() != provisioner.StatusFree {
-		return // a rental, or its leftover: never beside one
+	if d.Prov.Status() != provisioner.StatusFree || d.Prov.Withdrawn() {
+		return // a rental or its leftover (never beside one), or removed from the marketplace
 	}
 	fresh := d.Runner.Detect()
 	rt := fresh.Runtime()

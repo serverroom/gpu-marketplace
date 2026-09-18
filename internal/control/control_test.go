@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -141,5 +142,116 @@ func TestValidRentalID(t *testing.T) {
 		if got := ValidRentalID(id); got != want {
 			t.Errorf("ValidRentalID(%q) = %v, want %v", id, got, want)
 		}
+	}
+}
+
+type fakeHost struct {
+	version   string
+	record    interface{}
+	updateTo  string
+	updateErr error
+	withdrawn int
+	withErr   error
+}
+
+func (f *fakeHost) AgentVersion() string      { return f.version }
+func (f *fakeHost) UpdateRecord() interface{} { return f.record }
+func (f *fakeHost) Update(v string) (string, string, error) {
+	f.updateTo = v
+	if f.updateErr != nil {
+		return "", "", f.updateErr
+	}
+	return f.version, v, nil
+}
+func (f *fakeHost) Withdraw() error {
+	f.withdrawn++
+	return f.withErr
+}
+
+type codedErr struct{ code int }
+
+func (e codedErr) Error() string   { return "a rental is on this machine" }
+func (e codedErr) HTTPStatus() int { return e.code }
+
+func TestUpdateAnswers202AtOnce(t *testing.T) {
+	s := New("127.0.0.1:0", "secret", readyProv())
+	h := &fakeHost{version: "v0.1.10"}
+	s.SetHost(h)
+	w := serve(s, "POST", "/update", `{"version":"v0.1.11"}`, "secret")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("code %d: %s", w.Code, w.Body)
+	}
+	var body map[string]string
+	json.NewDecoder(w.Body).Decode(&body)
+	if body["status"] != "updating" || body["from"] != "v0.1.10" || body["to"] != "v0.1.11" || h.updateTo != "v0.1.11" {
+		t.Errorf("body = %v, asked %q", body, h.updateTo)
+	}
+}
+
+func TestUpdateRefusalsKeepTheirStatus(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		code int
+	}{
+		{&StatusError{Code: http.StatusConflict, Msg: "this is a development build"}, http.StatusConflict},
+		{&StatusError{Code: http.StatusNotImplemented, Msg: "updating from the panel works on Linux hosts"}, http.StatusNotImplemented},
+		{codedErr{http.StatusConflict}, http.StatusConflict},
+		{errors.New("boom"), http.StatusInternalServerError},
+	} {
+		s := New("127.0.0.1:0", "secret", readyProv())
+		s.SetHost(&fakeHost{version: "v0.1.10", updateErr: c.err})
+		if w := serve(s, "POST", "/update", `{"version":"v0.1.11"}`, "secret"); w.Code != c.code || !strings.Contains(w.Body.String(), c.err.Error()) {
+			t.Errorf("%v: %d %s", c.err, w.Code, w.Body)
+		}
+	}
+}
+
+func TestUpdateAndWithdrawnNeedTheToken(t *testing.T) {
+	s := New("127.0.0.1:0", "secret", readyProv())
+	h := &fakeHost{version: "v0.1.10"}
+	s.SetHost(h)
+	for _, path := range []string{"/update", "/withdrawn"} {
+		if w := serve(s, "POST", path, `{"version":"v0.1.11"}`, "nope"); w.Code != http.StatusUnauthorized {
+			t.Errorf("%s without the token: %d", path, w.Code)
+		}
+	}
+	if h.updateTo != "" || h.withdrawn != 0 {
+		t.Error("an unauthenticated request reached the agent")
+	}
+}
+
+func TestWithoutAHostUpdateIs501(t *testing.T) {
+	s := New("127.0.0.1:0", "secret", readyProv())
+	if w := serve(s, "POST", "/update", `{"version":"v0.1.11"}`, "secret"); w.Code != http.StatusNotImplemented {
+		t.Errorf("code %d", w.Code)
+	}
+}
+
+func TestWithdrawn(t *testing.T) {
+	s := New("127.0.0.1:0", "secret", readyProv())
+	h := &fakeHost{version: "v0.1.10"}
+	s.SetHost(h)
+	w := serve(s, "POST", "/withdrawn", "", "secret")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"withdrawn"`) || h.withdrawn != 1 {
+		t.Errorf("%d %s (withdrawn %d)", w.Code, w.Body, h.withdrawn)
+	}
+	h.withErr = &StatusError{Code: http.StatusConflict, Msg: "this machine is rented"}
+	if w := serve(s, "POST", "/withdrawn", "", "secret"); w.Code != http.StatusConflict {
+		t.Errorf("while rented: %d", w.Code)
+	}
+}
+
+func TestStatusShowsVersionAndUpdate(t *testing.T) {
+	fp := readyProv()
+	fp.capability.AgentVersion = "v0.1.10"
+	s := New("127.0.0.1:0", "secret", fp)
+	w := serve(s, "GET", "/status", "", "secret")
+	if !strings.Contains(w.Body.String(), `"agent_version":"v0.1.10"`) || !strings.Contains(w.Body.String(), `"update":null`) {
+		t.Errorf("status without a host = %s", w.Body)
+	}
+	s.SetHost(&fakeHost{version: "v0.1.10", record: map[string]string{"status": "downloading", "to": "v0.1.11"}})
+	w = serve(s, "GET", "/status", "", "secret")
+	if !strings.Contains(w.Body.String(), `"update":{"status":"downloading","to":"v0.1.11"}`) {
+		t.Errorf("status = %s", w.Body)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/autosetup"
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/hostctl"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/server"
@@ -34,11 +35,22 @@ type gpuAgent struct {
 	bgDone       chan struct{}      // closed when that work has returned
 	controlSrv   *control.Server
 	prov         *provisioner.Provisioner
+	host         *hostctl.Agent // update and withdraw, for the control channel
 	logger       service.Logger
 }
 
 func (a *gpuAgent) Start(s service.Service) error {
 	a.say("GPU Agent %s starting...", version)
+
+	// A machine the host removed in the control panel does not host again
+	// until it is registered again: no tunnel, no reports, no rentals.
+	if register.LoadWithdrawn() != nil {
+		a.prov = detectProvisioner()
+		a.prov.Resume()
+		a.prov.Withdraw(register.WithdrawnMessage)
+		a.say("%s", register.WithdrawnMessage)
+		return nil
+	}
 
 	// Bring up the persistent reverse SSH tunnel to the relay, if registered.
 	tcfg, err := register.LoadTunnelConfig()
@@ -75,6 +87,8 @@ func (a *gpuAgent) Start(s service.Service) error {
 	if token := register.LoadControlToken(); token != "" {
 		addr := fmt.Sprintf("127.0.0.1:%d", register.AgentControlPort)
 		a.controlSrv = control.New(addr, token, a.prov)
+		a.host = a.hostControls()
+		a.controlSrv.SetHost(a.host)
 		if cerr := a.controlSrv.Start(); cerr != nil {
 			a.warn("start control channel: %v", cerr)
 		}
@@ -160,7 +174,7 @@ func idleReason(st register.State) string {
 func (a *gpuAgent) reportCapability(ctx context.Context, c control.Capability) {
 	backoff := 5 * time.Second
 	for attempt := 1; attempt <= 6; attempt++ {
-		resp, err := register.ReportCapability(c)
+		resp, err := a.report(c)
 		if err == nil {
 			a.say("Hosting capability reported to the marketplace (ready=%v)", c.Ready)
 			a.speedtestJob().initial(ctx, resp)
@@ -283,6 +297,15 @@ func main() {
 			runSetup(svc, args[1:])
 			return
 
+		case "update":
+			runUpdate(args[1:])
+			return
+
+		case "update-check":
+			// Run by the previous binary, from a timer, three minutes after an update.
+			runUpdateCheck(args[1:])
+			return
+
 		case "runtime":
 			if len(args) < 2 || args[1] != "prepare" {
 				fmt.Println("Usage: gpu-agent runtime prepare [--install-deps] [--driver 580-server-open]  |  gpu-agent runtime prepare --headless [--yes]")
@@ -366,8 +389,17 @@ func runStatus(svc service.Service) {
 		fmt.Println("Service:      unknown")
 	}
 
+	if register.LoadWithdrawn() != nil {
+		fmt.Println("Hosting:      stopped")
+		fmt.Println()
+		fmt.Println(register.WithdrawnMessage)
+		return
+	}
 	printCapability(detectProvisioner().Capability())
 	printSetup()
+	if u := updateSummary(); u != "" {
+		fmt.Printf("Update:       %s\n", u)
+	}
 
 	st := register.LoadState()
 	switch {
@@ -486,6 +518,7 @@ func printUsage() {
 	fmt.Println("  setup            Finish this machine's setup now, with output (the agent does it by itself after linking)")
 	fmt.Println("  setup --status   Show the last setup attempt and whether the automatic setup is on")
 	fmt.Println("  setup --off|--on Turn the automatic setup off or back on")
+	fmt.Println("  update           Update the agent to the latest release (--version vX.Y.Z), going back by itself if it does not come up")
 	fmt.Println("  runtime prepare  Install the microVM runtime (--install-deps) and bake the rental base image")
 	fmt.Println("  remove           Withdraw the listing, revoke relay access and delete the agent completely (--yes)")
 	fmt.Println("  uninstall        Remove the system service only (keys and listing stay; see remove)")

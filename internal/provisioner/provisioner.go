@@ -108,6 +108,35 @@ type Provisioner struct {
 	// settingUp is set while the agent's automatic setup works on the
 	// machine: no rental can be torn down or started then.
 	settingUp bool
+	// withdrawn: the host removed the machine in the control panel. Nothing
+	// makes it ready again in this agent's lifetime.
+	withdrawn bool
+}
+
+// Withdraw stops this machine hosting: every rental is refused from now on,
+// with reason, and neither the setup nor a fresh detect makes it ready again.
+func (p *Provisioner) Withdraw(reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.withdrawn = true
+	p.capability.Ready = false
+	p.capability.Reasons = []string{reason}
+}
+
+// Withdrawn reports whether Withdraw was called.
+func (p *Provisioner) Withdrawn() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.withdrawn
+}
+
+// RentalPresent reports whether rental state -- a rental, its leftover, or a
+// test boot or image build -- is on the machine.
+func (p *Provisioner) RentalPresent() bool {
+	p.mu.Lock()
+	m := p.machine
+	p.mu.Unlock()
+	return m != nil && m.Present()
 }
 
 // New builds a provisioner that has NOT been checked against the host, so it
@@ -162,6 +191,9 @@ func (p *Provisioner) Findings() []Finding {
 func (p *Provisioner) SetCapability(c control.Capability) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.withdrawn {
+		return
+	}
 	c.Ready = false
 	p.capability = c
 }
@@ -172,7 +204,7 @@ func (p *Provisioner) SetCapability(c control.Capability) {
 func (p *Provisioner) BeginSetup() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.status != StatusFree || p.settingUp {
+	if p.status != StatusFree || p.settingUp || p.withdrawn {
 		return false
 	}
 	p.settingUp = true
@@ -207,7 +239,7 @@ func (p *Provisioner) Adopt(q *Provisioner) (adopted bool) {
 	q.mu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.status != StatusFree {
+	if p.status != StatusFree || p.withdrawn {
 		return false
 	}
 	p.machine, p.runtime, p.vendor, p.gpuBDFs, p.unified = machine, rt, vendor, bdfs, unified
@@ -243,7 +275,7 @@ func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
 		return fmt.Errorf("renter key: %w", err)
 	}
 	p.mu.Lock()
-	if !p.capability.Ready || p.settingUp {
+	if !p.capability.Ready || p.settingUp || p.withdrawn {
 		p.mu.Unlock()
 		return fmt.Errorf("%w: it is setting itself up", ErrNotReady)
 	}

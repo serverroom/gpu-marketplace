@@ -14,7 +14,6 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/autosetup"
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
-	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
@@ -34,7 +33,7 @@ func (a *gpuAgent) autoSetup() *autosetup.Daemon {
 		PID:       os.Getpid(),
 		Prov:      a.prov,
 		Report: func(c control.Capability) error {
-			_, err := register.ReportCapability(c)
+			_, err := a.report(c)
 			return err
 		},
 		Say:  a.say,

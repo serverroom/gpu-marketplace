@@ -62,6 +62,7 @@ sudo gpu-agent start
 | `gpu-agent runtime prepare` | Install the microVM runtime (`--install-deps`) and build the rental base image with the NVIDIA driver — by default the one matching this machine's own driver (`--driver 580-server` picks one) |
 | `gpu-agent runtime prepare --headless` | Make a desktop machine (a workstation) start without its desktop, so the GPU is free to rent; closes the desktop now. `gpu-agent remove` brings the desktop back. A DGX Spark does not need it: its desktop closes only while it is rented or testing |
 | `gpu-agent check --boot` | Boot a real test rental with the GPU passed through, check what it can and cannot reach, tear it down, and record the result |
+| `gpu-agent update` | Update the agent to the latest release (`--version v0.1.11` picks one), exactly as "Update agent" in the control panel does; Linux |
 | `gpu-agent install` | Install as a system service (systemd/launchd/Windows Service) |
 | `gpu-agent remove` | Withdraw the listing, revoke relay access and delete the agent completely (`--yes` skips the prompt) |
 | `gpu-agent uninstall` | Remove the system service only — keys, token and listing stay; use `remove` to take everything off |
@@ -153,6 +154,44 @@ for the manual commands, which stay available for support:
 `sudo gpu-agent runtime prepare --install-deps` (packages and image) and
 `sudo gpu-agent check --boot` (the test rental).
 
+## Updating the agent, and removing a machine, from the control panel
+
+**Update agent.** When a newer agent is released, the control panel offers to update
+a published Linux machine that is not rented. The agent checks the request at once —
+a release version (`vX.Y.Z`) newer than the one running, a release build, no rental,
+no setup or test boot and no other update under way — and answers; the rest happens in
+the background, and the panel follows it:
+
+1. **downloading** the release for this machine from
+   `github.com/serverroom/gpu-marketplace/releases` — the agent builds that address
+   itself; only the version comes from the panel;
+2. **verifying** it against the release's `checksums.txt` (the installers' rule) and
+   by running it: it must say it is the version asked for;
+3. **restarting**: the running binary is kept as `gpu-agent.prev`, the new one is moved
+   into its place in one step, and the agent restarts a few seconds later.
+
+Three minutes after the restart, the previous binary checks the new agent from a
+systemd timer of its own: if the service is not running, or is not running the new
+binary, it puts itself back and restarts the agent. The outcome is **ok**,
+**rolled_back** or **failed** (anything that fails before the new binary is moved into
+place leaves the running agent untouched), recorded in `/var/lib/gpu-agent/update.json`
+and shown by the panel and by `sudo gpu-agent status`. `sudo gpu-agent update` does the
+same from the machine. Agents older than v0.1.10 cannot update themselves: run the
+install command once.
+
+**Remove from marketplace.** When the host removes a published machine in the control
+panel (or its capability report is answered *410 Gone*), the agent stops hosting: it
+refuses every rental, stops its automatic setup, its reports and its tunnel, and removes
+a rental firewall table a crash may have left. It is not uninstalled — the binary and
+`/etc/gpu-agent` stay, so the agent says on every start, and in `status` and `check`:
+
+```
+This machine was removed from the marketplace in the control panel. Run 'sudo gpu-agent remove' to uninstall the agent, or register again with a new code to list it again.
+```
+
+A rented machine is removed once its rental ends. Registering again with a new code
+lists it again (the record, `/var/lib/gpu-agent/withdrawn.json`, is cleared).
+
 ## DGX Spark: the desktop comes and goes with a rental
 
 A DGX Spark draws its desktop on its only GPU, the GB10. On a machine the agent
@@ -212,7 +251,7 @@ firewall rules and creating an encrypted disk all need it. Concretely:
 
 - **Network: outbound only.** One SSH connection to the relay you picked (port 2222). Its key on the relay is `restrict`ed to two reverse forwards — no shell, no command, nothing else. Nothing is opened on your router.
 - **Listens on loopback only.** `127.0.0.1:9101` is the control channel; `127.0.0.1:9100` is the legacy stats endpoint (only when `config.yaml` exists). Nothing on your LAN can reach either.
-- **The control channel does four things:** provision, teardown, status, health. Every call but health needs the bearer token minted for this machine at register. There is no command execution, no file access, no shell, and no way for anyone at the marketplace to log in to your machine — nobody asks for, or gets, an account on it.
+- **The control channel does six things:** provision, teardown, status, health, update (to a newer release of this agent, from GitHub, verified — see above) and withdrawn (stop hosting). Every call but health needs the bearer token minted for this machine at register. There is no command execution, no file access, no shell, and no way for anyone at the marketplace to log in to your machine — nobody asks for, or gets, an account on it.
 - **Hosting checks are local.** `check` reads `/dev/kvm`, `/sys/kernel/iommu_groups`, `nvidia-smi`/`rocm-smi` and your `PATH`, and reports the result. It changes nothing.
 - **Files:** the binary (`/usr/local/bin/gpu-agent`), `/etc/gpu-agent` (the agent's SSH key, control token, registration and tunnel config, all `0600`, and `auto-setup` if you turned the automatic setup off), `/var/lib/gpu-agent` (the rental base image, the test-boot result, the last setup attempt and, while rented, the encrypted rental disk), and the service unit. The installer adds no users, kernel modules or drivers and installs only the OpenSSH client if it is missing. After linking, the automatic setup (or `gpu-agent runtime prepare --install-deps`) additionally installs QEMU, UEFI firmware, `cloud-image-utils`, `cryptsetup-bin`, `nftables`, `iproute2` and `kmod` with apt — nothing else; `sudo gpu-agent setup --off` before linking keeps it from doing so. While a rental runs, the agent also creates the `gpurent0` bridge, one nftables table, and (only if Docker or a firewall has set iptables' FORWARD policy to DROP) two accept rules for that bridge; all of them are removed when the rental ends.
 

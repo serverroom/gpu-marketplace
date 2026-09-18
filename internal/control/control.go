@@ -2,7 +2,9 @@ package control
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -58,6 +60,42 @@ type Provisioner interface {
 	Capability() Capability
 }
 
+// Host is what the control channel asks of the agent beyond rentals: its
+// version, its last update, updating it, and stopping hosting when the host
+// removed the machine in the control panel. Without one, /update and
+// /withdrawn answer 501.
+type Host interface {
+	AgentVersion() string
+	// UpdateRecord is update.json, or nil.
+	UpdateRecord() interface{}
+	// Update checks the request and starts the update in the background.
+	Update(version string) (from, to string, err error)
+	// Withdraw stops hosting for good (until registered again).
+	Withdraw() error
+}
+
+// StatusError is a refusal with the HTTP status to answer it with.
+type StatusError struct {
+	Code int
+	Msg  string
+}
+
+func (e *StatusError) Error() string { return e.Msg }
+
+// errorCode is the status for a Host error: its own when it carries one (a
+// StatusError, or anything with an HTTPStatus method), else 500.
+func errorCode(err error) int {
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Code
+	}
+	var coded interface{ HTTPStatus() int }
+	if errors.As(err, &coded) {
+		return coded.HTTPStatus()
+	}
+	return http.StatusInternalServerError
+}
+
 // rentalIDPattern is what a rental id may look like. The id becomes part of a
 // disk path and a command argument on the host, so anything else is refused at
 // the door rather than trusted to every place it ends up.
@@ -73,9 +111,16 @@ func ValidRentalID(id string) bool { return rentalIDPattern.MatchString(id) }
 type Server struct {
 	token      string
 	prov       Provisioner
+	host       Host
 	httpServer *http.Server
 	listenAddr string
 }
+
+// SetHost gives the channel the agent's own controls (update, withdrawn).
+func (s *Server) SetHost(h Host) { s.host = h }
+
+// Handler is the channel's HTTP handler, authentication included.
+func (s *Server) Handler() http.Handler { return s.httpServer.Handler }
 
 // New builds the control server. listenAddr should be a loopback address.
 func New(listenAddr, token string, prov Provisioner) *Server {
@@ -94,6 +139,8 @@ func New(listenAddr, token string, prov Provisioner) *Server {
 	mux.HandleFunc("/provision", s.auth(s.handleProvision))
 	mux.HandleFunc("/teardown", s.auth(s.handleTeardown))
 	mux.HandleFunc("/status", s.auth(s.handleStatus))
+	mux.HandleFunc("/update", s.auth(s.handleUpdate))
+	mux.HandleFunc("/withdrawn", s.auth(s.handleWithdrawn))
 	mux.HandleFunc("/health", s.handleHealth)
 	return s
 }
@@ -187,10 +234,16 @@ func (s *Server) handleTeardown(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	c := s.prov.Capability()
 	body := map[string]interface{}{
-		"status":  s.prov.Status(),
-		"ready":   c.Ready,
-		"kind":    c.Kind,
-		"reasons": c.Reasons,
+		"status":        s.prov.Status(),
+		"ready":         c.Ready,
+		"kind":          c.Kind,
+		"reasons":       c.Reasons,
+		"agent_version": c.AgentVersion,
+		"update":        nil,
+	}
+	if s.host != nil {
+		body["agent_version"] = s.host.AgentVersion()
+		body["update"] = s.host.UpdateRecord()
 	}
 	// Provisioning runs in the background, so a rental that did not come up is
 	// reported here rather than on the /provision call that started it.
@@ -200,6 +253,55 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, body)
+}
+
+type updateReq struct {
+	Version string `json:"version"`
+}
+
+// handleUpdate starts an update to the requested release and answers at once
+// (202); the download, checks, swap and restart happen in the background, and
+// /status shows them as "update". The URL is the agent's own: only the version
+// comes from the request.
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.host == nil {
+		http.Error(w, "this agent cannot update itself", http.StatusNotImplemented)
+		return
+	}
+	var req updateReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	from, to, err := s.host.Update(strings.TrimSpace(req.Version))
+	if err != nil {
+		http.Error(w, err.Error(), errorCode(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"status": "updating", "from": from, "to": to})
+}
+
+// handleWithdrawn: the host removed this machine in the control panel.
+func (s *Server) handleWithdrawn(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.host == nil {
+		http.Error(w, "this agent cannot stop hosting on request", http.StatusNotImplemented)
+		return
+	}
+	if err := s.host.Withdraw(); err != nil {
+		http.Error(w, err.Error(), errorCode(err))
+		return
+	}
+	writeJSON(w, map[string]string{"status": "withdrawn"})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

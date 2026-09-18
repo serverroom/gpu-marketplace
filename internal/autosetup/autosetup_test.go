@@ -771,3 +771,15 @@ func TestASparkWithItsDesktopUpIsSetUp(t *testing.T) {
 		t.Errorf("capability = %+v", c)
 	}
 }
+
+// A machine the host removed from the marketplace is not set up.
+func TestNotOnAWithdrawnMachine(t *testing.T) {
+	h := machine(t)
+	noImage(h)
+	r := newRig(t, h)
+	r.d.Prov.Withdraw("This machine was removed from the marketplace in the control panel.")
+	r.run()
+	if r.ran() != "" || r.last() != nil || len(r.reports) != 0 {
+		t.Errorf("steps %q reports %v", r.ran(), r.reasons())
+	}
+}

@@ -50,7 +50,12 @@ func runRemove(svc service.Service, args []string) {
 	fmt.Println()
 
 	// 1. Revoke first, while the control token that proves who we are still exists.
-	if st.Registered {
+	if st.Registered && register.LoadWithdrawn() != nil {
+		// The host removed it in the control panel already; revoking again is
+		// best effort.
+		_, _ = register.Deregister()
+		fmt.Println("Listing:  already removed in the control panel.")
+	} else if st.Registered {
 		out, err := register.Deregister()
 		switch {
 		case err != nil:
