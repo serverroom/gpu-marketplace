@@ -309,15 +309,17 @@ func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
 	machine := p.machine
 	p.mu.Unlock()
 
+	o := vmrt.StartOptions{ID: rentalID, Pubkey: renterPubkey}
 	if !p.async {
-		return p.start(machine, rentalID, renterPubkey)
+		return p.start(machine, o)
 	}
-	go p.start(machine, rentalID, renterPubkey)
+	go p.start(machine, o)
 	return nil
 }
 
-func (p *Provisioner) start(machine Machine, id, key string) error {
-	err := machine.Start(vmrt.StartOptions{ID: id, Pubkey: key})
+func (p *Provisioner) start(machine Machine, o vmrt.StartOptions) error {
+	id := o.ID
+	err := machine.Start(o)
 	var fwd stopper
 	if err == nil {
 		fwd, err = startForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
@@ -380,8 +382,8 @@ func (p *Provisioner) Teardown(rentalID string) error {
 	}
 	p.status = StatusDirty
 	p.lastErr = strings.Join(res.Detail, "; ")
-	log.Printf("teardown of %s NOT verified clean (wiped=%v gpuClean=%v); quarantined dirty: %s",
-		rentalID, res.Wiped, res.GPUClean, p.lastErr)
+	log.Printf("teardown of %s NOT verified clean (wiped=%v gpuClean=%v nicDirty=%v); quarantined dirty: %s",
+		rentalID, res.Wiped, res.GPUClean, res.NICDirty, p.lastErr)
 	return fmt.Errorf("teardown not verified clean; machine quarantined dirty: %s", p.lastErr)
 }
 

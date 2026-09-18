@@ -19,11 +19,13 @@ type fakeMachine struct {
 	present  bool
 	dirty    bool
 	lastID   string
+	last     vmrt.StartOptions
 }
 
 func (m *fakeMachine) Start(o vmrt.StartOptions) error {
 	m.started++
 	m.lastID = o.ID
+	m.last = o
 	if m.startErr == nil {
 		m.present, m.alive = true, true
 	}

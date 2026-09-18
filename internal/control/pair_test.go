@@ -113,3 +113,80 @@ func TestLinkVerifyErrorsAreStatusCodes(t *testing.T) {
 		}
 	}
 }
+
+const pairBody = `{"rental_id":"1a2b3c4d-0000-4000-8000-000000000000","renter_pubkey":"ssh-ed25519 AAAA","node":"a",` +
+	`"peer_hostname":"gpu-1a2b3c4d-b","links":[{"local_mac":"58:a2:e1:00:00:01","cidr":"10.200.0.1/30","peer_ip":"10.200.0.2"}],` +
+	`"mtu":9000,"intra_key":{"private_openssh":"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n","public":"ssh-ed25519 AAAA"}}`
+
+func TestPairProvisionStartsTheRental(t *testing.T) {
+	fp := readyPairProv()
+	w := serve(New("127.0.0.1:0", "secret", fp), "POST", "/pair/provision", pairBody, "secret")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"provisioning"`) {
+		t.Fatalf("code = %d body = %s", w.Code, w.Body.String())
+	}
+	r := fp.provision
+	if r == nil || r.Node != "a" || r.PeerHostname != "gpu-1a2b3c4d-b" || r.MTU != 9000 || len(r.Links) != 1 ||
+		r.Links[0].CIDR != "10.200.0.1/30" || r.IntraKey == nil || r.IntraKey.Public != "ssh-ed25519 AAAA" {
+		t.Errorf("request = %+v", r)
+	}
+}
+
+// A machine that cannot be half of a pair refuses before reading the request.
+func TestPairProvisionRefusesAMachineThatIsNotReady(t *testing.T) {
+	for name, spoil := range map[string]func(c *Capability){
+		"single not ready":       func(c *Capability) { c.Ready, c.Reasons = false, []string{"no test boot"} },
+		"interconnect not ready": func(c *Capability) { c.Interconnect.Ready, c.Interconnect.Reasons = false, []string{"no pair test"} },
+		"no pair half":           func(c *Capability) { c.Interconnect = nil },
+	} {
+		fp := readyPairProv()
+		spoil(&fp.capability)
+		w := serve(New("127.0.0.1:0", "secret", fp), "POST", "/pair/provision", pairBody, "secret")
+		if w.Code != http.StatusServiceUnavailable || fp.provision != nil {
+			t.Errorf("%s: code = %d called = %v", name, w.Code, fp.provision != nil)
+		}
+	}
+}
+
+func TestPairProvisionRefusals(t *testing.T) {
+	for body, code := range map[string]int{
+		strings.Replace(pairBody, `"mtu":9000`, `"mtu":9000,"gateway":"10.200.0.254"`, 1): http.StatusBadRequest,
+		`{"rental_id":`: http.StatusBadRequest,
+	} {
+		fp := readyPairProv()
+		if w := serve(New("127.0.0.1:0", "secret", fp), "POST", "/pair/provision", body, "secret"); w.Code != code || fp.provision != nil {
+			t.Errorf("%s: code = %d, want %d", body, w.Code, code)
+		}
+	}
+	for err, code := range map[error]int{
+		Conflict("link 0: 58:a2:e1:00:00:09 is not a ConnectX-7 port of this machine"): http.StatusConflict,
+		Invalid("link 0: cidr 10.200.0.1/24 must be a /30"):                            http.StatusBadRequest,
+		Unavailable("this machine cannot be half of a linked pair: x"):                 http.StatusServiceUnavailable,
+	} {
+		fp := readyPairProv()
+		fp.provErr = err
+		if w := serve(New("127.0.0.1:0", "secret", fp), "POST", "/pair/provision", pairBody, "secret"); w.Code != code {
+			t.Errorf("%v: code = %d, want %d", err, w.Code, code)
+		}
+	}
+	if w := serve(New("127.0.0.1:0", "secret", readyPairProv()), "POST", "/pair/provision", pairBody, ""); w.Code != http.StatusUnauthorized {
+		t.Errorf("without the token: %d", w.Code)
+	}
+}
+
+func TestStatusCarriesThePair(t *testing.T) {
+	fp := readyPairProv()
+	fp.pairStatus = &PairStatus{Node: "b", GuestLink: GuestLinkStatus{OK: 1, Fail: 1, Links: 2}}
+	w := serve(New("127.0.0.1:0", "secret", fp), "GET", "/status", "", "secret")
+	for _, want := range []string{`"interconnect_ready":true`, `"identity_confirmed":true`,
+		`"pair":{"node":"b","guest_link":{"ok":1,"fail":1,"links":2}}`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("status missing %s: %s", want, w.Body.String())
+		}
+	}
+	// A single machine (or an agent without the pair half) says false and no pair.
+	w = serve(New("127.0.0.1:0", "secret", readyProv()), "GET", "/status", "", "secret")
+	if !strings.Contains(w.Body.String(), `"interconnect_ready":false`) || !strings.Contains(w.Body.String(), `"identity_confirmed":false`) ||
+		strings.Contains(w.Body.String(), `"pair"`) {
+		t.Errorf("status = %s", w.Body.String())
+	}
+}

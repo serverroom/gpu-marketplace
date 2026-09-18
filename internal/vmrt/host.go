@@ -34,6 +34,9 @@ type Host interface {
 	Output(name string, args ...string) (string, error)
 	LookPath(name string) (string, error)
 	ReadFile(path string) ([]byte, error)
+	// ReadTail reads at most the last max bytes of a file: a guest's serial
+	// log is the guest's to fill, and only its end is ever needed.
+	ReadTail(path string, max int64) ([]byte, error)
 	WriteFile(path string, data []byte, perm os.FileMode) error
 	Readlink(path string) (string, error)
 	Glob(pattern string) ([]string, error)
@@ -93,6 +96,24 @@ func (OSHost) Output(name string, args ...string) (string, error) {
 func (OSHost) LookPath(name string) (string, error) { return exec.LookPath(name) }
 
 func (OSHost) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+func (OSHost) ReadTail(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if off := fi.Size() - max; off > 0 {
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	return io.ReadAll(io.LimitReader(f, max))
+}
 
 func (OSHost) WriteFile(path string, data []byte, perm os.FileMode) error {
 	done := make(chan error, 1)

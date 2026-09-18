@@ -137,13 +137,6 @@ func TestLinkVerifyRefusals(t *testing.T) {
 	fastFrames(t)
 	a, _, _ := sparkPair(t)
 	req := control.LinkVerifyRequest{Challenge: challenge, Self: listingA, Peer: listingB}
-	code := func(err error) int {
-		var re *control.RequestError
-		if errors.As(err, &re) {
-			return re.Code
-		}
-		return 0
-	}
 
 	if _, err := a.LinkVerify(control.LinkVerifyRequest{Challenge: challenge, Self: listingB, Peer: listingA}); code(err) != http.StatusBadRequest ||
 		!strings.Contains(err.Error(), "this machine is listing "+listingA) {
@@ -194,7 +187,7 @@ func TestPeersAnnounceThemselves(t *testing.T) {
 		t.Errorf("summary = %s", PeerSummary(b.Capability()))
 	}
 
-	// Heard again an hour later: the same peers, so nothing new to report.
+	// Heard again an hour later: the same peers, seen again.
 	a.now = func() time.Time { return time.Unix(1789003600, 0) }
 	b.now = a.now
 	wg.Add(2)
@@ -223,5 +216,127 @@ func TestPeerAnnouncementsSkipABusyOrUnregisteredMachine(t *testing.T) {
 	}
 	if len(w.Opened()) != 0 {
 		t.Errorf("sockets opened: %v", w.Opened())
+	}
+}
+
+func pairRequest(macs ...string) control.PairProvisionRequest {
+	req := control.PairProvisionRequest{RentalID: "1a2b3c4d-0000-4000-8000-000000000001", Node: "a",
+		PeerHostname: "gpu-1a2b3c4d-b", MTU: 9000}
+	for i, m := range macs {
+		req.Links = append(req.Links, control.PairLink{LocalMAC: m,
+			CIDR: "10.200." + string(rune('0'+i)) + ".1/30", PeerIP: "10.200." + string(rune('0'+i)) + ".2"})
+	}
+	return req
+}
+
+// sparkForPair is Spark A with a recording machine behind it, so a pair
+// rental's start can be inspected without booting anything.
+func sparkForPair(t *testing.T) (*Provisioner, *fakeMachine) {
+	t.Helper()
+	a, _, _ := sparkPair(t)
+	m := &fakeMachine{stopRes: clean()}
+	a.machine = m
+	a.async = false
+	withFakeForward(t, nil)
+	return a, m
+}
+
+func TestPairProvisionHandsTheCardToTheRental(t *testing.T) {
+	a, m := sparkForPair(t)
+	req := pairRequest("58:a2:e1:00:00:01")
+	req.RenterPubkey = renterKey(t)
+	if err := a.PairProvision(req); err != nil {
+		t.Fatal(err)
+	}
+	if a.Status() != StatusRented || m.started != 1 || m.last.Pair == nil {
+		t.Fatalf("status %s started %d opts %+v", a.Status(), m.started, m.last)
+	}
+	p := m.last.Pair
+	if p.Node != "a" || p.MTU != 9000 || len(p.Links) != 1 || p.Links[0].Name != "cx7p0" ||
+		strings.Join(p.Functions, " ") != strings.Join(sparkNICs, " ") || strings.Join(p.OtherMACs, " ") != "58:a2:e1:00:00:02" {
+		t.Errorf("pair = %+v", p)
+	}
+	// A second pair rental, or a cable check, while this one is on the machine.
+	if err := a.PairProvision(req); code(err) != http.StatusConflict {
+		t.Errorf("a second pair rental: %v", err)
+	}
+	if _, err := a.LinkVerify(control.LinkVerifyRequest{Challenge: challenge, Self: listingA, Peer: listingB}); code(err) != http.StatusConflict {
+		t.Errorf("a cable check during a rental: %v", err)
+	}
+}
+
+func code(err error) int {
+	var re *control.RequestError
+	if errors.As(err, &re) {
+		return re.Code
+	}
+	return 0
+}
+
+func TestPairProvisionRefusals(t *testing.T) {
+	key := renterKey(t)
+	cases := []struct {
+		name  string
+		setup func(p *Provisioner)
+		req   control.PairProvisionRequest
+		code  int
+		says  string
+	}{
+		{"a port this machine lacks", nil, pairRequest("58:a2:e1:00:00:09"), http.StatusConflict, "not a ConnectX-7 port"},
+		{"a bad address", nil, func() control.PairProvisionRequest {
+			r := pairRequest("58:a2:e1:00:00:01")
+			r.Links[0].CIDR = "10.200.0.1/29"
+			return r
+		}(), http.StatusBadRequest, "/30"},
+		{"no pair test any more", func(p *Provisioner) {
+			delete(p.host.(*fakehost.Host).Files, vmrt.PairTestPath(dataDir))
+		}, pairRequest("58:a2:e1:00:00:01"), http.StatusServiceUnavailable, "pair test"},
+		{"an address appeared on a port", func(p *Provisioner) {
+			p.host.(*fakehost.Host).Outputs["ip -j addr show dev enP1p1s0f1np1"] = `[{"addr_info":[{"family":"inet","local":"192.168.9.9","prefixlen":24}]}]`
+		}, pairRequest("58:a2:e1:00:00:01"), http.StatusServiceUnavailable, "192.168.9.9"},
+		{"not free", func(p *Provisioner) { p.status = StatusDirty }, pairRequest("58:a2:e1:00:00:01"), http.StatusConflict, "dirty"},
+		{"a check running", func(p *Provisioner) { p.checking = true }, pairRequest("58:a2:e1:00:00:01"), http.StatusConflict, "cable check"},
+		{"a bad rental id", nil, func() control.PairProvisionRequest {
+			r := pairRequest("58:a2:e1:00:00:01")
+			r.RentalID = "../x"
+			return r
+		}(), http.StatusBadRequest, "rental id"},
+	}
+	for _, c := range cases {
+		a, m := sparkForPair(t)
+		if c.setup != nil {
+			c.setup(a)
+		}
+		c.req.RenterPubkey = key
+		err := a.PairProvision(c.req)
+		if code(err) != c.code || !strings.Contains(err.Error(), c.says) {
+			t.Errorf("%s: %v (code %d), want %d mentioning %q", c.name, err, code(err), c.code, c.says)
+		}
+		if m.started != 0 {
+			t.Errorf("%s: a refused pair rental started", c.name)
+		}
+	}
+	a, _ := sparkForPair(t)
+	a.capability.Ready = false
+	if err := a.PairProvision(pairRequest("58:a2:e1:00:00:01")); code(err) != http.StatusServiceUnavailable {
+		t.Errorf("a machine that cannot host: %v", err)
+	}
+}
+
+func TestPairStatusReadsTheGuestsLinkCheck(t *testing.T) {
+	a, _, _ := sparkPair(t)
+	if a.PairStatus() != nil {
+		t.Fatal("a pair on a free machine")
+	}
+	h := a.host.(*fakehost.Host)
+	r := vmrt.NewRental(dataDir, "1a2b3c4d-0000-4000-8000-000000000001")
+	st := &vmrt.State{RentalID: r.ID, Rental: r, Pair: &vmrt.PairOptions{Node: "b", Links: []vmrt.GuestLink{{}, {}}}}
+	if err := vmrt.SaveState(h, dataDir, st); err != nil {
+		t.Fatal(err)
+	}
+	h.SetFile(r.SerialLog, []byte("GPUAGENT-LINK ok 0\nGPUAGENT-LINK fail 1\n"))
+	ps := a.PairStatus()
+	if ps == nil || ps.Node != "b" || ps.GuestLink != (control.GuestLinkStatus{OK: 1, Fail: 1, Links: 2}) {
+		t.Errorf("pair status = %+v", ps)
 	}
 }

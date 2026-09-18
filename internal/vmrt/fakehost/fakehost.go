@@ -156,6 +156,17 @@ func (h *Host) ReadFile(p string) ([]byte, error) {
 	return append([]byte(nil), data...), nil
 }
 
+func (h *Host) ReadTail(p string, max int64) ([]byte, error) {
+	data, err := h.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		data = data[int64(len(data))-max:]
+	}
+	return data, nil
+}
+
 const pciDevices = "/sys/bus/pci/devices/"
 
 func driverLink(bdf string) string { return pciDevices + bdf + "/driver" }

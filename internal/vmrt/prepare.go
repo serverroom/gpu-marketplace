@@ -279,14 +279,14 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	if err != nil {
 		return fmt.Errorf("bake network: %w", err)
 	}
-	if err := rt.writeSeed(r, userData, BakeID); err != nil {
+	if err := rt.writeSeed(r, userData, MetaData(BakeID), NetworkConfig()); err != nil {
 		return err
 	}
 	if err := rt.copyVars(r); err != nil {
 		return err
 	}
 
-	log("Booting the base image to install NVIDIA driver %s (this takes a while) ...", o.Driver)
+	log("Booting the base image to install NVIDIA driver %s and the RDMA tools (this takes a while) ...", o.Driver)
 	if err := h.Run("systemd-run", LaunchArgs(spec, r)...); err != nil {
 		return fmt.Errorf("boot bake VM: %w", err)
 	}
@@ -322,9 +322,11 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	if err := h.Rename(tmp, spec.GoldenImage); err != nil {
 		return err
 	}
+	// Every image carries the RDMA tools (cheap), so a machine never has to
+	// rebuild to become half of a pair.
 	info, _ := json.MarshalIndent(GoldenInfo{Base: name, BaseSHA256: want, Driver: o.Driver,
 		AgentVersion: version, CreatedAt: time.Now().Unix(), DriverSource: o.DriverSource,
-		HostDriver: host.Describe()}, "", "  ")
+		HostDriver: host.Describe(), Extras: []string{ExtraRDMA}}, "", "  ")
 	_ = h.WriteFile(spec.GoldenImage+".json", info, 0600)
 	log("Golden image ready. Next: sudo gpu-agent check --boot")
 	return nil

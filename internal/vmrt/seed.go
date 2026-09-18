@@ -71,8 +71,10 @@ func sshString(s string) []byte {
 const VMUser = "root"
 
 // MetaData is the NoCloud meta-data for a rental.
-func MetaData(id string) string {
-	return "instance-id: gpu-rental-" + id + "\nlocal-hostname: " + Hostname(id) + "\n"
+func MetaData(id string) string { return metaData(id, Hostname(id)) }
+
+func metaData(id, host string) string {
+	return "instance-id: gpu-rental-" + id + "\nlocal-hostname: " + host + "\n"
 }
 
 // Hostname is the guest's name: gpu- and the first eight characters of the
@@ -90,8 +92,16 @@ func Hostname(id string) string {
 // NetworkConfig pins the guest's one NIC to the rental /30 with a static
 // address, so there is no DHCP server to run and nothing on the host for the
 // tenant to talk to beyond its gateway.
-func NetworkConfig() string {
-	return fmt.Sprintf(`version: 2
+func NetworkConfig() string { return NetworkConfigFor(nil) }
+
+// NetworkConfigFor is NetworkConfig plus, for one half of a pair, the cable:
+// each verified link's port renamed cx7p<i> by its MAC, at the pair's MTU,
+// with its /30 and nothing else -- no gateway, no DNS, no IPv6 link-local --
+// so traffic between the two machines never touches the fenced rental
+// network. The card's other ports are only named (and never waited for).
+func NetworkConfigFor(pair *PairOptions) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `version: 2
 ethernets:
   rental:
     match:
@@ -103,6 +113,18 @@ ethernets:
     nameservers:
       addresses: [1.1.1.1, 8.8.8.8]
 `, GuestMAC, GuestIP, PrefixLen, HostIP)
+	if pair == nil {
+		return b.String()
+	}
+	for _, l := range pair.Links {
+		fmt.Fprintf(&b, "  %s:\n    match:\n      macaddress: \"%s\"\n    set-name: %s\n    mtu: %d\n    addresses: [%s]\n    link-local: []\n    optional: true\n",
+			l.Name, l.LocalMAC, l.Name, pair.MTU, l.CIDR)
+	}
+	for i, m := range pair.OtherMACs {
+		name := linkName(len(pair.Links) + i)
+		fmt.Fprintf(&b, "  %s:\n    match:\n      macaddress: \"%s\"\n    set-name: %s\n    link-local: []\n    optional: true\n", name, m, name)
+	}
+	return b.String()
 }
 
 // sayScript writes one line to whichever serial console the guest has (ttyS0
@@ -122,6 +144,9 @@ const sayScript = `  - path: /usr/local/sbin/gpuagent-say
 const (
 	markSelfTest = "GPUAGENT-SELFTEST"
 	markBake     = "GPUAGENT-BAKE"
+	// markLink is what a pair VM's link check says about each cable:
+	// "GPUAGENT-LINK ok <i>" or "GPUAGENT-LINK fail <i>".
+	markLink = "GPUAGENT-LINK"
 )
 
 // rootLoginConf keeps root's login key-only whatever the image's sshd defaults
@@ -136,6 +161,20 @@ const rootLoginConf = `  - path: /etc/ssh/sshd_config.d/10-gpu-rental.conf
       KbdInteractiveAuthentication no
 `
 
+// SeedOptions is everything one rental's cloud-init seed is made from.
+type SeedOptions struct {
+	ID     string
+	Pubkey string
+	// Probes, when non-nil, makes this a self-test VM.
+	Probes []string
+	// NoGPU: the machine has no GPU, so a self-test VM does not look for one.
+	NoGPU bool
+	// Pair is one machine's half of a pair rental, already through ValidatePair.
+	Pair *PairOptions
+	// PairTest makes a pair's self-test VM also run the pair test.
+	PairTest *PairTestPlan
+}
+
 // UserData is the cloud-init user-data for a rental: the renter logs in as root
 // (the VM is theirs) with their key and nothing else -- no password anywhere, no
 // other account. `users: []` stops cloud-init creating the image's default user,
@@ -143,37 +182,93 @@ const rootLoginConf = `  - path: /etc/ssh/sshd_config.d/10-gpu-rental.conf
 // command cloud-init otherwise puts in front of it. probes non-nil makes it a
 // self-test VM.
 func UserData(id, pubkey string, probes []string) (string, error) {
-	key, err := NormalizePubkey(pubkey)
+	return BuildUserData(SeedOptions{ID: id, Pubkey: pubkey, Probes: probes})
+}
+
+// BuildUserData is UserData for any rental: a single one or one half of a
+// pair, a renter's or a self-test's.
+func BuildUserData(o SeedOptions) (string, error) {
+	key, err := NormalizePubkey(o.Pubkey)
 	if err != nil {
 		return "", err
 	}
+	if o.PairTest != nil && (o.Pair == nil || o.Probes == nil) {
+		return "", errors.New("a pair test runs in the self-test VM of a pair")
+	}
+	host := Hostname(o.ID)
+	if o.Pair != nil {
+		host = PairHostname(o.ID, o.Pair.Node)
+	}
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
-	b.WriteString("hostname: " + Hostname(id) + "\n")
+	b.WriteString("hostname: " + host + "\n")
+	if o.Pair != nil {
+		// The whole of /etc/hosts comes from write_files: both machines' names.
+		b.WriteString("manage_etc_hosts: false\n")
+	}
 	b.WriteString("ssh_pwauth: false\n")
 	b.WriteString("disable_root: false\n")
 	b.WriteString("users: []\n")
 	b.WriteString("ssh_authorized_keys:\n")
 	fmt.Fprintf(&b, "  - %q\n", key)
+	if o.Pair != nil && o.Pair.IntraKey != nil {
+		// The other VM of the pair may log in too, from the cable only.
+		fmt.Fprintf(&b, "  - %q\n", `from="`+pairNetwork.String()+`" `+o.Pair.IntraKey.Public)
+	}
 	b.WriteString("growpart:\n  mode: auto\n  devices: [\"/\"]\n")
 	b.WriteString("write_files:\n")
 	b.WriteString(rootLoginConf)
 	b.WriteString(sayScript)
-	if probes != nil {
-		script, err := selfTestScript(probes)
+	var runcmd []string
+	if o.Probes != nil {
+		script, err := selfTestScript(o.Probes, !o.NoGPU)
 		if err != nil {
 			return "", err
 		}
-		b.WriteString("  - path: /usr/local/sbin/gpuagent-selftest\n")
-		b.WriteString("    permissions: \"0755\"\n")
-		b.WriteString("    content: |\n")
-		for _, line := range strings.Split(strings.TrimRight(script, "\n"), "\n") {
-			b.WriteString("      " + line + "\n")
-		}
+		writeText(&b, "/usr/local/sbin/gpuagent-selftest", "0755", script)
+		runcmd = append(runcmd, "  - [bash, /usr/local/sbin/gpuagent-selftest]\n")
+	}
+	if o.Pair != nil {
+		writePairFiles(&b, o.ID, o.Pair)
+		// A unit of its own, so the first boot finishes while it waits for the
+		// other machine, and the renter can log in meanwhile.
+		runcmd = append(runcmd, "  - [systemd-run, --unit=gpuagent-linkcheck, --no-block, /usr/local/sbin/gpuagent-linkcheck]\n")
+	}
+	if o.PairTest != nil {
+		writeText(&b, "/usr/local/sbin/gpuagent-pairtest", "0755", pairTestScript(o.Pair, *o.PairTest))
+		runcmd = append(runcmd, "  - [bash, /usr/local/sbin/gpuagent-pairtest]\n")
+	}
+	if len(runcmd) > 0 {
 		b.WriteString("runcmd:\n")
-		b.WriteString("  - [bash, /usr/local/sbin/gpuagent-selftest]\n")
+		for _, c := range runcmd {
+			b.WriteString(c)
+		}
 	}
 	return b.String(), nil
+}
+
+// writeText adds a file to write_files as a literal block. Only content built
+// from validated values is written this way.
+func writeText(b *strings.Builder, path, perm, content string) {
+	b.WriteString("  - path: " + path + "\n")
+	b.WriteString("    permissions: \"" + perm + "\"\n")
+	b.WriteString("    content: |\n")
+	for _, line := range strings.Split(strings.TrimRight(content, "\n"), "\n") {
+		b.WriteString("      " + line + "\n")
+	}
+}
+
+// writeB64 adds a file to write_files base64-encoded, so whatever it holds
+// can never be read as YAML. A deferred file is written at the end of the
+// first boot, after cloud-init has set up root's SSH directory.
+func writeB64(b *strings.Builder, path, perm string, content []byte, deferred bool) {
+	b.WriteString("  - path: " + path + "\n")
+	b.WriteString("    permissions: \"" + perm + "\"\n")
+	b.WriteString("    encoding: b64\n")
+	b.WriteString("    content: " + base64.StdEncoding.EncodeToString(content) + "\n")
+	if deferred {
+		b.WriteString("    defer: true\n")
+	}
 }
 
 var driverPattern = regexp.MustCompile(`^[0-9]{3}(-server)?(-open)?$`)
@@ -182,9 +277,16 @@ var driverPattern = regexp.MustCompile(`^[0-9]{3}(-server)?(-open)?$`)
 // name: "580-server-open", "570", "580-server".
 func ValidDriver(d string) bool { return driverPattern.MatchString(d) }
 
-// BakeUserData installs the NVIDIA driver into the base image once, then wipes
-// cloud-init's memory of this boot (so every rental's first boot is a first
-// boot) and powers off. The host reads the result from the serial console.
+// RDMAPackages are the RDMA userspace tools every rental image carries, so a
+// linked pair's VMs can use their ConnectX-7 cards (owner decision Q8: the
+// tools only -- no DOCA, no NCCL).
+var RDMAPackages = []string{"rdma-core", "ibverbs-utils", "perftest", "infiniband-diags", "rdmacm-utils", "ethtool"}
+
+// BakeUserData installs the NVIDIA driver and the RDMA tools into the base
+// image once (and the kernel's extra modules when the image's kernel lacks
+// mlx5_ib), then wipes cloud-init's memory of this boot (so every rental's
+// first boot is a first boot) and powers off. The host reads the result from
+// the serial console.
 func BakeUserData(driver string) (string, error) {
 	if !ValidDriver(driver) {
 		return "", fmt.Errorf("invalid driver branch %q", driver)
@@ -194,6 +296,7 @@ func BakeUserData(driver string) (string, error) {
 	if strings.Contains(driver, "-server") {
 		utils += "-server"
 	}
+	install := "apt-get install -y --no-install-recommends"
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
 	b.WriteString("ssh_pwauth: false\n")
@@ -203,7 +306,12 @@ func BakeUserData(driver string) (string, error) {
 	b.WriteString("runcmd:\n")
 	fmt.Fprintf(&b, "  - [bash, -c, %q]\n", strings.Join([]string{
 		"export DEBIAN_FRONTEND=noninteractive",
-		"if apt-get update && apt-get install -y --no-install-recommends linux-headers-generic nvidia-driver-" + driver + " " + utils + "; then /usr/local/sbin/gpuagent-say '" + markBake + " DONE'; else /usr/local/sbin/gpuagent-say '" + markBake + " FAIL'; fi",
+		"ok=1",
+		"apt-get update || ok=0",
+		install + " linux-headers-generic nvidia-driver-" + driver + " " + utils + " || ok=0",
+		install + " " + strings.Join(RDMAPackages, " ") + " || ok=0",
+		"modinfo mlx5_ib >/dev/null 2>&1 || " + install + " linux-modules-extra-$(uname -r) || ok=0",
+		"if [ $ok = 1 ]; then /usr/local/sbin/gpuagent-say '" + markBake + " DONE'; else /usr/local/sbin/gpuagent-say '" + markBake + " FAIL'; fi",
 		"cloud-init clean --logs --machine-id",
 		"poweroff",
 	}, "; "))
@@ -211,11 +319,12 @@ func BakeUserData(driver string) (string, error) {
 }
 
 // selfTestScript reports, one marker line at a time, what a tenant would see:
-// the GPUs the guest has, whether the internet is reachable, and whether each
-// probe target is BLOCKED. Only a silent drop counts as blocked -- `timeout`
-// exits 124 when nothing answered, while a refused connection means the packet
-// got through the fence and is reported as REACHED.
-func selfTestScript(probes []string) (string, error) {
+// the GPUs the guest has (on a machine that has any), whether the internet is
+// reachable, and whether each probe target is BLOCKED. Only a silent drop
+// counts as blocked -- `timeout` exits 124 when nothing answered, while a
+// refused connection means the packet got through the fence and is reported
+// as REACHED.
+func selfTestScript(probes []string, gpu bool) (string, error) {
 	for _, p := range probes {
 		host, port, err := net.SplitHostPort(p)
 		if err != nil || net.ParseIP(host) == nil {
@@ -227,20 +336,23 @@ func selfTestScript(probes []string) (string, error) {
 	}
 	say := "/usr/local/sbin/gpuagent-say"
 	m := markSelfTest
-	return strings.Join([]string{
-		"#!/bin/bash",
-		say + " '" + m + " BEGIN'",
-		"if out=$(nvidia-smi --query-gpu=pci.bus_id,name,memory.total --format=csv,noheader 2>&1); then",
-		"  while IFS= read -r line; do " + say + " \"" + m + " GPU $line\"; done <<< \"$out\"",
-		"else",
-		"  " + say + " \"" + m + " GPUFAIL $(printf '%s' \"$out\" | tr '\\n' ' ' | cut -c1-300)\"",
-		"fi",
+	lines := []string{"#!/bin/bash", say + " '" + m + " BEGIN'"}
+	if gpu {
+		lines = append(lines,
+			"if out=$(nvidia-smi --query-gpu=pci.bus_id,name,memory.total --format=csv,noheader 2>&1); then",
+			"  while IFS= read -r line; do "+say+" \""+m+" GPU $line\"; done <<< \"$out\"",
+			"else",
+			"  "+say+" \""+m+" GPUFAIL $(printf '%s' \"$out\" | tr '\\n' ' ' | cut -c1-300)\"",
+			"fi")
+	}
+	lines = append(lines,
 		"probe() { timeout \"$2\" bash -c \"exec 3<>/dev/tcp/${1%:*}/${1##*:}\" 2>/dev/null; echo $?; }",
-		"if [ \"$(probe 1.1.1.1:443 10)\" = 0 ]; then " + say + " '" + m + " INTERNET ok'; else " + say + " '" + m + " INTERNET fail'; fi",
-		"for t in " + strings.Join(probes, " ") + "; do",
+		"if [ \"$(probe 1.1.1.1:443 10)\" = 0 ]; then "+say+" '"+m+" INTERNET ok'; else "+say+" '"+m+" INTERNET fail'; fi",
+		"for t in "+strings.Join(probes, " ")+"; do",
 		"  rc=$(probe \"$t\" 6)",
-		"  if [ \"$rc\" = 124 ]; then " + say + " \"" + m + " BLOCKED $t\"; else " + say + " \"" + m + " REACHED $t rc=$rc\"; fi",
+		"  if [ \"$rc\" = 124 ]; then "+say+" \""+m+" BLOCKED $t\"; else "+say+" \""+m+" REACHED $t rc=$rc\"; fi",
 		"done",
-		say + " '" + m + " END'",
-	}, "\n") + "\n", nil
+		say+" '"+m+" END'",
+	)
+	return strings.Join(lines, "\n") + "\n", nil
 }

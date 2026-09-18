@@ -26,7 +26,13 @@ type State struct {
 	// StoppedDisplayManager is the display manager a rental on a DGX Spark
 	// stopped so its desktop let go of the GPU; started again at teardown.
 	StoppedDisplayManager string `json:"stopped_display_manager,omitempty"`
-	StartedAt             int64  `json:"started_at"`
+	// A pair rental also takes the ConnectX card: NICDevices are its functions
+	// (kept apart from the GPU's Devices), NICBaseline what the card was like
+	// before, and Pair the rental's half of the cable (never its key).
+	NICDevices  []BoundDevice `json:"nic_devices,omitempty"`
+	NICBaseline *NICBaseline  `json:"nic_baseline,omitempty"`
+	Pair        *PairOptions  `json:"pair,omitempty"`
+	StartedAt   int64         `json:"started_at"`
 	// Dirty is set when a teardown did not verify. The state stays on disk, so
 	// the machine refuses the next rental until it is cleaned up.
 	Dirty       bool     `json:"dirty"`

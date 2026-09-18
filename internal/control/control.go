@@ -140,6 +140,9 @@ func New(listenAddr, token string, prov Provisioner) *Server {
 	if v, ok := prov.(LinkVerifier); ok {
 		mux.HandleFunc("/link/verify", s.auth(s.handleLinkVerify(v)))
 	}
+	if pp, ok := prov.(PairProvisioner); ok {
+		mux.HandleFunc("/pair/provision", s.auth(s.handlePairProvision(pp)))
+	}
 	return s
 }
 
@@ -238,10 +241,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"reasons":       c.Reasons,
 		"agent_version": c.AgentVersion,
 		"update":        nil,
+		// Linked pairs (CONTRACT.md s3.2): false from an agent that cannot say.
+		"interconnect_ready": c.Interconnect != nil && c.Interconnect.Ready,
+		"identity_confirmed": c.Identity != nil && c.Identity.ConfirmedDGXSpark,
 	}
 	if s.host != nil {
 		body["agent_version"] = s.host.AgentVersion()
 		body["update"] = s.host.UpdateRecord()
+	}
+	if ps, ok := s.prov.(PairStatuser); ok {
+		if pair := ps.PairStatus(); pair != nil {
+			body["pair"] = pair
+		}
 	}
 	// Provisioning runs in the background, so a rental that did not come up is
 	// reported here rather than on the /provision call that started it.

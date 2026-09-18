@@ -53,6 +53,11 @@ type StartOptions struct {
 	// NoWait skips waiting for the guest's SSH port (the self-test waits for its
 	// serial report instead).
 	NoWait bool
+	// Pair makes this one machine's half of a linked pair: the ConnectX card
+	// goes to the VM with the GPU, and the guest configures the cable.
+	Pair *PairOptions
+	// PairTest makes a pair's self-test VM run the pair test too.
+	PairTest *PairTestPlan
 }
 
 // ErrRentalPresent is returned by Start while a rental (or a dirty leftover of
@@ -71,16 +76,26 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 		}
 		return fmt.Errorf("%w (%s)", ErrRentalPresent, st.RentalID)
 	}
-	userData, err := UserData(o.ID, o.Pubkey, o.Probes)
+	if o.Pair != nil {
+		if err := ValidatePair(o.ID, o.Pair); err != nil {
+			return fmt.Errorf("pair rental: %w", err)
+		}
+	}
+	userData, err := BuildUserData(SeedOptions{ID: o.ID, Pubkey: o.Pubkey, Probes: o.Probes,
+		NoGPU: len(rt.spec.GPUs) == 0, Pair: o.Pair, PairTest: o.PairTest})
 	if err != nil {
 		return err
+	}
+	host := Hostname(o.ID)
+	if o.Pair != nil {
+		host = PairHostname(o.ID, o.Pair.Node)
 	}
 	// The agent's own GPU queries would hold the GPU while it is taken.
 	resume := stats.PauseGPUQueries()
 	defer resume()
 
 	r := NewRental(rt.spec.DataDir, o.ID)
-	st := &State{RentalID: o.ID, Rental: r, StartedAt: time.Now().Unix()}
+	st := &State{RentalID: o.ID, Rental: r, StartedAt: time.Now().Unix(), Pair: o.Pair}
 	save := func() error { return SaveState(rt.h, rt.spec.DataDir, st) }
 	if err = save(); err != nil {
 		return fmt.Errorf("record rental: %w", err)
@@ -119,7 +134,7 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 		return err
 	}
 
-	if err = rt.writeSeed(r, userData, o.ID); err != nil {
+	if err = rt.writeSeed(r, userData, metaData(o.ID, host), NetworkConfigFor(o.Pair)); err != nil {
 		return err
 	}
 	if err = rt.copyVars(r); err != nil {
@@ -138,6 +153,13 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 			return err
 		}
 	}
+	// The host keeps the cable until the last moment: the card leaves it after
+	// the GPU, right before the VM boots.
+	if o.Pair != nil {
+		if err = rt.takeNICs(st, &r, o.Pair.Functions, save); err != nil {
+			return err
+		}
+	}
 	st.Rental = r
 	if err = save(); err != nil {
 		return err
@@ -152,11 +174,11 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	return rt.waitGuest(r)
 }
 
-func (rt *Runtime) writeSeed(r Rental, userData, id string) error {
+func (rt *Runtime) writeSeed(r Rental, userData, metaData, networkConfig string) error {
 	files := map[string]string{
 		"user-data":      userData,
-		"meta-data":      MetaData(id),
-		"network-config": NetworkConfig(),
+		"meta-data":      metaData,
+		"network-config": networkConfig,
 	}
 	for name, content := range files {
 		if err := rt.h.WriteFile(r.Dir+"/"+name, []byte(content), 0600); err != nil {
@@ -290,11 +312,15 @@ func (rt *Runtime) waitGuest(r Rental) error {
 type StopResult struct {
 	Wiped    bool
 	GPUClean bool
+	// NICDirty: a pair rental's ConnectX card did not come back as it went
+	// (its interfaces, MACs, firmware or persistent configuration), or the
+	// host put an address on it.
+	NICDirty bool
 	Detail   []string
 }
 
 // Clean is true when the machine can be rented again.
-func (s StopResult) Clean() bool { return s.Wiped && s.GPUClean }
+func (s StopResult) Clean() bool { return s.Wiped && s.GPUClean && !s.NICDirty }
 
 // Stop tears down whatever rental state is on the machine and verifies it:
 // the VM process gone, the disk mapping, loop device and file gone, the GPUs
@@ -335,6 +361,18 @@ func (rt *Runtime) Stop() StopResult {
 	// and the teardown that frees the GPU starts the desktop.
 	if st.StoppedDisplayManager != "" && released {
 		_ = rt.h.Run("systemctl", "start", st.StoppedDisplayManager)
+	}
+
+	if len(st.NICDevices) > 0 || st.NICBaseline != nil {
+		nicReleased, detail := ReleaseVFIO(rt.h, st.NICDevices)
+		res.Detail = append(res.Detail, detail...)
+		clean := nicReleased && vmGone
+		if clean {
+			ok, detail := VerifyNICBaseline(rt.h, st.NICBaseline)
+			clean = ok
+			res.Detail = append(res.Detail, detail...)
+		}
+		res.NICDirty = !clean
 	}
 
 	TeardownNetwork(rt.h, st.Net)
