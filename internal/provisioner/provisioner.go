@@ -102,8 +102,12 @@ type Provisioner struct {
 	status     string
 	lastErr    string
 	capability control.Capability
+	findings   []Finding
 	forward    stopper
 	async      bool
+	// settingUp is set while the agent's automatic setup works on the
+	// machine: no rental can be torn down or started then.
+	settingUp bool
 }
 
 // New builds a provisioner that has NOT been checked against the host, so it
@@ -137,21 +141,100 @@ func (p *Provisioner) LastError() string {
 	return p.lastErr
 }
 
-// Capability reports what preflight found.
-func (p *Provisioner) Capability() control.Capability { return p.capability }
+// Capability reports what preflight found -- or, while the automatic setup
+// runs, what it is doing.
+func (p *Provisioner) Capability() control.Capability {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.capability
+}
+
+// Findings are preflight's reasons with their kinds.
+func (p *Provisioner) Findings() []Finding {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]Finding(nil), p.findings...)
+}
+
+// SetCapability replaces what this machine reports. The automatic setup uses
+// it to say what it is doing; it never makes a machine ready (only Adopt of a
+// fresh Detect does).
+func (p *Provisioner) SetCapability(c control.Capability) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c.Ready = false
+	p.capability = c
+}
+
+// BeginSetup marks the automatic setup as running on this machine, which is
+// not ready from here on. It refuses (false) unless the machine is free: the
+// setup never runs beside a rental, and a rental never starts beside it.
+func (p *Provisioner) BeginSetup() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.status != StatusFree || p.settingUp {
+		return false
+	}
+	p.settingUp = true
+	p.capability.Ready = false
+	return true
+}
+
+// EndSetup marks the automatic setup as done.
+func (p *Provisioner) EndSetup() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.settingUp = false
+}
+
+// SettingUp reports whether the automatic setup is running.
+func (p *Provisioner) SettingUp() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.settingUp
+}
+
+// Adopt takes over a fresh Detect's view of the machine -- its runtime, GPUs
+// and capability -- once the setup has changed what is installed. Only a free
+// machine is re-read; adopted reports whether it was.
+func (p *Provisioner) Adopt(q *Provisioner) (adopted bool) {
+	if q == nil || q == p {
+		return false
+	}
+	q.mu.Lock()
+	machine, rt, vendor, bdfs, unified := q.machine, q.runtime, q.vendor, q.gpuBDFs, q.unified
+	c, findings := q.capability, q.findings
+	q.mu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.status != StatusFree {
+		return false
+	}
+	p.machine, p.runtime, p.vendor, p.gpuBDFs, p.unified = machine, rt, vendor, bdfs, unified
+	p.capability, p.findings = c, findings
+	return true
+}
 
 // Runtime is the microVM runtime behind this provisioner (nil in tests).
-func (p *Provisioner) Runtime() *vmrt.Runtime { return p.runtime }
+func (p *Provisioner) Runtime() *vmrt.Runtime {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.runtime
+}
 
 // Provision checks the request and starts the rental in the background:
 // fence, network, encrypted disk, GPUs, boot, and the renter's SSH forward.
 // /status says rented once the guest answers, or carries the error.
 func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
-	if !p.vendor.CanIsolate() {
-		return fmt.Errorf("%w (vendor %s)", ErrVendorCannotIsolate, p.vendor)
+	c := p.Capability()
+	p.mu.Lock()
+	vendor := p.vendor
+	p.mu.Unlock()
+	if !vendor.CanIsolate() {
+		return fmt.Errorf("%w (vendor %s)", ErrVendorCannotIsolate, vendor)
 	}
-	if !p.capability.Ready {
-		return fmt.Errorf("%w: %s", ErrNotReady, strings.Join(p.capability.Reasons, "; "))
+	if !c.Ready {
+		return fmt.Errorf("%w: %s", ErrNotReady, strings.Join(c.Reasons, "; "))
 	}
 	if !control.ValidRentalID(rentalID) {
 		return fmt.Errorf("invalid rental id %q", rentalID)
@@ -160,6 +243,10 @@ func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
 		return fmt.Errorf("renter key: %w", err)
 	}
 	p.mu.Lock()
+	if !p.capability.Ready || p.settingUp {
+		p.mu.Unlock()
+		return fmt.Errorf("%w: it is setting itself up", ErrNotReady)
+	}
 	if p.status != StatusFree {
 		status := p.status
 		p.mu.Unlock()
@@ -167,23 +254,24 @@ func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
 	}
 	p.status = StatusProvisioning
 	p.lastErr = ""
+	machine := p.machine
 	p.mu.Unlock()
 
 	if !p.async {
-		return p.start(rentalID, renterPubkey)
+		return p.start(machine, rentalID, renterPubkey)
 	}
-	go p.start(rentalID, renterPubkey)
+	go p.start(machine, rentalID, renterPubkey)
 	return nil
 }
 
-func (p *Provisioner) start(id, key string) error {
-	err := p.machine.Start(vmrt.StartOptions{ID: id, Pubkey: key})
+func (p *Provisioner) start(machine Machine, id, key string) error {
+	err := machine.Start(vmrt.StartOptions{ID: id, Pubkey: key})
 	var fwd stopper
 	if err == nil {
 		fwd, err = startForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
 		if err != nil {
 			err = fmt.Errorf("open the renter's SSH forward: %w", err)
-			p.machine.Stop()
+			machine.Stop()
 		}
 	}
 	p.mu.Lock()
@@ -191,7 +279,7 @@ func (p *Provisioner) start(id, key string) error {
 	if err != nil {
 		p.lastErr = err.Error()
 		p.status = StatusFree
-		if p.machine.Dirty() {
+		if machine.Dirty() {
 			p.status = StatusDirty
 		}
 		log.Printf("rental %s did not start: %v", id, err)
@@ -214,15 +302,22 @@ func (p *Provisioner) Teardown(rentalID string) error {
 		p.mu.Unlock()
 		return fmt.Errorf("the rental is still %s; retry shortly", status)
 	}
+	if p.settingUp {
+		// The only VM on the machine is the setup's own (a base image build
+		// or a test boot); it tears that down itself.
+		p.mu.Unlock()
+		return fmt.Errorf("no rental is on this machine: it is setting itself up")
+	}
 	p.status = StatusWiping
 	fwd := p.forward
 	p.forward = nil
+	machine := p.machine
 	p.mu.Unlock()
 
 	if fwd != nil {
 		fwd.Stop()
 	}
-	res := p.machine.Stop()
+	res := machine.Stop()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -245,6 +340,21 @@ func (p *Provisioner) Teardown(rentalID string) error {
 func (p *Provisioner) Resume() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// A base image build or test boot is nobody's rental. One whose process
+	// still runs (a person's `check --boot`) is left to it; one whose process
+	// is gone -- this agent, restarted mid-setup -- is torn down now.
+	if s, ok := p.machine.(interface{ SetupVM() (present, owned bool) }); ok {
+		if present, owned := s.SetupVM(); present {
+			if owned {
+				return
+			}
+			if res := p.machine.Stop(); !res.Clean() {
+				p.status = StatusDirty
+				p.lastErr = strings.Join(res.Detail, "; ")
+			}
+			return
+		}
+	}
 	switch {
 	case !p.machine.Present():
 		return

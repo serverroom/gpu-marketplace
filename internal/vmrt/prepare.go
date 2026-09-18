@@ -1,6 +1,7 @@
 package vmrt
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,22 @@ type GoldenInfo struct {
 	Driver       string `json:"driver"`
 	AgentVersion string `json:"agent_version"`
 	CreatedAt    int64  `json:"created_at"`
+	// DriverSource is how Driver was chosen: DriverFromHost, DriverDefault or
+	// DriverFromFlag. Absent from images built by agents up to v0.1.9.
+	DriverSource string `json:"driver_source,omitempty"`
+	// HostDriver is the host's own NVIDIA driver when the image was built.
+	HostDriver string `json:"host_driver,omitempty"`
+}
+
+// LoadGoldenInfo reads the record next to the baked image.
+func LoadGoldenInfo(h Host, spec Spec) (GoldenInfo, error) {
+	var info GoldenInfo
+	data, err := h.ReadFile(spec.GoldenImage + ".json")
+	if err != nil {
+		return info, err
+	}
+	err = json.Unmarshal(data, &info)
+	return info, err
 }
 
 // GoldenProblem says why the baked image on disk is not the one this agent
@@ -42,9 +59,8 @@ type GoldenInfo struct {
 // this a machine upgraded to a new release would keep renting out the old one.
 func GoldenProblem(h Host, spec Spec) string {
 	want := cloudImageName(spec.Arch)
-	data, err := h.ReadFile(spec.GoldenImage + ".json")
-	var info GoldenInfo
-	if err != nil || json.Unmarshal(data, &info) != nil || info.Base == "" {
+	info, err := LoadGoldenInfo(h, spec)
+	if err != nil || info.Base == "" {
 		return "the rental base image does not say which Ubuntu image it was built from; rebuild it with 'sudo gpu-agent runtime prepare'"
 	}
 	if info.Base != want {
@@ -54,11 +70,51 @@ func GoldenProblem(h Host, spec Spec) string {
 	return ""
 }
 
+// GoldenDriverProblem says why the baked image's NVIDIA driver is not the one
+// this host's driver calls for, or "" when it is -- or when a person chose the
+// image's driver (--driver), or the host's driver cannot be read.
+func GoldenDriverProblem(h Host, spec Spec, want DriverChoice) string {
+	info, err := LoadGoldenInfo(h, spec)
+	if err != nil || info.DriverSource == DriverFromFlag || want.Source != DriverFromHost || info.Driver == want.Driver {
+		return ""
+	}
+	have := info.Driver
+	if have == "" {
+		have = "an unrecorded driver"
+	}
+	return fmt.Sprintf("the rental base image has NVIDIA driver %s, and this machine runs %s (%s); rebuild it with 'sudo gpu-agent runtime prepare'",
+		have, want.Driver, want.Describe())
+}
+
 // PrepareOptions controls `gpu-agent runtime prepare`.
 type PrepareOptions struct {
-	Driver      string
-	InstallDeps bool
-	Log         func(format string, args ...interface{})
+	// Driver is the NVIDIA driver branch to bake in; "" matches the host's
+	// (ChooseDriver).
+	Driver string
+	// DriverSource records how Driver was chosen; DriverFromFlag when it is
+	// set and this is empty.
+	DriverSource string
+	InstallDeps  bool
+	Log          func(format string, args ...interface{})
+	// Ctx, when set, stops the build early: the bake VM is torn down and
+	// Prepare returns the context's error.
+	Ctx context.Context
+}
+
+// InstallPackages installs the runtime's packages (Packages) with apt-get.
+func InstallPackages(h Host, arch string, log func(format string, args ...interface{})) error {
+	if log == nil {
+		log = func(string, ...interface{}) {}
+	}
+	log("Installing %s ...", strings.Join(Packages(arch), " "))
+	if err := h.Run("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "update"); err != nil {
+		return fmt.Errorf("apt-get update: %w", err)
+	}
+	args := append([]string{"DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y"}, Packages(arch)...)
+	if err := h.Run("env", args...); err != nil {
+		return fmt.Errorf("install packages: %w", err)
+	}
+	return nil
 }
 
 // sumFor finds a file's hash in a SHA256SUMS listing ("<hash> *<name>").
@@ -81,8 +137,21 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	if log == nil {
 		log = func(string, ...interface{}) {}
 	}
-	if o.Driver == "" {
-		o.Driver = DefaultDriver
+	ctx := o.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	host := ChooseDriver(h)
+	switch {
+	case o.Driver == "":
+		o.Driver, o.DriverSource = host.Driver, host.Source
+		if host.Source == DriverFromHost {
+			log("This machine runs NVIDIA driver %s; the rental image gets %s to match.", host.Describe(), o.Driver)
+		} else {
+			log("This machine's NVIDIA driver could not be read; the rental image gets %s.", o.Driver)
+		}
+	case o.DriverSource == "":
+		o.DriverSource = DriverFromFlag
 	}
 	userData, err := BakeUserData(o.Driver)
 	if err != nil {
@@ -90,13 +159,8 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	}
 
 	if o.InstallDeps {
-		log("Installing %s ...", strings.Join(Packages(spec.Arch), " "))
-		if err := h.Run("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "update"); err != nil {
-			return fmt.Errorf("apt-get update: %w", err)
-		}
-		args := append([]string{"DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y"}, Packages(spec.Arch)...)
-		if err := h.Run("env", args...); err != nil {
-			return fmt.Errorf("install packages: %w", err)
+		if err := InstallPackages(h, spec.Arch, log); err != nil {
+			return err
 		}
 	}
 	if missing := MissingTools(h, spec.Arch); len(missing) > 0 {
@@ -135,6 +199,9 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return fmt.Errorf("SHA256SUMS lists no %s", name)
 	}
 	if got, err := h.SHA256(base); err != nil || got != want {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("the base image build was stopped: %w", err)
+		}
 		log("Downloading %s%s ...", cloudImageBase(), name)
 		if err := h.Download(cloudImageBase()+name, base); err != nil {
 			return fmt.Errorf("download base image: %w", err)
@@ -146,6 +213,9 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return fmt.Errorf("the base image does not match Canonical's published checksum; refusing it")
 	}
 	log("Base image verified (sha256 %s).", want)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("the base image build was stopped: %w", err)
+	}
 
 	bake := filepath.Join(dir, "bake.qcow2")
 	_ = h.Remove(bake)
@@ -154,7 +224,7 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	}
 	defer h.Remove(bake)
 
-	r := NewRental(spec.DataDir, "bake")
+	r := NewRental(spec.DataDir, BakeID)
 	r.Disk = bake
 	r.DiskFormat = "qcow2"
 	r.MemoryMB = 4096
@@ -162,7 +232,7 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		r.MemoryMB = m
 	}
 	rt := New(h, spec, fence, nil)
-	st := &State{RentalID: "bake", Rental: r, StartedAt: time.Now().Unix()}
+	st := &State{RentalID: BakeID, Rental: r, StartedAt: time.Now().Unix()}
 	save := func() error { return SaveState(h, spec.DataDir, st) }
 	if err := save(); err != nil {
 		return err
@@ -187,7 +257,7 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	if err != nil {
 		return fmt.Errorf("bake network: %w", err)
 	}
-	if err := rt.writeSeed(r, userData, "bake"); err != nil {
+	if err := rt.writeSeed(r, userData, BakeID); err != nil {
 		return err
 	}
 	if err := rt.copyVars(r); err != nil {
@@ -199,7 +269,7 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return fmt.Errorf("boot bake VM: %w", err)
 	}
 	finished := false
-	for waited := time.Duration(0); waited < BakeTimeout; waited += pollInterval {
+	for waited := time.Duration(0); waited < BakeTimeout && ctx.Err() == nil; waited += pollInterval {
 		if !rt.alive(r) {
 			finished = true
 			break
@@ -208,16 +278,18 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	}
 	res := rt.Stop()
 	stopped = true
+	if !finished && ctx.Err() != nil {
+		return fmt.Errorf("the base image build was stopped before it finished: %w", ctx.Err())
+	}
 	if !finished {
 		return fmt.Errorf("the bake VM did not finish within %v", BakeTimeout)
 	}
 	if !res.Clean() {
 		return fmt.Errorf("the bake VM did not tear down cleanly: %s", strings.Join(res.Detail, "; "))
 	}
-	serial, _ := h.ReadFile(filepath.Join(spec.DataDir, "last-serial.log"))
+	serial, _ := h.ReadFile(lastSerialLog(spec.DataDir))
 	if !strings.Contains(string(serial), markBake+" DONE") {
-		return errors.New("the driver install inside the base image did not succeed; see " +
-			filepath.Join(spec.DataDir, "last-serial.log"))
+		return errors.New("the driver install inside the base image did not succeed; see " + lastSerialLog(spec.DataDir))
 	}
 
 	log("Flattening into %s ...", spec.GoldenImage)
@@ -229,7 +301,8 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return err
 	}
 	info, _ := json.MarshalIndent(GoldenInfo{Base: name, BaseSHA256: want, Driver: o.Driver,
-		AgentVersion: version, CreatedAt: time.Now().Unix()}, "", "  ")
+		AgentVersion: version, CreatedAt: time.Now().Unix(), DriverSource: o.DriverSource,
+		HostDriver: host.Describe()}, "", "  ")
 	_ = h.WriteFile(spec.GoldenImage+".json", info, 0600)
 	log("Golden image ready. Next: sudo gpu-agent check --boot")
 	return nil

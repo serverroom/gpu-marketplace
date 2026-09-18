@@ -332,7 +332,7 @@ func (rt *Runtime) Stop() StopResult {
 	// Keep the last serial log for diagnosis; it holds nothing of the tenant's
 	// disk, only what the guest printed to its console.
 	if rt.h.Exists(st.Rental.SerialLog) {
-		_ = rt.h.Rename(st.Rental.SerialLog, rt.spec.DataDir+"/last-serial.log")
+		_ = rt.h.Rename(st.Rental.SerialLog, lastSerialLog(rt.spec.DataDir))
 	}
 	_ = rt.h.RemoveAll(st.Rental.Dir)
 
@@ -345,6 +345,9 @@ func (rt *Runtime) Stop() StopResult {
 	}
 	return res
 }
+
+// lastSerialLog is where the last VM's serial console is kept for diagnosis.
+func lastSerialLog(dataDir string) string { return dataDir + "/last-serial.log" }
 
 // killVM stops the VM's unit (SIGTERM, then SIGKILL after the unit's 30 s stop
 // timeout) and confirms it is gone, killing it outright if systemd could not.

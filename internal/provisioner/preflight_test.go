@@ -264,6 +264,62 @@ func TestPreflightAnotherGB10MachineKeepsTheDesktopReason(t *testing.T) {
 	}
 }
 
+func kinds(rep HostReport) map[ReasonKind]int {
+	k := map[ReasonKind]int{}
+	for _, f := range rep.Findings {
+		k[f.Kind]++
+	}
+	return k
+}
+
+// Every reason carries who can fix it, and Findings mirror Reasons.
+func TestPreflightKindsTheReasons(t *testing.T) {
+	h := goodHost(t, "00000000:01:00.0, NVIDIA L4, 24564\n")
+	h.Tools = map[string]bool{"qemu-img": true}
+	delete(h.Files, "/usr/share/OVMF/OVMF_CODE_4M.fd")
+	delete(h.Files, dataDir+"/golden.img")
+	delete(h.Files, filepath.Join(dataDir, "golden.img"))
+	delete(h.Files, "/dev/kvm")
+	rep := Preflight(h, "linux", spec(), version)
+	if k := kinds(rep); k[ReasonHuman] != 1 || k[ReasonTools] != 2 || k[ReasonImage] != 1 || k[ReasonTestBoot] != 0 {
+		t.Errorf("kinds = %v (%s)", k, reasons(rep))
+	}
+	if len(rep.Findings) != len(rep.Reasons) {
+		t.Fatalf("%d findings for %d reasons", len(rep.Findings), len(rep.Reasons))
+	}
+	for i := range rep.Reasons {
+		if rep.Findings[i].Text != rep.Reasons[i] {
+			t.Errorf("finding %d = %q, reason %q", i, rep.Findings[i].Text, rep.Reasons[i])
+		}
+	}
+
+	h = goodHost(t, "00000000:01:00.0, NVIDIA L4, 24564\n")
+	if k := kinds(Preflight(h, "linux", spec(), "v0.1.10")); k[ReasonTestBoot] != 1 || len(k) != 1 {
+		t.Errorf("an old test boot: kinds = %v", k)
+	}
+}
+
+// A base image with another driver than the host's is rebuilt; one a person
+// chose (--driver) is not second-guessed.
+func TestPreflightWantsTheHostsDriverInTheImage(t *testing.T) {
+	h := goodHost(t, "00000000:01:00.0, NVIDIA CMP 170HX, 8192\n")
+	h.Outputs["nvidia-smi --query-gpu=driver_version"] = "580.82.07\n"
+	h.Outputs["modinfo -F license nvidia"] = "NVIDIA\n"
+	golden, _ := json.Marshal(vmrt.GoldenInfo{Base: "resolute-server-cloudimg-amd64.img", Driver: "580-server-open"})
+	h.Files[filepath.Join(dataDir, "golden.img")+".json"] = golden
+	h.Files[dataDir+"/golden.img.json"] = golden
+	rep := Preflight(h, "linux", spec(), version)
+	if k := kinds(rep); k[ReasonImage] != 1 || !strings.Contains(reasons(rep), "this machine runs 580-server") {
+		t.Errorf("reasons = %q", reasons(rep))
+	}
+	pinned, _ := json.Marshal(vmrt.GoldenInfo{Base: "resolute-server-cloudimg-amd64.img", Driver: "580-server-open", DriverSource: vmrt.DriverFromFlag})
+	h.Files[filepath.Join(dataDir, "golden.img")+".json"] = pinned
+	h.Files[dataDir+"/golden.img.json"] = pinned
+	if rep := Preflight(h, "linux", spec(), version); len(rep.Reasons) != 0 {
+		t.Errorf("a driver chosen with --driver was flagged: %s", reasons(rep))
+	}
+}
+
 func TestDetectReportsIdentityAndDesktopOnDemand(t *testing.T) {
 	h := sparkGoodHost(t)
 	h.Files["/proc/meminfo"] = []byte("MemTotal:       128000000 kB\n")

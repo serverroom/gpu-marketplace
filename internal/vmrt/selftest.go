@@ -1,6 +1,7 @@
 package vmrt
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -191,18 +192,27 @@ func sameSet(a, b []string) bool {
 // It exercises the whole path a renter's VM takes -- fence, network, encrypted
 // disk, VFIO, boot, teardown and GPU turnover -- which unit tests cannot.
 func (rt *Runtime) SelfTest(version string) SelfTestResult {
+	return rt.SelfTestContext(context.Background(), version)
+}
+
+// SelfTestContext is SelfTest that ctx can stop early: the test VM is torn down
+// exactly as at the end of a test, and the result records that it was stopped.
+func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTestResult {
 	now := time.Now().Unix()
 	fail := func(problem string) SelfTestResult {
 		res := SelfTestResult{AgentVersion: version, HostGPUs: rt.spec.GPUs, At: now, Problems: []string{problem}}
 		_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
 		return res
 	}
+	if ctx.Err() != nil {
+		return fail("the test boot was stopped before it started")
+	}
 	pub, err := ThrowawayPubkey()
 	if err != nil {
 		return fail("could not make a test key: " + err.Error())
 	}
 	probes := DefaultProbes(rt.h)
-	id := fmt.Sprintf("selftest-%d", now)
+	id := fmt.Sprintf("%s%d", SelfTestPrefix, now)
 	if err := rt.Start(StartOptions{ID: id, Pubkey: pub, Probes: probes, NoWait: true}); err != nil {
 		problem := "the test VM did not start: " + err.Error()
 		if st, _ := LoadState(rt.h, rt.spec.DataDir); st != nil && st.Dirty {
@@ -214,7 +224,7 @@ func (rt *Runtime) SelfTest(version string) SelfTestResult {
 	r := NewRental(rt.spec.DataDir, id)
 	var rep SerialReport
 	sshOpened := false
-	for waited := time.Duration(0); waited < SelfTestTimeout; waited += pollInterval {
+	for waited := time.Duration(0); waited < SelfTestTimeout && ctx.Err() == nil; waited += pollInterval {
 		if !sshOpened && rt.h.DialTCP(net.JoinHostPort(GuestIP, "22"), 3*time.Second) == nil {
 			sshOpened = true
 		}
@@ -227,8 +237,13 @@ func (rt *Runtime) SelfTest(version string) SelfTestResult {
 		rt.h.Sleep(pollInterval)
 	}
 
+	stopped := ctx.Err() != nil && !(rep.End && sshOpened)
 	stop := rt.Stop()
 	res := Evaluate(rep, rt.spec.GPUs, probes, sshOpened, stop, version, now)
+	if stopped {
+		res.Passed = false
+		res.Problems = append([]string{"the test boot was stopped before it finished"}, res.Problems...)
+	}
 	_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
 	return res
 }

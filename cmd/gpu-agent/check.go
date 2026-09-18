@@ -55,6 +55,7 @@ func runCheck(svc service.Service, args []string) {
 
 	c := detectProvisioner().Capability()
 	printCapability(c)
+	printSetup()
 
 	fmt.Println()
 	fmt.Println("While rented, the tenant runs in a microVM attached only to the " + netguard.Bridge +
@@ -100,9 +101,9 @@ func runSelfTest(svc service.Service, yes bool) {
 		os.Exit(1)
 	}
 	var blocking []string
-	for _, r := range p.Capability().Reasons {
-		if !strings.Contains(r, "check --boot") {
-			blocking = append(blocking, r)
+	for _, f := range p.Findings() {
+		if f.Kind != provisioner.ReasonTestBoot {
+			blocking = append(blocking, f.Text)
 		}
 	}
 	if len(blocking) > 0 {
@@ -115,15 +116,24 @@ func runSelfTest(svc service.Service, yes bool) {
 
 	fmt.Println("This boots a test rental for a few minutes:")
 	fmt.Printf("  - the GPU (%s) is taken from this machine and given to a microVM; anything using it must be stopped\n", strings.Join(rt.Spec().GPUs, ", "))
+	if rt.Spec().DesktopOnDemand {
+		fmt.Println("  - this machine's desktop closes for the test (anything open on its screen closes with it) and comes back after it")
+	}
 	fmt.Println("  - the VM reports what GPU it sees, whether it reaches the internet, and that it CANNOT reach this machine or its network")
 	fmt.Println("  - then it is destroyed, its disk key discarded, and the GPU given back and checked")
 	if !yes && !confirm("Run the test boot? [y/N]: ") {
 		fmt.Println("Nothing was changed.")
 		return
 	}
+	release, err := vmrt.AcquireBusy(vmrt.OSHost{}, config.DataDir(), os.Getpid(), "running a test boot")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v; 'gpu-agent setup --status' shows where it is\n", err)
+		os.Exit(1)
+	}
 	fmt.Println()
 	fmt.Println("Booting ... (the first boot can take several minutes)")
 	res := rt.SelfTest(version)
+	release()
 	if res.Passed {
 		fmt.Printf("PASSED: the VM saw %s, reached the internet, and could not reach %s.\n",
 			strings.Join(res.GuestGPUs, "; "), strings.Join(res.Blocked, ", "))
@@ -192,7 +202,7 @@ func runHeadless(yes bool) {
 // the rental base image.
 func runPrepare(args []string) {
 	fs := flag.NewFlagSet("runtime prepare", flag.ExitOnError)
-	driver := fs.String("driver", vmrt.DefaultDriver, "NVIDIA driver branch to bake into the rental image, e.g. 580-server-open or 580-server")
+	driver := fs.String("driver", "", "NVIDIA driver branch to bake into the rental image, e.g. 580-server-open or 580-server (default: match this machine's own driver)")
 	deps := fs.Bool("install-deps", false, "install QEMU, UEFI firmware, cloud-image-utils, cryptsetup and nftables with apt-get")
 	headless := fs.Bool("headless", false, "make this machine run without a desktop, so its GPU is free to rent (closes the desktop now); does nothing else")
 	yes := fs.Bool("yes", false, "with --headless: do not ask for confirmation")
@@ -210,13 +220,19 @@ func runPrepare(args []string) {
 		runHeadless(*yes)
 		return
 	}
+	release, err := vmrt.AcquireBusy(vmrt.OSHost{}, config.DataDir(), os.Getpid(), "building the rental image")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime prepare: %v; 'gpu-agent setup --status' shows where it is\n", err)
+		os.Exit(1)
+	}
 	spec := detectProvisioner().Runtime().Spec()
 	fence := netguard.New(vmrt.OSHost{}, netguard.Bridge, vmrt.GuestSubnet, netguard.HostNetworks)
-	err := vmrt.Prepare(vmrt.OSHost{}, spec, fence, version, vmrt.PrepareOptions{
+	err = vmrt.Prepare(vmrt.OSHost{}, spec, fence, version, vmrt.PrepareOptions{
 		Driver:      *driver,
 		InstallDeps: *deps,
 		Log:         func(format string, a ...interface{}) { fmt.Printf(format+"\n", a...) },
 	})
+	release()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
 		os.Exit(1)

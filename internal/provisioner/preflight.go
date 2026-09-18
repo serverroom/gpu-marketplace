@@ -19,6 +19,30 @@ import (
 // with the GPUs handed to it over VFIO, behind the netguard fence.
 const KindQEMUVFIO = "qemu-vfio"
 
+// ReasonKind says who can fix a reason this machine is not ready: the agent's
+// automatic setup, or a person.
+type ReasonKind string
+
+const (
+	// ReasonHuman needs a person: hardware, firmware settings, a GPU that
+	// shares its group, too little memory, a desktop on a machine that is not
+	// a DGX Spark, a quarantined leftover.
+	ReasonHuman ReasonKind = "human"
+	// ReasonTools: the runtime's packages or UEFI firmware are missing.
+	ReasonTools ReasonKind = "tools"
+	// ReasonImage: the base image is missing, or built for another Ubuntu
+	// release or another NVIDIA driver.
+	ReasonImage ReasonKind = "image"
+	// ReasonTestBoot: no passing test boot for this agent version and GPUs.
+	ReasonTestBoot ReasonKind = "test-boot"
+)
+
+// Finding is one reason with its kind.
+type Finding struct {
+	Kind ReasonKind
+	Text string
+}
+
 // HostReport is what preflight found: the GPUs a rental would get, and every
 // reason this machine cannot host one. No reasons means ready.
 type HostReport struct {
@@ -27,6 +51,8 @@ type HostReport struct {
 	Unified  bool
 	Firmware vmrt.Firmware
 	Reasons  []string
+	// Findings are Reasons with their kinds, in the same order.
+	Findings []Finding
 	// Identity is what the machine says it is (nil off Linux).
 	Identity *control.Identity
 	// DesktopOnDemand: a confirmed DGX Spark not made headless on purpose; its
@@ -42,9 +68,12 @@ type HostReport struct {
 // a provider can act on, not just the first.
 func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostReport {
 	var rep HostReport
-	add := func(format string, a ...interface{}) {
-		rep.Reasons = append(rep.Reasons, fmt.Sprintf(format, a...))
+	addKind := func(kind ReasonKind, format string, a ...interface{}) {
+		text := fmt.Sprintf(format, a...)
+		rep.Reasons = append(rep.Reasons, text)
+		rep.Findings = append(rep.Findings, Finding{Kind: kind, Text: text})
 	}
+	add := func(format string, a ...interface{}) { addKind(ReasonHuman, format, a...) }
 
 	switch goos {
 	case "linux":
@@ -80,7 +109,9 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 		add("no NVIDIA or AMD GPU was detected")
 	}
 	if len(rep.BDFs) > 0 && len(rep.Reasons) == 0 {
-		rep.Reasons = append(rep.Reasons, vmrt.GroupProblems(h, rep.BDFs)...)
+		for _, problem := range vmrt.GroupProblems(h, rep.BDFs) {
+			add("%s", problem)
+		}
 	}
 
 	id := ReadIdentity(h, goos, spec.Arch, gpuNames)
@@ -102,17 +133,21 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	}
 
 	if missing := vmrt.MissingTools(h, spec.Arch); len(missing) > 0 {
-		add("the rental runtime's tools are missing (%s); run 'sudo gpu-agent runtime prepare --install-deps'", strings.Join(missing, ", "))
+		addKind(ReasonTools, "the rental runtime's tools are missing (%s); run 'sudo gpu-agent runtime prepare --install-deps'", strings.Join(missing, ", "))
 	}
 	if fw, ok := vmrt.FindFirmware(h, spec.Arch); ok {
 		rep.Firmware = fw
 	} else {
-		add("no UEFI firmware for microVMs is installed; run 'sudo gpu-agent runtime prepare --install-deps'")
+		addKind(ReasonTools, "no UEFI firmware for microVMs is installed; run 'sudo gpu-agent runtime prepare --install-deps'")
 	}
 	if !h.Exists(spec.GoldenImage) {
-		add("the rental base image has not been built; run 'sudo gpu-agent runtime prepare'")
+		addKind(ReasonImage, "the rental base image has not been built; run 'sudo gpu-agent runtime prepare'")
 	} else if problem := vmrt.GoldenProblem(h, spec); problem != "" {
-		add("%s", problem)
+		addKind(ReasonImage, "%s", problem)
+	} else if rep.Vendor == VendorNVIDIA {
+		if problem := vmrt.GoldenDriverProblem(h, spec, vmrt.ChooseDriver(h)); problem != "" {
+			addKind(ReasonImage, "%s", problem)
+		}
 	}
 	if spec.GuestMemoryMB() == 0 {
 		add("this machine has %d MB of memory, and a rental needs at least 6 GB", spec.TotalMemMB)
@@ -126,9 +161,9 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	if len(rep.Reasons) == 0 {
 		res, err := vmrt.LoadSelfTest(h, spec.DataDir)
 		if err != nil {
-			add("its last test boot could not be read (%v); run 'sudo gpu-agent check --boot'", err)
+			addKind(ReasonTestBoot, "its last test boot could not be read (%v); run 'sudo gpu-agent check --boot'", err)
 		} else if problem := vmrt.SelfTestProblem(res, version, rep.BDFs); problem != "" {
-			add("%s", problem)
+			addKind(ReasonTestBoot, "%s", problem)
 		}
 	}
 	return rep
@@ -156,6 +191,7 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	rt := vmrt.New(h, spec, fence, gpuVerifier(h, rep.Vendor, rep.Unified, rep.BDFs))
 	p := New(rt, rep.Vendor, rep.BDFs, rep.Unified)
 	p.runtime = rt
+	p.findings = rep.Findings
 	p.capability = control.Capability{
 		Ready:         len(rep.Reasons) == 0,
 		Kind:          KindQEMUVFIO,

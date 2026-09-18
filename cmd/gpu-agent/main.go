@@ -13,6 +13,7 @@ import (
 
 	"github.com/kardianos/service"
 
+	"github.com/serverroom/gpu-marketplace/internal/autosetup"
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
@@ -20,6 +21,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/server"
 	"github.com/serverroom/gpu-marketplace/internal/sshtunnel"
 	"github.com/serverroom/gpu-marketplace/internal/stats"
+	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
 var version = "dev"
@@ -28,7 +30,8 @@ type gpuAgent struct {
 	cfg          *config.Config
 	httpSrv      *server.Server
 	tunnelCancel context.CancelFunc
-	bgCancel     context.CancelFunc // background work: capability report, speed test
+	bgCancel     context.CancelFunc // background work: capability report, speed test, automatic setup
+	bgDone       chan struct{}      // closed when that work has returned
 	controlSrv   *control.Server
 	prov         *provisioner.Provisioner
 	logger       service.Logger
@@ -77,7 +80,11 @@ func (a *gpuAgent) Start(s service.Service) error {
 		}
 		bg, cancel := context.WithCancel(context.Background())
 		a.bgCancel = cancel
-		go a.reportCapability(bg, a.prov.Capability())
+		a.bgDone = make(chan struct{})
+		go func() {
+			defer close(a.bgDone)
+			a.reportCapability(bg, a.prov.Capability())
+		}()
 	}
 
 	// Legacy local stats server (best-effort; superseded by push-over-tunnel).
@@ -147,7 +154,9 @@ func idleReason(st register.State) string {
 // not heal and is logged once.
 //
 // When the answer says the listing still needs its network measurement, the
-// speed test runs from here, already off the start path.
+// speed test runs from here, already off the start path. Then, when the
+// machine is not ready only for steps the agent can take itself (packages,
+// the rental image, the test boot), the automatic setup takes them.
 func (a *gpuAgent) reportCapability(ctx context.Context, c control.Capability) {
 	backoff := 5 * time.Second
 	for attempt := 1; attempt <= 6; attempt++ {
@@ -155,6 +164,7 @@ func (a *gpuAgent) reportCapability(ctx context.Context, c control.Capability) {
 		if err == nil {
 			a.say("Hosting capability reported to the marketplace (ready=%v)", c.Ready)
 			a.speedtestJob().initial(ctx, resp)
+			a.autoSetup().Run(ctx)
 			return
 		}
 		var ee *register.EndpointError
@@ -163,10 +173,19 @@ func (a *gpuAgent) reportCapability(ctx context.Context, c control.Capability) {
 			return
 		}
 		a.warn("report hosting capability (attempt %d): %v", attempt, err)
-		time.Sleep(backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
 		backoff *= 2
 	}
 }
+
+// stopGrace bounds how long Stop waits for the background work to wind down:
+// a base image build or test boot tears its VM down first, which takes up to
+// about 40 seconds. systemd kills the agent 90 seconds after asking it to stop.
+const stopGrace = 75 * time.Second
 
 func (a *gpuAgent) Stop(s service.Service) error {
 	a.say("GPU Agent stopping...")
@@ -176,6 +195,11 @@ func (a *gpuAgent) Stop(s service.Service) error {
 	}
 	if a.bgCancel != nil {
 		a.bgCancel()
+		select {
+		case <-a.bgDone:
+		case <-time.After(stopGrace):
+			a.warn("background work did not stop within %v", stopGrace)
+		}
 	}
 	if a.controlSrv != nil {
 		a.controlSrv.Stop()
@@ -255,6 +279,10 @@ func main() {
 			runCheck(svc, args[1:])
 			return
 
+		case "setup":
+			runSetup(svc, args[1:])
+			return
+
 		case "runtime":
 			if len(args) < 2 || args[1] != "prepare" {
 				fmt.Println("Usage: gpu-agent runtime prepare [--install-deps] [--driver 580-server-open]  |  gpu-agent runtime prepare --headless [--yes]")
@@ -282,7 +310,7 @@ func main() {
 			return
 
 		case "register":
-			runRegister(args[1:])
+			runRegister(svc, args[1:])
 			return
 
 		case "select-location":
@@ -339,6 +367,7 @@ func runStatus(svc service.Service) {
 	}
 
 	printCapability(detectProvisioner().Capability())
+	printSetup()
 
 	st := register.LoadState()
 	switch {
@@ -392,7 +421,7 @@ func runTestStats() {
 	fmt.Println(string(data))
 }
 
-func runRegister(args []string) {
+func runRegister(svc service.Service, args []string) {
 	fs := flag.NewFlagSet("register", flag.ExitOnError)
 	code := fs.String("code", "", "one-time registration code from the dashboard")
 	fs.Parse(args)
@@ -401,17 +430,48 @@ func runRegister(args []string) {
 		log.Fatal("register requires --code")
 	}
 
-	capability := detectProvisioner().Capability()
+	p := detectProvisioner()
+	capability := p.Capability()
 	if err := register.Run(*code, capability); err != nil {
 		log.Fatalf("Registration failed: %v", err)
 	}
 	fmt.Println()
-	printCapability(capability)
-	if !capability.Ready {
-		fmt.Println()
-		fmt.Println("The listing is registered, but it will not be shown to renters until these are fixed.")
-		fmt.Println("'gpu-agent check' re-runs the checks at any time.")
+	// The agent reads its tunnel and token only when it starts: restart it, so
+	// the machine comes online -- and finishes its setup -- with nothing more
+	// to type.
+	restarted := false
+	if _, err := svc.Status(); err == nil {
+		if err := service.Control(svc, "restart"); err == nil {
+			restarted = true
+			fmt.Println("The agent service was restarted: this machine is online now.")
+		} else {
+			fmt.Printf("The agent service could not be restarted (%v); run 'sudo gpu-agent stop && sudo gpu-agent start'.\n", err)
+		}
+	} else {
+		fmt.Println("The agent service is not installed; run 'sudo gpu-agent install && sudo gpu-agent start' to bring this machine online.")
 	}
+	fmt.Println()
+	if capability.Ready {
+		printCapability(capability)
+		return
+	}
+	plan := autosetup.PlanFor(p.Findings(), autosetup.AptGet(vmrt.OSHost{}))
+	if runtime.GOOS == "linux" && plan.Eligible() && autosetup.Enabled(config.ConfigDir()) {
+		fmt.Println("Hosting:      not ready yet -- the agent finishes the setup by itself, nothing to do:")
+		for i, s := range plan.Steps {
+			fmt.Printf("                %d. %s (about %s)\n", i+1, s.Doing(), s.Takes())
+		}
+		if !restarted {
+			fmt.Println("              It starts once the agent service runs.")
+		}
+		fmt.Println("              'sudo gpu-agent status' shows how far it is; the control panel shows it too.")
+		fmt.Println("              'sudo gpu-agent setup --off' turns this off.")
+		return
+	}
+	printCapability(capability)
+	fmt.Println()
+	fmt.Println("The listing is registered, but it will not be shown to renters until these are fixed.")
+	fmt.Println("'gpu-agent check' re-runs the checks at any time.")
 }
 
 func printUsage() {
@@ -423,6 +483,9 @@ func printUsage() {
 	fmt.Println("  install          Install as a system service")
 	fmt.Println("  check            Check whether this machine can host a rental, and what a tenant is fenced off from (--rules)")
 	fmt.Println("  check --boot     Boot a real test rental with the GPU passed through and record the result")
+	fmt.Println("  setup            Finish this machine's setup now, with output (the agent does it by itself after linking)")
+	fmt.Println("  setup --status   Show the last setup attempt and whether the automatic setup is on")
+	fmt.Println("  setup --off|--on Turn the automatic setup off or back on")
 	fmt.Println("  runtime prepare  Install the microVM runtime (--install-deps) and bake the rental base image")
 	fmt.Println("  remove           Withdraw the listing, revoke relay access and delete the agent completely (--yes)")
 	fmt.Println("  uninstall        Remove the system service only (keys and listing stay; see remove)")
