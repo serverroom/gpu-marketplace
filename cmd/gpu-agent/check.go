@@ -191,6 +191,11 @@ func runSelfTest(svc service.Service, yes bool) {
 		}
 		return
 	}
+	if res.Stopped {
+		fmt.Println("STOPPED: the test boot was stopped before it finished and its VM was removed cleanly. Nothing was")
+		fmt.Println("recorded: this machine keeps the result of its last finished test boot.")
+		os.Exit(130)
+	}
 	fmt.Println("FAILED:")
 	for _, problem := range res.Problems {
 		fmt.Printf("  - %s\n", problem)

@@ -161,7 +161,10 @@ func (rt *Runtime) PairSelfTest(version string, o PairSelfTestOptions) PairTestR
 		ctx = context.Background()
 	}
 	if ctx.Err() != nil {
-		return fail("the pair test boot was stopped before it started")
+		// Nothing ran, so there is nothing to record.
+		return PairTestResult{AgentVersion: version, PeerListing: o.PeerListing, PeerMACs: o.PeerMACs,
+			MinRDMAGbps: minGbps, At: now, Stopped: true,
+			Problems: []string{"the pair test boot was stopped before it started"}}
 	}
 	if !IsSetupID(o.ID) {
 		return fail("a pair test boot's id must end in " + PairTestSuffix)
@@ -221,6 +224,11 @@ func (rt *Runtime) PairSelfTest(version string, o PairSelfTestOptions) PairTestR
 	if stopped {
 		res.Passed = false
 		res.Problems = append([]string{"the pair test boot was stopped before it finished"}, res.Problems...)
+		if stop.Clean() {
+			// As SelfTestContext: a stopped test keeps the last finished verdict.
+			res.Stopped = true
+			return res
+		}
 	}
 	_ = SavePairTest(rt.h, rt.spec.DataDir, res)
 	return res

@@ -106,15 +106,21 @@ func TestSetupVMIsOrphanedUnlessItsProcessLives(t *testing.T) {
 	}
 }
 
-// A test boot the agent is told to stop tears its VM down like any other and
-// is recorded as not passed.
+// A test boot the agent is told to stop tears its VM down like any other, is
+// reported as not passed, and -- torn down clean -- leaves the machine's last
+// finished verdict alone: a host pressing Ctrl-C must not take a ready machine
+// off the market.
 func TestSelfTestStopsWhenCancelled(t *testing.T) {
 	h := newHost()
+	earlier := SelfTestResult{Passed: true, AgentVersion: "v0.1.10", At: 1}
+	if err := SaveSelfTest(h, dataDir, earlier); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.OnSleep = func(*fakehost.Host) { cancel() } // the VM never reports; the agent stops
 	rt, fence := newRuntime(h, func() bool { return true })
 	res := rt.SelfTestContext(ctx, "v0.1.10")
-	if res.Passed || len(res.Problems) == 0 || !strings.Contains(res.Problems[0], "stopped before it finished") {
+	if res.Passed || !res.Stopped || len(res.Problems) == 0 || !strings.Contains(res.Problems[0], "stopped before it finished") {
 		t.Fatalf("result = %+v", res)
 	}
 	if h.Driver(testGPU) != "nvidia" || fence.removed != 1 {
@@ -123,11 +129,36 @@ func TestSelfTestStopsWhenCancelled(t *testing.T) {
 	if st, _ := LoadState(h, dataDir); st != nil {
 		t.Errorf("state left behind: %+v", st)
 	}
+	if kept, err := LoadSelfTest(h, dataDir); err != nil || kept == nil || !kept.Passed || kept.At != 1 {
+		t.Errorf("the last finished verdict was replaced: %+v (%v)", kept, err)
+	}
 
 	h = newHost()
 	rt, _ = newRuntime(h, nil)
-	if res := rt.SelfTestContext(ctx, "v0.1.10"); res.Passed || h.Ran("run systemd-run") {
+	if res := rt.SelfTestContext(ctx, "v0.1.10"); res.Passed || !res.Stopped || h.Ran("run systemd-run") {
 		t.Errorf("a cancelled test boot started: %+v", res)
+	}
+	if kept, _ := LoadSelfTest(h, dataDir); kept != nil {
+		t.Errorf("a test boot that never started recorded %+v", kept)
+	}
+}
+
+// A stopped test boot whose teardown does not verify clean IS recorded: that
+// machine must not host until it is fixed.
+func TestSelfTestStoppedButDirtyIsRecorded(t *testing.T) {
+	h := newHost()
+	if err := SaveSelfTest(h, dataDir, SelfTestResult{Passed: true, AgentVersion: "v0.1.10", At: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.OnSleep = func(*fakehost.Host) { cancel() }
+	rt, _ := newRuntime(h, func() bool { return false }) // the GPU does not verify clean after the VM
+	res := rt.SelfTestContext(ctx, "v0.1.10")
+	if res.Passed || res.Stopped {
+		t.Fatalf("result = %+v", res)
+	}
+	if kept, _ := LoadSelfTest(h, dataDir); kept == nil || kept.Passed {
+		t.Errorf("a dirty stopped test was not recorded: %+v", kept)
 	}
 }
 

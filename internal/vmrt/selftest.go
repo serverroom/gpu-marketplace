@@ -76,6 +76,10 @@ type SelfTestResult struct {
 	Blocked      []string `json:"blocked"`
 	Problems     []string `json:"problems"`
 	At           int64    `json:"at"`
+	// Stopped: the test was stopped before it finished and its VM was torn
+	// down clean, so nothing was recorded -- the machine keeps the verdict of
+	// its last finished test boot. Never written to selftest.json.
+	Stopped bool `json:"-"`
 }
 
 // Evaluate turns what the VM printed and what the teardown verified into a
@@ -214,7 +218,9 @@ func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTest
 		return res
 	}
 	if ctx.Err() != nil {
-		return fail("the test boot was stopped before it started")
+		// Nothing ran, so there is nothing to record.
+		return SelfTestResult{AgentVersion: version, HostGPUs: rt.spec.GPUs, At: now, Stopped: true,
+			Problems: []string{"the test boot was stopped before it started"}}
 	}
 	// No GPU query of the agent's own runs while the GPU is being tested.
 	resume := stats.PauseGPUQueries()
@@ -255,6 +261,13 @@ func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTest
 	if stopped {
 		res.Passed = false
 		res.Problems = append([]string{"the test boot was stopped before it finished"}, res.Problems...)
+		if stop.Clean() {
+			// A test stopped half way proves nothing either way: the machine
+			// keeps the verdict of its last finished test boot. A teardown that
+			// did not verify clean is recorded, because that machine must not host.
+			res.Stopped = true
+			return res
+		}
 	}
 	_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
 	return res

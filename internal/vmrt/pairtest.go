@@ -24,6 +24,9 @@ type PairTestResult struct {
 	MinRDMAGbps  float64   `json:"min_rdma_gbps,omitempty"`
 	Problems     []string  `json:"problems,omitempty"`
 	At           int64     `json:"at"`
+	// Stopped: stopped before it finished and torn down clean, so nothing was
+	// recorded (see SelfTestResult.Stopped). Never written to pairtest.json.
+	Stopped bool `json:"-"`
 }
 
 // PairTestPath is where the latest pair test result lives.

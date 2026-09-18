@@ -185,6 +185,11 @@ func runPairSelfTest(svc service.Service, yes bool, minRDMA float64) {
 		}
 		return
 	}
+	if res.Stopped {
+		fmt.Println("STOPPED: the pair test boot was stopped before it finished and its VM was removed cleanly.")
+		fmt.Println("Nothing was recorded: this machine keeps the result of its last finished pair test boot.")
+		os.Exit(130)
+	}
 	fmt.Println("FAILED:")
 	for _, problem := range res.Problems {
 		fmt.Printf("  - %s\n", problem)
