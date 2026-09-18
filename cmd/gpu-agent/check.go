@@ -21,7 +21,9 @@ import (
 // the hosting checks, so the provisioner it returns refuses rentals with the
 // reasons whenever this machine cannot host one.
 func detectProvisioner() *provisioner.Provisioner {
-	return provisioner.Detect(vmrt.OSHost{}, runtime.GOOS, runtime.GOARCH, config.DataDir(), version)
+	p := provisioner.Detect(vmrt.OSHost{}, runtime.GOOS, runtime.GOARCH, config.DataDir(), version)
+	p.SetListingID(func() string { return register.LoadState().ListingID })
+	return p
 }
 
 // printCapability writes the hosting half of status/check.

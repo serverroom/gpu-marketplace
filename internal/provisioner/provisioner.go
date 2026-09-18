@@ -120,6 +120,17 @@ type Provisioner struct {
 	version  string
 	pairOpts interconnect.Options
 	pair     interconnect.Report
+	// openPacket opens a raw socket on a ConnectX-7 port.
+	openPacket interconnect.Opener
+	// lockFrames excludes every other raw-frame run on this machine.
+	lockFrames func() (unlock func(), ok bool, err error)
+	// listingID is this machine's listing, "" before registration.
+	listingID func() string
+	// checking is set while a cable check or peer announcement holds the
+	// ports; a pair rental is refused meanwhile.
+	checking bool
+	frames   sync.WaitGroup
+	now      func() time.Time
 }
 
 // Withdraw stops this machine hosting: every rental is refused from now on,

@@ -73,6 +73,7 @@ func (a *gpuAgent) Start(s service.Service) error {
 	// rental request is answered from it. Up to v0.1.5 this was a stub that
 	// answered success and created nothing.
 	a.prov = detectProvisioner()
+	a.prov.RecoverPorts()
 	a.prov.Resume()
 	if c := a.prov.Capability(); c.Ready {
 		a.say("Hosting checks passed: this machine can host a rental")
@@ -99,6 +100,7 @@ func (a *gpuAgent) Start(s service.Service) error {
 			defer close(a.bgDone)
 			a.reportCapability(bg, a.prov.Capability())
 		}()
+		go a.announcePeers(bg)
 	}
 
 	// Legacy local stats server (best-effort; superseded by push-over-tunnel).
@@ -214,6 +216,11 @@ func (a *gpuAgent) Stop(s service.Service) error {
 		case <-time.After(stopGrace):
 			a.warn("background work did not stop within %v", stopGrace)
 		}
+	}
+	if a.prov != nil {
+		// A cable check or peer announcement in progress puts its ports back
+		// before the agent exits.
+		a.prov.WaitFrames(30 * time.Second)
 	}
 	if a.controlSrv != nil {
 		a.controlSrv.Stop()

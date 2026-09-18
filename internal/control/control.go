@@ -134,6 +134,12 @@ func New(listenAddr, token string, prov Provisioner) *Server {
 	mux.HandleFunc("/update", s.auth(s.handleUpdate))
 	mux.HandleFunc("/withdrawn", s.auth(s.handleWithdrawn))
 	mux.HandleFunc("/health", s.handleHealth)
+	// The pair endpoints exist only where the provisioner has the pair
+	// runtime; anywhere else they are 404, which the control plane reads as a
+	// refusal.
+	if v, ok := prov.(LinkVerifier); ok {
+		mux.HandleFunc("/link/verify", s.auth(s.handleLinkVerify(v)))
+	}
 	return s
 }
 

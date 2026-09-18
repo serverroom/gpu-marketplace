@@ -3,8 +3,8 @@ package provisioner
 import (
 	"errors"
 	"fmt"
-	"os"
 	"net"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -209,6 +209,9 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	p.version = version
 	p.pairOpts = pairOpts
 	p.pair = pair
+	p.openPacket = interconnect.OpenPacket
+	p.lockFrames = func() (func(), bool, error) { return interconnect.TryLock(dataDir) }
+	p.now = time.Now
 	_, ic := pair.Capability(interconnect.RecentPeers(interconnect.LoadPeers(h, dataDir), time.Now().Unix(), pair.PortMACs()))
 	p.capability = control.Capability{
 		Ready:         len(rep.Reasons) == 0,

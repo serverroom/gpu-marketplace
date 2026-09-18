@@ -1,0 +1,115 @@
+package control
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+)
+
+// pairProv is a provisioner with the pair runtime.
+type pairProv struct {
+	fakeProv
+	verified   *LinkVerifyRequest
+	verifyErr  error
+	provision  *PairProvisionRequest
+	provErr    error
+	pairStatus *PairStatus
+}
+
+func (f *pairProv) LinkVerify(req LinkVerifyRequest) (*LinkVerifyResponse, error) {
+	f.verified = &req
+	if f.verifyErr != nil {
+		return nil, f.verifyErr
+	}
+	return &LinkVerifyResponse{Ports: []LinkPort{{Netdev: "enp1s0f0np0", BDF: "0000:01:00.0", MAC: "58:a2:e1:00:00:01",
+		Carrier: true, SpeedMbps: 200000, PeerFrames: []PeerFrames{{Src: "58:a2:e1:00:01:01", Listing: "B", Count: 31}},
+		LLDP: []LLDPEntry{}, ForeignSrc: []string{}}}}, nil
+}
+
+func (f *pairProv) PairProvision(req PairProvisionRequest) error {
+	f.provision = &req
+	return f.provErr
+}
+
+func (f *pairProv) PairStatus() *PairStatus { return f.pairStatus }
+
+func readyPairProv() *pairProv {
+	return &pairProv{fakeProv: fakeProv{capability: Capability{Ready: true, Kind: "qemu-vfio",
+		Identity:     &Identity{ConfirmedDGXSpark: true},
+		Interconnect: &Interconnect{Supported: true, Ready: true}}}}
+}
+
+const verifyBody = `{"challenge":"0123456789abcdef0123456789abcdef","self":"A","peer":"B","seconds":8}`
+
+func TestLinkVerifyAnswersWhatThePortsHeard(t *testing.T) {
+	fp := readyPairProv()
+	w := serve(New("127.0.0.1:0", "secret", fp), "POST", "/link/verify", verifyBody, "secret")
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d body = %s", w.Code, w.Body.String())
+	}
+	if fp.verified == nil || fp.verified.Self != "A" || *fp.verified.Seconds != 8 {
+		t.Fatalf("request = %+v", fp.verified)
+	}
+	for _, want := range []string{`"peer_frames":[{"src":"58:a2:e1:00:01:01","listing":"B","count":31}]`,
+		`"lldp":[]`, `"stp":false`, `"foreign_src":[]`, `"bad_frames":0`, `"speed_mbps":200000`, `"carrier":true`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("answer missing %s: %s", want, w.Body.String())
+		}
+	}
+}
+
+func TestLinkVerifyRefusesBadBodies(t *testing.T) {
+	for _, body := range []string{
+		`{"challenge":"0123456789ABCDEF0123456789ABCDEF","self":"A","peer":"B"}`,
+		`{"challenge":"0123","self":"A","peer":"B"}`,
+		`{"challenge":"0123456789abcdef0123456789abcdef","self":"A","peer":"A"}`,
+		`{"challenge":"0123456789abcdef0123456789abcdef","self":"../A","peer":"B"}`,
+		`{"challenge":"0123456789abcdef0123456789abcdef","self":"A","peer":"B","seconds":0}`,
+		`{"challenge":"0123456789abcdef0123456789abcdef","self":"A","peer":"B","seconds":16}`,
+		`{"challenge":"0123456789abcdef0123456789abcdef","self":"A","peer":"B","ports":["eth0"]}`,
+		`{"challenge":"0123456789abcdef0123456789abcdef","self":"A","peer":"B"} {}`,
+		`not json`,
+	} {
+		fp := readyPairProv()
+		w := serve(New("127.0.0.1:0", "secret", fp), "POST", "/link/verify", body, "secret")
+		if w.Code != http.StatusBadRequest || fp.verified != nil {
+			t.Errorf("%s: code = %d, called = %v", body, w.Code, fp.verified != nil)
+		}
+	}
+	fp := readyPairProv()
+	w := serve(New("127.0.0.1:0", "secret", fp), "POST", "/link/verify",
+		`{"challenge":"0123456789abcdef0123456789abcdef","self":"A","peer":"B"}`, "secret")
+	if w.Code != http.StatusOK || fp.verified.Seconds != nil {
+		t.Errorf("seconds is optional: code = %d", w.Code)
+	}
+}
+
+func TestLinkVerifyConflictsAndAuth(t *testing.T) {
+	fp := readyPairProv()
+	fp.verifyErr = Conflict("this machine is rented; the cable is checked only while it is free")
+	w := serve(New("127.0.0.1:0", "secret", fp), "POST", "/link/verify", verifyBody, "secret")
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "rented") {
+		t.Errorf("code = %d body = %s", w.Code, w.Body.String())
+	}
+	if w := serve(New("127.0.0.1:0", "secret", readyPairProv()), "POST", "/link/verify", verifyBody, "wrong"); w.Code != http.StatusUnauthorized {
+		t.Errorf("without the token: %d", w.Code)
+	}
+	if w := serve(New("127.0.0.1:0", "secret", readyPairProv()), "GET", "/link/verify", "", "secret"); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET: %d", w.Code)
+	}
+}
+
+func TestLinkVerifyErrorsAreStatusCodes(t *testing.T) {
+	for err, code := range map[error]int{
+		Invalid("x"):     http.StatusBadRequest,
+		Conflict("x"):    http.StatusConflict,
+		Unavailable("x"): http.StatusServiceUnavailable,
+	} {
+		fp := readyPairProv()
+		fp.verifyErr = err
+		w := serve(New("127.0.0.1:0", "secret", fp), "POST", "/link/verify", verifyBody, "secret")
+		if w.Code != code {
+			t.Errorf("%T %v -> %d, want %d", err, err, w.Code, code)
+		}
+	}
+}
