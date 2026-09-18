@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/serverroom/gpu-marketplace/internal/stats"
 )
 
 // SelfTestTimeout bounds how long the host waits for the test VM's report.
@@ -207,6 +209,9 @@ func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTest
 	if ctx.Err() != nil {
 		return fail("the test boot was stopped before it started")
 	}
+	// No GPU query of the agent's own runs while the GPU is being tested.
+	resume := stats.PauseGPUQueries()
+	defer resume()
 	pub, err := ThrowawayPubkey()
 	if err != nil {
 		return fail("could not make a test key: " + err.Error())

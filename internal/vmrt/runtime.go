@@ -6,6 +6,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/serverroom/gpu-marketplace/internal/stats"
 )
 
 // Fence is the rental network firewall. netguard.Guard is the real one.
@@ -73,6 +75,9 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	// The agent's own GPU queries would hold the GPU while it is taken.
+	resume := stats.PauseGPUQueries()
+	defer resume()
 
 	r := NewRental(rt.spec.DataDir, o.ID)
 	st := &State{RentalID: o.ID, Rental: r, StartedAt: time.Now().Unix()}
@@ -181,20 +186,28 @@ func gpuInUse(holders []string) error {
 }
 
 func (rt *Runtime) takeGPUs(st *State, r *Rental, save func() error) error {
-	desktop, other := ClassifyGPUHolders(rt.h)
-	if len(desktop) > 0 && !rt.spec.DesktopOnDemand {
-		return errors.New(DesktopOnGPUProblem(desktop))
+	g := readGPUHolders(rt.h)
+	if len(g.desktop) > 0 && !rt.spec.DesktopOnDemand {
+		return errors.New(DesktopOnGPUProblem(g.desktop))
 	}
-	if len(other) > 0 {
-		return gpuInUse(other)
+	if len(g.other) > 0 {
+		return gpuInUse(g.busy())
+	}
+	// Short-lived tools (an nvidia-smi) are given a moment to exit.
+	g = settleGPUHolders(rt.h)
+	if busy := g.busy(); len(busy) > 0 {
+		return gpuInUse(busy)
 	}
 	// A DGX Spark's desktop closes for the rental and comes back after it.
-	if len(desktop) > 0 {
-		if err := rt.releaseDesktop(st, desktop, save); err != nil {
+	if len(g.desktop) > 0 {
+		if !rt.spec.DesktopOnDemand {
+			return errors.New(DesktopOnGPUProblem(g.desktop))
+		}
+		if err := rt.releaseDesktop(st, g.desktop, save); err != nil {
 			return err
 		}
-		if _, other := ClassifyGPUHolders(rt.h); len(other) > 0 {
-			return gpuInUse(other)
+		if busy := settleGPUHolders(rt.h).busy(); len(busy) > 0 {
+			return gpuInUse(busy)
 		}
 	}
 	// NVIDIA's own services are stopped for the rental and started again when

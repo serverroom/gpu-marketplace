@@ -66,7 +66,7 @@ func Collect() (*SystemStats, error) {
 		mem = MemoryInfo{}
 	}
 
-	gpus := collectGPUs()
+	gpus := gatedGPUs(collectGPUs)
 	fillUnifiedMemory(gpus, mem)
 
 	disk, err := collectDisk()

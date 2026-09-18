@@ -2,9 +2,12 @@ package vmrt
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // BoundDevice is one PCI function the runtime took from its driver, and the
@@ -226,12 +229,76 @@ func IsDesktopProcess(name string) bool {
 	return false
 }
 
-// ClassifyGPUHolders lists the host processes with an NVIDIA device open, as
-// "name (pid N)", split into the machine's desktop and everything else.
-// NVIDIA's own services are left out: the runtime stops them itself. A GPU
-// that something holds cannot be unbound -- the kernel waits for the holder --
-// so a rental is refused while either list is non-empty.
-func ClassifyGPUHolders(h Host) (desktop, other []string) {
+// transientTools are NVIDIA's short-lived command-line tools. Each opens the
+// GPU's device files for a moment and exits -- a monitoring script's
+// nvidia-smi, a support bundle -- so one seen holding the GPU is waited for,
+// briefly, instead of refusing the rental on sight.
+var transientTools = []string{"nvidia-smi", "nvidia-debugdump", "nvidia-bug-report.sh", "nvidia-bug-report", "dcgmi"}
+
+// agentName is the agent's own executable. What it runs (its GPU queries) is
+// short-lived too.
+const agentName = "gpu-agent"
+
+var (
+	// TransientWait bounds how long a start waits for short-lived tools to let
+	// go of the GPU; TransientPoll is how often it looks.
+	TransientWait = 5 * time.Second
+	TransientPoll = 250 * time.Millisecond
+)
+
+// IsTransientTool reports whether a process name is one of transientTools.
+func IsTransientTool(name string) bool {
+	for _, t := range transientTools {
+		if sameProgram(name, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// parentPID is a process's parent, from /proc/<pid>/status; "" when unknown.
+func parentPID(h Host, pid string) string {
+	data, err := h.ReadFile("/proc/" + pid + "/status")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if v, ok := strings.CutPrefix(line, "PPid:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// isAgentChild reports whether a process was started by this agent, or by any
+// gpu-agent process (a `gpu-agent status` a person is running, say).
+func isAgentChild(h Host, pid string) bool {
+	ppid := parentPID(h, pid)
+	if ppid == "" || ppid == "0" {
+		return false
+	}
+	if ppid == strconv.Itoa(os.Getpid()) {
+		return true
+	}
+	return processName(h, ppid) == agentName
+}
+
+// gpuHolders are the host processes with an NVIDIA device open, as
+// "name (pid N)", other than NVIDIA's own services (the runtime stops those
+// itself): the machine's desktop, short-lived tools, and everything else.
+type gpuHolders struct {
+	desktop, transient, other []string
+}
+
+// busy is every holder that is not the desktop.
+func (g gpuHolders) busy() []string {
+	all := append(append([]string{}, g.other...), g.transient...)
+	sort.Strings(all)
+	return all
+}
+
+func readGPUHolders(h Host) gpuHolders {
+	var g gpuHolders
 	fds, _ := h.Glob("/proc/[0-9]*/fd/*")
 	seen := map[string]bool{}
 	for _, fd := range fds {
@@ -253,15 +320,42 @@ func ClassifyGPUHolders(h Host) (desktop, other []string) {
 			continue
 		}
 		seen[who] = true
-		if IsDesktopProcess(name) {
-			desktop = append(desktop, who)
-		} else {
-			other = append(other, who)
+		switch {
+		case IsDesktopProcess(name):
+			g.desktop = append(g.desktop, who)
+		case IsTransientTool(name) || isAgentChild(h, pid):
+			g.transient = append(g.transient, who)
+		default:
+			g.other = append(g.other, who)
 		}
 	}
-	sort.Strings(desktop)
-	sort.Strings(other)
-	return desktop, other
+	sort.Strings(g.desktop)
+	sort.Strings(g.transient)
+	sort.Strings(g.other)
+	return g
+}
+
+// settleGPUHolders reads the GPU's holders, and while the only ones besides
+// the desktop are short-lived tools, reads them again every TransientPoll for
+// up to TransientWait.
+func settleGPUHolders(h Host) gpuHolders {
+	g := readGPUHolders(h)
+	for waited := time.Duration(0); len(g.other) == 0 && len(g.transient) > 0 && waited < TransientWait; waited += TransientPoll {
+		h.Sleep(TransientPoll)
+		g = readGPUHolders(h)
+	}
+	return g
+}
+
+// ClassifyGPUHolders lists the host processes with an NVIDIA device open, as
+// "name (pid N)", split into the machine's desktop and everything else.
+// NVIDIA's own services are left out: the runtime stops them itself. A GPU
+// that something holds cannot be unbound -- the kernel waits for the holder --
+// so a rental is refused while either list is non-empty (short-lived tools,
+// in the second list, are waited for briefly first).
+func ClassifyGPUHolders(h Host) (desktop, other []string) {
+	g := readGPUHolders(h)
+	return g.desktop, g.busy()
 }
 
 // GPUHolders are the host processes with an NVIDIA device open, other than
