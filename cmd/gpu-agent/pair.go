@@ -189,5 +189,6 @@ func runPairSelfTest(svc service.Service, yes bool, minRDMA float64) {
 	for _, problem := range res.Problems {
 		fmt.Printf("  - %s\n", problem)
 	}
+	noteCommand(control.AreaTestBoot, "the pair test boot ('gpu-agent check --boot --pair') failed: "+strings.Join(res.Problems, "; "), "")
 	os.Exit(2)
 }

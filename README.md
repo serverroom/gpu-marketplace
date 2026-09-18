@@ -66,6 +66,7 @@ sudo gpu-agent start
 | `gpu-agent check --pair` | Check, without changing anything, whether this machine can be half of a [linked pair](#linked-pairs-two-dgx-sparks-rented-as-one): what it is, its ConnectX-7 ports, the agents heard on them, its last pair test, and everything to fix (`--json` for the raw report) |
 | `gpu-agent check --boot --pair` | Run the pair test, on both machines of a pair within 10 minutes: each finds the other on the cable, boots a test rental with its GPU and ConnectX card, and measures every link (`--min-rdma-gbps N`, default 100; `--yes` skips the prompt) |
 | `gpu-agent update` | Update the agent to the latest release (`--version v0.2.1` picks one), exactly as "Update agent" in the control panel does; Linux |
+| `gpu-agent update --auto off` / `--auto on` | Pause the automatic updates, or turn them back on (an update the marketplace pushes still applies) |
 | `gpu-agent install` | Install as a system service (systemd/launchd/Windows Service) |
 | `gpu-agent remove` | Withdraw the listing, revoke relay access and delete the agent completely (`--yes` skips the prompt) |
 | `gpu-agent uninstall` | Remove the system service only — keys, token and listing stay; use `remove` to take everything off |
@@ -165,6 +166,36 @@ machines.
 for the manual commands, which stay available for support:
 `sudo gpu-agent runtime prepare --install-deps` (packages and image) and
 `sudo gpu-agent check --boot` (the test rental).
+
+## Updates
+
+From v0.2.0 the agent **keeps itself up to date**. Every capability report it sends
+(at start, whenever something changes, and every 30 minutes) is answered with the
+release this machine should run, and the marketplace's own status check every 30
+seconds carries the same offer. When a newer release is named, the agent installs it
+**only when the machine is idle** — not rented, no leftover of a rental, no setup, test
+boot or pair test running — and otherwise waits for the next offer. It installs it
+exactly as "Update agent" does (below): from the release address it builds itself,
+checked against `checksums.txt`, with the automatic rollback. After an update the test
+boot runs again by itself, as after any new version.
+
+- `sudo gpu-agent update --auto off` pauses the automatic updates; `--auto on` turns
+  them back on. `sudo gpu-agent status` says which. An update the marketplace
+  **pushes** — Server Room staff, or your own "Update agent" in the control panel — is
+  still applied when the machine is idle.
+- A release that failed or was rolled back is not tried again automatically for a day
+  (a pushed one: an hour), so a bad release cannot restart the agent over and over.
+- The agent never asks GitHub which release is the latest; it downloads only from the
+  release address compiled into it.
+
+**Problems the marketplace sees.** The agent keeps its last 20 problems — anything that
+stopped, or stops, this machine being listed: a hosting check that fails, an automatic
+setup step or test boot that failed, an update that failed or was rolled back, a relay
+connection that has been failing for over five minutes, reports that could not be sent,
+a rental that did not start or whose cleanup did not verify — in
+`/var/lib/gpu-agent/errors.json`, and sends them with every capability report (a new one
+at once, at most once a minute). Each says when, what, and whether it still stops the
+machine. `sudo gpu-agent status` lists the ones still open under "Problems".
 
 ## Updating the agent, and removing a machine, from the control panel
 

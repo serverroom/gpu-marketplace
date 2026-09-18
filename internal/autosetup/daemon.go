@@ -26,10 +26,50 @@ type Daemon struct {
 	Say, Warn func(format string, args ...interface{})
 	// After waits; time.After unless a test replaces it.
 	After func(d time.Duration) <-chan time.Time
+	// Errors records a failed attempt for the marketplace's problem list, and
+	// clears it once an attempt passes (agenterrors.Log); nil: nothing.
+	Errors Problems
 
 	mu      sync.Mutex
 	running bool
 	started bool
+}
+
+// Problems is where the setup's failures go (agenterrors.Log).
+type Problems interface {
+	Raise(area, message, detail string) bool
+	Resolve(area, message string)
+}
+
+// AreaOf is the problem area a failed step belongs to: the test boot's own,
+// or the setup's (installing packages, building the image with its driver).
+func AreaOf(s Step) string {
+	if s == StepTestBoot {
+		return control.AreaTestBoot
+	}
+	return control.AreaSetup
+}
+
+// Progress is the last attempt for the capability report's setup field; nil
+// when the setup never ran here. running says the agent is in the middle of
+// one now (an unfinished record without it was interrupted).
+func Progress(a *Attempt, running bool) *control.SetupProgress {
+	if a == nil || len(a.Steps) == 0 {
+		return nil
+	}
+	p := &control.SetupProgress{Step: string(a.CurrentStep())}
+	switch {
+	case !a.Finished() && running:
+		p.State, p.Message, p.At = "running", ProgressLine(*a, false), a.StepStartedAt
+	case !a.Finished():
+		p.State, p.Message, p.At = "interrupted", "Automatic setup "+Describe(a), a.StepStartedAt
+	case a.Passed:
+		p.State, p.Message, p.At = "passed", "Automatic setup "+Describe(a), a.FinishedAt
+	default:
+		p.State, p.Message, p.At = "failed", FailureLine(*a), a.FinishedAt
+	}
+	p.Message = Shorten(p.Message, 300)
+	return p
 }
 
 func (d *Daemon) say(format string, args ...interface{}) {
@@ -183,11 +223,18 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 	d.Prov.EndSetup()
 	d.Prov.Adopt(after)
 	if a.Passed {
+		if d.Errors != nil {
+			d.Errors.Resolve(control.AreaSetup, "")
+			d.Errors.Resolve(control.AreaTestBoot, "")
+		}
 		d.say("Automatic setup finished: this machine is ready")
 		d.report(after.Capability())
 		return
 	}
 	line := FailureLine(a)
+	if d.Errors != nil {
+		d.Errors.Raise(AreaOf(a.CurrentStep()), line, a.Error)
+	}
 	d.warn("%s", line)
 	d.show(after.Capability(), line)
 	return time.Unix(a.FinishedAt, 0).Add(RetryAfter), true

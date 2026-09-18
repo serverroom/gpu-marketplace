@@ -38,19 +38,24 @@ type gpuAgent struct {
 	controlSrv   *control.Server
 	prov         *provisioner.Provisioner
 	host         *hostctl.Agent // update and withdraw, for the control channel
+	ops          *opsState      // problems and reports (ops.go)
 	logger       service.Logger
 }
 
 func (a *gpuAgent) Start(s service.Service) error {
 	a.say("GPU Agent %s starting...", version)
+	a.ops = newOps()
+	a.ops.errs.OnNew(a.kickReport)
 
 	// A machine the host removed in the control panel does not host again
 	// until it is registered again: no tunnel, no reports, no rentals.
 	if register.LoadWithdrawn() != nil {
 		a.prov = detectProvisioner()
+		a.prov.SetProblems(a.ops.errs)
 		a.prov.RecoverPorts()
 		a.prov.Resume()
 		a.prov.Withdraw(register.WithdrawnMessage)
+		a.ops.errs.Raise(control.AreaRegister, register.WithdrawnMessage, "")
 		a.say("%s", register.WithdrawnMessage)
 		return nil
 	}
@@ -63,7 +68,7 @@ func (a *gpuAgent) Start(s service.Service) error {
 	case tcfg != nil:
 		ctx, cancel := context.WithCancel(context.Background())
 		a.tunnelCancel = cancel
-		go sshtunnel.Supervise(ctx, *tcfg)
+		go sshtunnel.SuperviseWith(ctx, *tcfg, tunnelWatch{errs: a.ops.errs, host: tcfg.RelayHost})
 		a.say("Reverse tunnel to %s started", tcfg.RelayHost)
 	default:
 		// The state between installing and registering. It has no tunnel and
@@ -76,8 +81,12 @@ func (a *gpuAgent) Start(s service.Service) error {
 	// rental request is answered from it. Up to v0.1.5 this was a stub that
 	// answered success and created nothing.
 	a.prov = detectProvisioner()
+	a.prov.SetProblems(a.ops.errs)
+	a.prov.OnCapabilityChange(a.kickReport)
 	a.prov.RecoverPorts()
 	a.prov.Resume()
+	a.syncFindings()
+	a.noteUpdateRecord()
 	if c := a.prov.Capability(); c.Ready {
 		a.say("Hosting checks passed: this machine can host a rental")
 	} else {
@@ -95,6 +104,9 @@ func (a *gpuAgent) Start(s service.Service) error {
 		a.controlSrv.SetHost(a.host)
 		if cerr := a.controlSrv.Start(); cerr != nil {
 			a.warn("start control channel: %v", cerr)
+			a.ops.errs.Raise(control.AreaAgent, "the agent's control channel could not start, so the marketplace cannot start rentals on this machine; restart the agent ('sudo gpu-agent stop && sudo gpu-agent start')", cerr.Error())
+		} else {
+			a.ops.errs.Resolve(control.AreaAgent, "")
 		}
 		bg, cancel := context.WithCancel(context.Background())
 		a.bgCancel = cancel
@@ -104,6 +116,7 @@ func (a *gpuAgent) Start(s service.Service) error {
 			a.reportCapability(bg, a.prov.Capability())
 		}()
 		go a.announcePeers(bg)
+		go a.reportLoop(bg)
 	}
 
 	// Legacy local stats server (best-effort; superseded by push-over-tunnel).
@@ -410,6 +423,10 @@ func runStatus(svc service.Service) {
 	if u := updateSummary(); u != "" {
 		fmt.Printf("Update:       %s\n", u)
 	}
+	if u := autoUpdateSummary(); u != "" {
+		fmt.Printf("Auto-update:  %s\n", u)
+	}
+	printProblems()
 
 	st := register.LoadState()
 	switch {
@@ -531,7 +548,8 @@ func printUsage() {
 	fmt.Println("  setup --status   Show the last setup attempt and whether the automatic setup is on")
 	fmt.Println("  setup --off|--on Turn the automatic setup off or back on")
 	fmt.Println("  setup --data-dir Keep the rental image and disks on another disk (e.g. an NVMe; never an SD card)")
-	fmt.Println("  update           Update the agent to the latest release (--version vX.Y.Z), going back by itself if it does not come up")
+	fmt.Println("  update           Update the agent to the latest release (--version vX.Y.Z), going back by itself if it does not come up;")
+	fmt.Println("                   --auto off|on pauses or resumes the automatic updates")
 	fmt.Println("  runtime prepare  Install the microVM runtime (--install-deps) and bake the rental base image")
 	fmt.Println("  remove           Withdraw the listing, revoke relay access and delete the agent completely (--yes)")
 	fmt.Println("  uninstall        Remove the system service only (keys and listing stay; see remove)")

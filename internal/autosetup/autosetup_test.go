@@ -795,3 +795,66 @@ func TestNotOnAWithdrawnMachine(t *testing.T) {
 		t.Errorf("steps %q reports %v", r.ran(), r.reasons())
 	}
 }
+
+// fakeProblems records what the setup raised and resolved.
+type fakeProblems struct {
+	mu       sync.Mutex
+	raised   []string
+	resolved []string
+}
+
+func (f *fakeProblems) Raise(area, message, detail string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.raised = append(f.raised, area+": "+message)
+	return true
+}
+
+func (f *fakeProblems) Resolve(area, message string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resolved = append(f.resolved, area)
+}
+
+// A failed attempt is a problem for the marketplace in its own area (the
+// test boot's, or the setup's), resolved once an attempt passes.
+func TestAFailedAttemptIsAProblemUntilOnePasses(t *testing.T) {
+	h := machine(t)
+	noTestBoot(h)
+	r := newRig(t, h)
+	probs := &fakeProblems{}
+	r.d.Errors = probs
+	r.fail[StepTestBoot] = []error{errors.New("nvidia-smi failed inside the VM: No devices were found")}
+	r.run()
+	if len(probs.raised) != 1 || !strings.HasPrefix(probs.raised[0], "testboot: Automatic setup failed while running a test rental") {
+		t.Errorf("raised = %q", probs.raised)
+	}
+	if strings.Join(probs.resolved, ",") != "setup,testboot" {
+		t.Errorf("resolved = %q", probs.resolved)
+	}
+	if AreaOf(StepImage) != control.AreaSetup || AreaOf(StepDeps) != control.AreaSetup {
+		t.Error("the image and packages are the setup's")
+	}
+}
+
+// The capability report's setup field says where the last attempt stands.
+func TestProgress(t *testing.T) {
+	if Progress(nil, false) != nil {
+		t.Error("no attempt, no progress")
+	}
+	a := Attempt{Steps: []string{string(StepImage), string(StepTestBoot)}, Step: 2, StartedAt: 100, StepStartedAt: 200, By: ByAgent}
+	if p := Progress(&a, true); p.State != "running" || p.Step != "test-boot" || p.At != 200 || !strings.Contains(p.Message, "step 2 of 2") {
+		t.Errorf("running = %+v", p)
+	}
+	if p := Progress(&a, false); p.State != "interrupted" {
+		t.Errorf("interrupted = %+v", p)
+	}
+	a.FinishedAt, a.Error = 300, "the test boot failed: no GPU in the VM"
+	if p := Progress(&a, false); p.State != "failed" || p.At != 300 || !strings.Contains(p.Message, "no GPU in the VM") || len([]rune(p.Message)) > 300 {
+		t.Errorf("failed = %+v", p)
+	}
+	a.Passed, a.Error = true, ""
+	if p := Progress(&a, false); p.State != "passed" {
+		t.Errorf("passed = %+v", p)
+	}
+}

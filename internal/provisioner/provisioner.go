@@ -149,6 +149,35 @@ type Provisioner struct {
 	// onChange is told when the capability changed by itself (after a
 	// rental), so the agent reports it; nil: nobody.
 	onChange func()
+	// problems records rentals that did not start and cleanups that did not
+	// verify, for the marketplace's problem list; nil: nowhere.
+	problems Problems
+}
+
+// Problems is where rental failures go (agenterrors.Log).
+type Problems interface {
+	Raise(area, message, detail string) bool
+	Note(area, message, detail string) bool
+	Resolve(area, message string)
+}
+
+// DirtyProblem is the problem a teardown that did not verify leaves, while
+// the machine is held back from renters.
+const DirtyProblem = "the last rental's cleanup did not verify, so this machine is held back from renters until it is fixed ('sudo gpu-agent status' shows why)"
+
+// SetProblems sets where rental failures are recorded.
+func (p *Provisioner) SetProblems(pr Problems) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.problems = pr
+}
+
+// dirtyLocked records the machine held back dirty; the caller holds p.mu.
+func (p *Provisioner) dirtyLocked(detail string) {
+	if p.problems != nil {
+		pr := p.problems
+		go pr.Raise(control.AreaRental, DirtyProblem, detail)
+	}
 }
 
 // OnCapabilityChange sets what is told when the capability changes after a
@@ -405,6 +434,13 @@ func (p *Provisioner) start(machine Machine, o vmrt.StartOptions) error {
 			p.status = StatusDirty
 		}
 		log.Printf("rental %s did not start: %v", id, err)
+		if p.problems != nil {
+			pr := p.problems
+			go pr.Note(control.AreaRental, "rental "+id+" did not start: "+err.Error(), "")
+		}
+		if p.status == StatusDirty {
+			p.dirtyLocked(err.Error())
+		}
 		return err
 	}
 	p.forward = fwd
@@ -445,13 +481,18 @@ func (p *Provisioner) Teardown(rentalID string) error {
 	if res.Clean() {
 		p.status = StatusFree
 		p.lastErr = ""
+		pr := p.problems
 		p.mu.Unlock()
+		if pr != nil {
+			pr.Resolve(control.AreaRental, DirtyProblem)
+		}
 		p.afterRental()
 		return nil
 	}
 	defer p.mu.Unlock()
 	p.status = StatusDirty
 	p.lastErr = strings.Join(res.Detail, "; ")
+	p.dirtyLocked(p.lastErr)
 	log.Printf("teardown of %s NOT verified clean (wiped=%v gpuClean=%v nicDirty=%v); quarantined dirty: %s",
 		rentalID, res.Wiped, res.GPUClean, res.NICDirty, p.lastErr)
 	return fmt.Errorf("teardown not verified clean; machine quarantined dirty: %s", p.lastErr)
@@ -483,6 +524,7 @@ func (p *Provisioner) resume() (freed bool) {
 			if res := p.machine.Stop(); !res.Clean() {
 				p.status = StatusDirty
 				p.lastErr = strings.Join(res.Detail, "; ")
+				p.dirtyLocked(p.lastErr)
 				return false
 			}
 			return true
@@ -493,6 +535,7 @@ func (p *Provisioner) resume() (freed bool) {
 		return
 	case p.machine.Dirty():
 		p.status = StatusDirty
+		p.dirtyLocked("a rental's cleanup from before the agent started did not verify")
 	case p.machine.Alive():
 		fwd, err := startForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
 		if err != nil {
@@ -509,6 +552,7 @@ func (p *Provisioner) resume() (freed bool) {
 		}
 		p.status = StatusDirty
 		p.lastErr = strings.Join(res.Detail, "; ")
+		p.dirtyLocked(p.lastErr)
 	}
 	return false
 }

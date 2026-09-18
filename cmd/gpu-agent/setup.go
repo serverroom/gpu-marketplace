@@ -12,6 +12,7 @@ import (
 
 	"github.com/kardianos/service"
 
+	"github.com/serverroom/gpu-marketplace/internal/agenterrors"
 	"github.com/serverroom/gpu-marketplace/internal/autosetup"
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
@@ -21,7 +22,12 @@ import (
 
 // autoSetup is the daemon's automatic setup, over this agent's provisioner.
 func (a *gpuAgent) autoSetup() *autosetup.Daemon {
+	var errs autosetup.Problems
+	if a.ops != nil {
+		errs = a.ops.errs
+	}
 	return &autosetup.Daemon{
+		Errors: errs,
 		Runner: autosetup.Runner{
 			Host:    vmrt.OSHost{},
 			Arch:    runtime.GOARCH,
@@ -154,10 +160,14 @@ func runSetup(svc service.Service, args []string) {
 	a = runner.Run(ctx, a)
 	release()
 	fmt.Println()
+	errs := agenterrors.Open(config.DataDir())
 	if !a.Passed {
+		errs.Raise(autosetup.AreaOf(a.CurrentStep()), autosetup.FailureLine(a), a.Error)
 		fmt.Printf("FAILED while %s (step %d of %d):\n  %s\n", a.CurrentStep().Doing(), a.Step, len(a.Steps), a.Error)
 		os.Exit(2)
 	}
+	errs.Resolve(control.AreaSetup, "")
+	errs.Resolve(control.AreaTestBoot, "")
 	fmt.Println("PASSED: this machine is ready to host a rental.")
 	if _, err := svc.Status(); err == nil {
 		if err := service.Control(svc, "restart"); err == nil {

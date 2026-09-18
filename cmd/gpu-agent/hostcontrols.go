@@ -1,10 +1,8 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,7 +11,6 @@ import (
 	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
-	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/hostctl"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
 	"github.com/serverroom/gpu-marketplace/internal/register"
@@ -53,6 +50,8 @@ func (a *gpuAgent) hostControls() *hostctl.Agent {
 		Host:             vmrt.OSHost{},
 		Machine:          a.prov,
 		Updater:          newUpdater(runningBinary()),
+		ConfigDir:        config.ConfigDir(),
+		Log:              a.say,
 		WithdrawnMessage: register.WithdrawnMessage,
 		MarkWithdrawn:    register.MarkWithdrawn,
 		StopHosting:      a.stopHosting,
@@ -65,17 +64,6 @@ func (a *gpuAgent) hostControls() *hostctl.Agent {
 			}()
 		},
 	}
-}
-
-// report sends a capability; an answer of 410 Gone means the host removed the
-// machine in the control panel, and the agent stops hosting as if told so.
-func (a *gpuAgent) report(c control.Capability) (*register.CapabilityResponse, error) {
-	resp, err := register.ReportCapability(c)
-	var ee *register.EndpointError
-	if errors.As(err, &ee) && ee.Code == http.StatusGone && a.host != nil {
-		a.host.Gone()
-	}
-	return resp, err
 }
 
 // stopHosting is what a withdrawal leaves running: nothing that hosts. The
@@ -107,6 +95,7 @@ func (a *gpuAgent) stopHosting() {
 func runUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	to := fs.String("version", "", "the release to update to, e.g. v0.2.1 (default: the latest release)")
+	auto := fs.String("auto", "", "'off' pauses the automatic updates, 'on' turns them back on (an update the marketplace pushes still applies)")
 	fs.Parse(args)
 
 	if runtime.GOOS != "linux" {
@@ -114,6 +103,10 @@ func runUpdate(args []string) {
 	}
 	if os.Geteuid() != 0 {
 		exitf("update needs root: run 'sudo gpu-agent update'")
+	}
+	if *auto != "" {
+		runAutoUpdate(*auto)
+		return
 	}
 	u := newUpdater(runningBinary())
 	if *to == "" {
@@ -179,4 +172,37 @@ func updateSummary() string {
 		line += " (" + r.Error + ")"
 	}
 	return line
+}
+
+// runAutoUpdate is `gpu-agent update --auto off|on`.
+func runAutoUpdate(word string) {
+	var on bool
+	switch strings.ToLower(strings.TrimSpace(word)) {
+	case "on":
+		on = true
+	case "off":
+	default:
+		exitf("--auto takes on or off")
+	}
+	if err := hostctl.SetAutoUpdate(config.ConfigDir(), on); err != nil {
+		exitf("could not write %s: %v", hostctl.AutoUpdatePath(config.ConfigDir()), err)
+	}
+	if on {
+		fmt.Println("Automatic updates are on: the agent installs a new release by itself when the marketplace names one")
+		fmt.Println("and this machine is idle (no rental, no setup or test boot running).")
+		return
+	}
+	fmt.Println("Automatic updates are paused. An update the marketplace pushes (staff, or your own \"Update agent\" in the")
+	fmt.Println("control panel) still applies; 'sudo gpu-agent update --auto on' turns them back on.")
+}
+
+// autoUpdateSummary is the automatic updates' switch for `status`.
+func autoUpdateSummary() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	if hostctl.AutoUpdateEnabled(config.ConfigDir()) {
+		return "on (the agent updates itself when idle; 'sudo gpu-agent update --auto off' pauses it)"
+	}
+	return "paused ('sudo gpu-agent update --auto on' turns it back on; a pushed update still applies)"
 }

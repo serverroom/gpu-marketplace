@@ -195,6 +195,7 @@ func runSelfTest(svc service.Service, yes bool) {
 	for _, problem := range res.Problems {
 		fmt.Printf("  - %s\n", problem)
 	}
+	noteCommand(control.AreaTestBoot, "the test boot run by hand ('gpu-agent check --boot') failed: "+strings.Join(res.Problems, "; "), "")
 	os.Exit(2)
 }
 

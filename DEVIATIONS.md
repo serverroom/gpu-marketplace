@@ -333,3 +333,32 @@ DESIGN.md (reasoning). Everything not listed here is implemented as written.
 - **Temperature** (A6) is the hottest `/sys/class/thermal` zone, read on every Linux
   machine and reported as `specs.cpu.temp_c` (a GPU's own temperature stays in
   `specs.gpus`); a zone reading 150 C or more is ignored as a broken sensor.
+
+# Operations (CONTRACT-ops section A): where the build decided differently
+
+- **The update offer arrives two ways**, as ServCast built it: the capability report's
+  answer (`agent_update`) and the header `X-Marketplace-Agent-Update:
+  {"version":"vX.Y.Z","push":bool}` on the marketplace's own `GET /status` (its
+  heartbeat). The header is read strictly: a JSON object with exactly `version`
+  (`^v\d+\.\d+\.\d+$`) and `push` (boolean); anything else is ignored. Only a newer
+  release is acted on.
+- **The agent now reports its capability every 30 minutes** as well as on events, so an
+  offer (and its problems) reach it even with no heartbeat and nothing changing.
+- **Retry spacing** (not in the contract): one try per release per 10 minutes; a
+  release that failed or was rolled back is not tried again automatically for 24 hours,
+  or 1 hour when pushed. Without it a bad release would restart the agent at every
+  heartbeat. The spacing survives the rollback's restart (it reads `update.json`).
+- **"Idle"** is the `/update` rule: not rented or provisioning, no rental leftover, no
+  automatic setup, no `busy.json` holder (a person's `check --boot`, `check --boot
+  --pair` or `setup`), not withdrawn.
+- **The automatic updates' switch** is `/etc/gpu-agent/auto-update` ("off"/"on", like
+  the automatic setup's `auto-setup`), not `config.yaml`, for the same reason as the
+  storage directory.
+- **Preflight problems** are the hosting checks' findings (test-boot findings under
+  `testboot`), synced at every report and not while the automatic setup runs (its
+  progress is the capability's `setup` field then). A withdrawn machine sends no reports,
+  so its `register` problem stays local (`status` shows it).
+- **`capability.setup`** = {step, state, message, at}: `step` is the setup step id
+  (`deps`, `image`, `test-boot`), `state` one of running, passed, failed, interrupted.
+- **Command-line runs** (`check --boot`, `check --boot --pair`, `setup`) write their
+  failures to the same `errors.json`; the daemon sends them with its next report.

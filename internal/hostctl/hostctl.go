@@ -7,6 +7,7 @@ package hostctl
 import (
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
@@ -43,7 +44,18 @@ type Agent struct {
 	// in a goroutine at once.
 	Later func(f func())
 
+	// ConfigDir holds the host's switch for automatic updates (autoupdate.go);
+	// "" means they are on.
+	ConfigDir string
+	// Now is the clock (nil: time.Now); Log says what an automatic update did.
+	Now func() time.Time
+	Log func(format string, args ...interface{})
+
 	once sync.Once
+
+	autoMu    sync.Mutex
+	lastCheck int64
+	tried     map[string]time.Time
 }
 
 var _ control.Host = (*Agent)(nil)

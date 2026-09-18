@@ -90,6 +90,9 @@ type CapabilityResponse struct {
 	Speedtest *speedtest.Target `json:"speedtest,omitempty"`
 	// MeasureURL is where a measurement is posted.
 	MeasureURL string `json:"measure_url,omitempty"`
+	// AgentUpdate names the release this machine should run, when it runs an
+	// older one (CONTRACT-ops B2); push is a staff or host request.
+	AgentUpdate *control.AgentUpdate `json:"agent_update,omitempty"`
 }
 
 // ReportCapability tells the control plane whether this machine can host a

@@ -2,11 +2,15 @@ package sshtunnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -62,35 +66,112 @@ func BuildArgs(c Config) []string {
 	return args
 }
 
+// Timings, overridable by tests. A run that lasts Healthy counts as up (and
+// resets the backoff); the tunnel is reported failing once it has not been up
+// for FailingAfter.
+var (
+	FirstBackoff = 2 * time.Second
+	MaxBackoff   = 60 * time.Second
+	Healthy      = 60 * time.Second
+	FailingAfter = 5 * time.Minute
+	// sshBinary is the ssh client run for the tunnel.
+	sshBinary = "ssh"
+)
+
+// Watch is told how the tunnel is doing: Failing when it has not stayed up
+// for FailingAfter (again at every retry after that, with the latest error
+// and the last lines ssh printed), Up once a run has lasted Healthy.
+type Watch interface {
+	Failing(since time.Time, err error, detail string)
+	Up()
+}
+
 // Supervise runs the reverse tunnel and restarts it with exponential backoff
 // until ctx is cancelled (autossh-style persistence). A tunnel that stays up for
 // a while resets the backoff so transient drops reconnect fast.
-func Supervise(ctx context.Context, c Config) {
-	backoff := 2 * time.Second
-	const maxBackoff = 60 * time.Second
+func Supervise(ctx context.Context, c Config) { SuperviseWith(ctx, c, nil) }
+
+// SuperviseWith is Supervise that tells w (nil: nobody) how it goes.
+func SuperviseWith(ctx context.Context, c Config, w Watch) {
+	backoff := FirstBackoff
+	var mu sync.Mutex
+	var failingSince time.Time // zero while up
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		cmd := exec.CommandContext(ctx, "ssh", BuildArgs(c)...)
+		cmd := exec.CommandContext(ctx, sshBinary, BuildArgs(c)...)
+		tail := &tailBuffer{max: 1500}
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
 		start := time.Now()
+		mu.Lock()
+		if failingSince.IsZero() {
+			failingSince = start
+		}
+		mu.Unlock()
+		// Up once this run has lasted Healthy.
+		healthy := time.AfterFunc(Healthy, func() {
+			mu.Lock()
+			failingSince = time.Time{}
+			mu.Unlock()
+			if w != nil {
+				w.Up()
+			}
+		})
 		err := cmd.Run()
+		healthy.Stop()
 		if ctx.Err() != nil {
 			return
 		}
-		if time.Since(start) > maxBackoff {
-			backoff = 2 * time.Second
+		if time.Since(start) > MaxBackoff {
+			backoff = FirstBackoff
+		}
+		if err == nil {
+			err = errors.New("ssh exited")
 		}
 		log.Printf("ssh tunnel exited (%v); reconnecting in %v", err, backoff)
+		mu.Lock()
+		since := failingSince
+		if since.IsZero() {
+			// It was up; the failure starts now.
+			failingSince = time.Now()
+			since = failingSince
+		}
+		mu.Unlock()
+		if w != nil && time.Since(since) >= FailingAfter {
+			w.Failing(since, err, tail.String())
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(backoff):
 		}
-		if backoff < maxBackoff {
+		if backoff < MaxBackoff {
 			backoff *= 2
 		}
 	}
+}
+
+// tailBuffer keeps the last max bytes written to it.
+type tailBuffer struct {
+	mu  sync.Mutex
+	max int
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.buf))
 }

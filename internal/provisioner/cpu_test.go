@@ -2,9 +2,12 @@ package provisioner
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
@@ -177,5 +180,66 @@ func TestSetupIDsAreNeverRentals(t *testing.T) {
 	}
 	if m.started != 0 {
 		t.Errorf("started %d", m.started)
+	}
+}
+
+type recordedProblems struct {
+	mu                    sync.Mutex
+	raised, noted, solved []string
+}
+
+func (r *recordedProblems) Raise(area, message, detail string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.raised = append(r.raised, area+": "+message)
+	return true
+}
+func (r *recordedProblems) Note(area, message, detail string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.noted = append(r.noted, area+": "+message)
+	return true
+}
+func (r *recordedProblems) Resolve(area, message string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.solved = append(r.solved, area+": "+message)
+}
+func (r *recordedProblems) count() (int, int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.raised), len(r.noted), len(r.solved)
+}
+
+// A rental that did not start, and a cleanup that did not verify, are
+// problems for the marketplace; a clean teardown resolves the second.
+func TestRentalFailuresAreProblems(t *testing.T) {
+	noRelay(t)
+	p := Detect(cpuHost(t), "linux", "amd64", dataDir, version)
+	pr := &recordedProblems{}
+	p.SetProblems(pr)
+	withFakeForward(t, nil)
+	m := &fakeMachine{stopRes: clean(), startErr: errors.New("boot microVM: qemu exited")}
+	p.machine, p.async = m, false
+	_ = p.Provision("R1", renterKey(t))
+	m.startErr = nil
+	if err := p.Provision("R2", renterKey(t)); err != nil {
+		t.Fatal(err)
+	}
+	m.stopRes = vmrt.StopResult{Wiped: false, GPUClean: true, Detail: []string{"the disk was not wiped"}}
+	_ = p.Teardown("R2")
+	for i := 0; i < 200; i++ {
+		if r, n, _ := pr.count(); r >= 1 && n >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if len(pr.noted) != 1 || !strings.Contains(pr.noted[0], "rental R1 did not start: boot microVM: qemu exited") {
+		t.Errorf("noted = %q", pr.noted)
+	}
+	if len(pr.raised) != 1 || pr.raised[0] != "rental: "+DirtyProblem {
+		t.Errorf("raised = %q", pr.raised)
 	}
 }

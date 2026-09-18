@@ -48,6 +48,71 @@ type Capability struct {
 	// from hosts that are not Linux.
 	Identity     *Identity     `json:"identity,omitempty"`
 	Interconnect *Interconnect `json:"interconnect,omitempty"`
+	// Errors are the agent's recent problems, newest first (at most
+	// MaxAgentErrors): whatever stopped, or stops, this machine being
+	// listed. Set when the capability is reported; absent before v0.2.0.
+	Errors []AgentError `json:"errors,omitempty"`
+	// AutoUpdate is the agent's automatic updating; absent before v0.2.0.
+	AutoUpdate *AutoUpdate `json:"auto_update,omitempty"`
+	// Setup is where the automatic setup stands; absent before v0.2.0 and on
+	// a machine it never ran on.
+	Setup *SetupProgress `json:"setup,omitempty"`
+}
+
+// SetupProgress is the automatic setup's last attempt in brief: the step
+// ("deps", "image", "test-boot"), its state ("running", "passed", "failed",
+// "interrupted"), the line a host sees, and when that step started or the
+// attempt ended.
+type SetupProgress struct {
+	Step    string `json:"step"`
+	State   string `json:"state"`
+	Message string `json:"message"`
+	At      int64  `json:"at"`
+}
+
+// MaxAgentErrors is how many problems the agent keeps and reports.
+const MaxAgentErrors = 20
+
+// Agent error areas.
+const (
+	AreaSetup     = "setup"
+	AreaPreflight = "preflight"
+	AreaTestBoot  = "testboot"
+	AreaUpdate    = "update"
+	AreaTunnel    = "tunnel"
+	AreaReport    = "report"
+	AreaRental    = "rental"
+	AreaRegister  = "register"
+	AreaAgent     = "agent"
+)
+
+// AgentError is one problem the agent had: when, in which part of it, what
+// in one plain line (at most 300 characters), optionally more detail (at most
+// 2000: the last lines of a failing command, say), and whether it still
+// stops the machine now.
+type AgentError struct {
+	At      int64  `json:"at"`
+	Area    string `json:"area"`
+	Message string `json:"message"`
+	Detail  string `json:"detail,omitempty"`
+	Active  bool   `json:"active"`
+}
+
+// AutoUpdate is the agent's automatic updating: whether the host left it on,
+// when the agent last heard from the marketplace which release is current,
+// and the last update (update.json), if any.
+type AutoUpdate struct {
+	Enabled   bool        `json:"enabled"`
+	LastCheck int64       `json:"last_check"`
+	Last      interface{} `json:"last"`
+}
+
+// AgentUpdate is the marketplace telling the agent which release to run
+// (the answer to a capability report, or a status request): push is a staff
+// or host request, applied even when automatic updates are off.
+type AgentUpdate struct {
+	Version string `json:"version"`
+	Push    bool   `json:"push"`
 }
 
 // Guest is a rental VM's size on this machine.
@@ -262,8 +327,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"identity_confirmed": c.Identity != nil && c.Identity.ConfirmedDGXSpark,
 	}
 	if s.host != nil {
+		// The marketplace may say which release this machine should run on
+		// the status request itself: acted on first, so "update" below shows
+		// an update it started.
+		au, auto := s.host.(AutoUpdater)
+		if auto {
+			if u := requestedUpdate(r); u != nil {
+				au.Offer(u)
+			}
+		}
 		body["agent_version"] = s.host.AgentVersion()
 		body["update"] = s.host.UpdateRecord()
+		if auto {
+			body["auto_update"] = au.AutoUpdateStatus()
+		}
 	}
 	if ps, ok := s.prov.(PairStatuser); ok {
 		if pair := ps.PairStatus(); pair != nil {
@@ -282,6 +359,59 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 type updateReq struct {
 	Version string `json:"version"`
+}
+
+// AutoUpdater is a Host that updates itself when the marketplace names a
+// newer release (CONTRACT-ops A2).
+type AutoUpdater interface {
+	// Offer acts on the marketplace's agent_update: started says an update
+	// began, else why says what it waits for.
+	Offer(u *AgentUpdate) (started bool, why string)
+	AutoUpdateStatus() *AutoUpdate
+}
+
+// UpdateOfferHeader carries the marketplace's update offer on its heartbeat
+// (its own GET /status, every 30 seconds): {"version":"vX.Y.Z","push":bool}.
+const UpdateOfferHeader = "X-Marketplace-Agent-Update"
+
+var releaseVersion = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
+
+// ParseUpdateOffer reads an update offer strictly: a JSON object with a
+// release version (vX.Y.Z) and a boolean push, nothing else; anything else is
+// no offer.
+func ParseUpdateOffer(raw string) *AgentUpdate {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 256 {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &fields) != nil {
+		return nil
+	}
+	var u AgentUpdate
+	for k, v := range fields {
+		switch k {
+		case "version":
+			if json.Unmarshal(v, &u.Version) != nil {
+				return nil
+			}
+		case "push":
+			if json.Unmarshal(v, &u.Push) != nil {
+				return nil
+			}
+		default:
+			return nil
+		}
+	}
+	if !releaseVersion.MatchString(u.Version) {
+		return nil
+	}
+	return &u
+}
+
+// requestedUpdate is the update offer a status request carries, if any.
+func requestedUpdate(r *http.Request) *AgentUpdate {
+	return ParseUpdateOffer(r.Header.Get(UpdateOfferHeader))
 }
 
 // handleUpdate starts an update to the requested release and answers at once
