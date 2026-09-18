@@ -309,13 +309,18 @@ func BakeUserData(driver string) (string, error) {
 	b.WriteString("write_files:\n")
 	b.WriteString(sayScript)
 	b.WriteString("runcmd:\n")
+	// The RDMA tools are an extra: a bake whose RDMA step fails still makes a
+	// base image every single rental can use, and says so by not reporting
+	// the extra (a linked pair then asks for a rebuild).
 	fmt.Fprintf(&b, "  - [bash, -c, %q]\n", strings.Join([]string{
 		"export DEBIAN_FRONTEND=noninteractive",
 		"ok=1",
+		"rdma=1",
 		"apt-get update || ok=0",
 		nvidia,
-		install + " " + strings.Join(RDMAPackages, " ") + " || ok=0",
-		"modinfo mlx5_ib >/dev/null 2>&1 || " + install + " linux-modules-extra-$(uname -r) || ok=0",
+		install + " " + strings.Join(RDMAPackages, " ") + " || rdma=0",
+		"modinfo mlx5_ib >/dev/null 2>&1 || " + install + " linux-modules-extra-$(uname -r) || rdma=0",
+		"if [ $ok = 1 ] && [ $rdma = 1 ]; then /usr/local/sbin/gpuagent-say '" + markBake + " EXTRA " + ExtraRDMA + "'; fi",
 		"if [ $ok = 1 ]; then /usr/local/sbin/gpuagent-say '" + markBake + " DONE'; else /usr/local/sbin/gpuagent-say '" + markBake + " FAIL'; fi",
 		"cloud-init clean --logs --machine-id",
 		"poweroff",

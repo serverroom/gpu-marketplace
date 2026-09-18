@@ -228,6 +228,14 @@ DESIGN.md (reasoning). Everything not listed here is implemented as written.
     takes interconnect.ready away until the test passes again. A test that cannot start at all (blocked by
     other problems, a rental present, another check running) records nothing.
 
+## Base image (DESIGN s5.3)
+
+19a. **The RDMA step of the bake is best-effort.** Every bake installs the RDMA tools, but a failure there no
+    longer fails the bake: the image still serves single rentals (as in v0.1.9), and `Extras: ["rdma"]` is
+    recorded only when the step succeeded (the VM prints `GPUAGENT-BAKE EXTRA rdma`). A pair then asks for a
+    rebuild (P9). DESIGN s5.3 bakes them unconditionally; a package missing on one architecture would have
+    broken every single host's bake.
+
 ## CPU-only (CONTRACT-v2 s1)
 
 19. **`gpu_count` is reported on Linux only** (`*int`, omitted on macOS/Windows) and `kind` stays `qemu-vfio`

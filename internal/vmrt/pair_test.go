@@ -405,7 +405,7 @@ func TestBakeInstallsTheRDMATools(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"rdma-core ibverbs-utils perftest infiniband-diags rdmacm-utils ethtool",
-		"modinfo mlx5_ib", "linux-modules-extra-$(uname -r)", "GPUAGENT-BAKE DONE", "GPUAGENT-BAKE FAIL"} {
+		"modinfo mlx5_ib", "linux-modules-extra-$(uname -r)", "GPUAGENT-BAKE EXTRA rdma", "GPUAGENT-BAKE DONE", "GPUAGENT-BAKE FAIL"} {
 		if !strings.Contains(ud, want) {
 			t.Errorf("bake user-data missing %q:\n%s", want, ud)
 		}
@@ -428,7 +428,7 @@ func bakeHost(t *testing.T) *fakehost.Host {
 	h.Downloads[cloudImageBase()+"SHA256SUMS"] = []byte(hex.EncodeToString(sum[:]) + " *" + cloudImageName("amd64") + "\n")
 	h.Downloads[cloudImageBase()+cloudImageName("amd64")] = image
 	delete(h.OnRun, "systemd-run --unit=") // the bake VM powers itself off
-	h.Files[lastSerialLog(dataDir)] = []byte("GPUAGENT-BAKE DONE\n")
+	h.Files[lastSerialLog(dataDir)] = []byte("GPUAGENT-BAKE EXTRA rdma\nGPUAGENT-BAKE DONE\n")
 	h.OnRun["qemu-img convert"] = func(h *fakehost.Host, cmd string) { h.SetFile(fakehost.LastField(cmd), []byte("golden")) }
 	return h
 }
@@ -447,6 +447,17 @@ func TestPrepareRecordsTheRDMAExtra(t *testing.T) {
 	}
 	if !GoldenHasExtra(h, testSpec(), ExtraRDMA) || GoldenProblem(h, testSpec()) != "" {
 		t.Errorf("the new image is not accepted")
+	}
+
+	// The RDMA step failed inside the bake: the image still serves single
+	// rentals, and does not claim the extra.
+	h = bakeHost(t)
+	h.Files[lastSerialLog(dataDir)] = []byte("GPUAGENT-BAKE DONE\n")
+	if err := Prepare(h, testSpec(), &fakeFence{h: h}, "v0.2.0-dev", PrepareOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if GoldenHasExtra(h, testSpec(), ExtraRDMA) || GoldenProblem(h, testSpec()) != "" {
+		t.Errorf("an image without the RDMA tools: extra=%v problem=%q", GoldenHasExtra(h, testSpec(), ExtraRDMA), GoldenProblem(h, testSpec()))
 	}
 }
 

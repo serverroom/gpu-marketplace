@@ -344,11 +344,18 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	if err := h.Rename(tmp, spec.GoldenImage); err != nil {
 		return err
 	}
-	// Every image carries the RDMA tools (cheap), so a machine never has to
-	// rebuild to become half of a pair.
+	// Every bake installs the RDMA tools (cheap), so a machine never has to
+	// rebuild to become half of a pair -- recorded only when that step
+	// succeeded, since a single rental does not need them.
+	var extras []string
+	if strings.Contains(string(serial), markBake+" EXTRA "+ExtraRDMA) {
+		extras = append(extras, ExtraRDMA)
+	} else {
+		log("The RDMA tools could not be installed in the base image; single rentals are unaffected, but this machine cannot be half of a linked pair until a rebuild installs them.")
+	}
 	info, _ := json.MarshalIndent(GoldenInfo{Base: name, BaseSHA256: want, Driver: o.Driver,
 		AgentVersion: version, CreatedAt: time.Now().Unix(), DriverSource: o.DriverSource,
-		HostDriver: host.Describe(), Extras: []string{ExtraRDMA}}, "", "  ")
+		HostDriver: host.Describe(), Extras: extras}, "", "  ")
 	_ = h.WriteFile(spec.GoldenImage+".json", info, 0600)
 	log("Golden image ready. Next: sudo gpu-agent check --boot")
 	return nil
