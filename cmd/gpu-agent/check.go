@@ -197,8 +197,15 @@ func runHeadless(yes bool) {
 	fmt.Println("This machine now starts without a desktop.")
 	fmt.Println("Next: sudo gpu-agent check --boot")
 	os.Stdout.Sync()
-	if err := vmrt.CloseDesktop(h); err != nil {
+	notRestarted, err := vmrt.CloseDesktop(h)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "the desktop could not be closed now (%v); restart the machine instead ('sudo reboot').\n", err)
+		os.Exit(1)
+	}
+	for _, unit := range notRestarted {
+		fmt.Fprintf(os.Stderr, "%s stopped with the desktop and did not start again; run 'sudo systemctl start %s'.\n", unit, unit)
+	}
+	if len(notRestarted) > 0 {
 		os.Exit(1)
 	}
 }

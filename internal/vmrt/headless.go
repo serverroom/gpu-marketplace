@@ -69,11 +69,28 @@ func MakeHeadless(h Host, dataDir string) (previous string, err error) {
 
 // CloseDesktop stops the running desktop now by switching to the headless
 // target. Anything running inside the desktop session closes with it.
-func CloseDesktop(h Host) error {
-	if err := h.Run("systemctl", "isolate", headlessTarget); err != nil {
-		return fmt.Errorf("close the desktop: %w", err)
+//
+// Isolating a target stops every unit it does not want -- NVIDIA's own
+// services too: on Ubuntu nvidia-persistenced is static, wanted by the NVIDIA
+// device rather than by any target, and stayed dead after an isolate on a real
+// host. So the ones running before are started again after; notRestarted names
+// any that would not start.
+func CloseDesktop(h Host) (notRestarted []string, err error) {
+	var running []string
+	for _, svc := range NVIDIAServices {
+		if h.Run("systemctl", "is-active", "--quiet", svc.Unit) == nil {
+			running = append(running, svc.Unit)
+		}
 	}
-	return nil
+	if err := h.Run("systemctl", "isolate", headlessTarget); err != nil {
+		return nil, fmt.Errorf("close the desktop: %w", err)
+	}
+	for _, unit := range running {
+		if h.Run("systemctl", "start", unit) != nil {
+			notRestarted = append(notRestarted, unit)
+		}
+	}
+	return notRestarted, nil
 }
 
 // LoadHeadless reads the record MakeHeadless left, or an error wrapping

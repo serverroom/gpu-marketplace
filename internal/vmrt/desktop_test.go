@@ -183,3 +183,37 @@ func TestNonSparkDesktopIsStillRefused(t *testing.T) {
 		t.Error("a non-Spark's display manager was touched")
 	}
 }
+
+// The Spark path closes the desktop by stopping its display manager, never by
+// isolating a target, so it cannot take NVIDIA's services down on the side:
+// the only ones stopped are the ones the rental records, and after the rental
+// every service that ran before runs again.
+func TestSparkDesktopLeavesNVIDIAServicesAsItFoundThem(t *testing.T) {
+	h := sparkHost()
+	h.SetFail("systemctl is-active --quiet nvidia-persistenced", nil)
+	h.OnRun["systemctl stop nvidia-persistenced"] = func(h *fakehost.Host, _ string) {
+		h.SetFail("systemctl is-active --quiet nvidia-persistenced", errors.New("inactive"))
+	}
+	h.OnRun["systemctl start nvidia-persistenced"] = func(h *fakehost.Host, _ string) {
+		h.SetFail("systemctl is-active --quiet nvidia-persistenced", nil)
+	}
+	rt, _ := sparkRuntime(h, func() bool { return true })
+	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if h.Ran("run systemctl isolate") {
+		t.Error("the Spark's desktop was closed by isolating a target")
+	}
+	st, _ := LoadState(h, dataDir)
+	if st == nil || strings.Join(st.StoppedServices, ",") != "nvidia-persistenced" {
+		t.Fatalf("stopped services not recorded: %+v", st)
+	}
+	if res := rt.Stop(); !res.Clean() {
+		t.Fatalf("Stop = %+v", res)
+	}
+	for _, unit := range []string{"nvidia-persistenced", dm} {
+		if h.Run("systemctl", "is-active", "--quiet", unit) != nil {
+			t.Errorf("%s is not running after the rental", unit)
+		}
+	}
+}

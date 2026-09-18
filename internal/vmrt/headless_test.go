@@ -2,6 +2,8 @@ package vmrt
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/serverroom/gpu-marketplace/internal/vmrt/fakehost"
@@ -50,11 +52,56 @@ func TestMakeHeadlessTwiceStillRemembersTheDesktop(t *testing.T) {
 
 func TestCloseDesktopIsolatesTheHeadlessTarget(t *testing.T) {
 	h := desktopMachine()
-	if err := CloseDesktop(h); err != nil {
+	if _, err := CloseDesktop(h); err != nil {
 		t.Fatal(err)
 	}
 	if !h.Ran("run systemctl isolate multi-user.target") {
 		t.Error("the desktop was not closed")
+	}
+}
+
+// nvidiaServicesHost has nvidia-persistenced running and nvidia-powerd and
+// DCGM not, with systemd's isolate side effect: on Ubuntu nvidia-persistenced
+// is static (wanted by the NVIDIA device, not by a target), so isolating
+// multi-user.target stops it -- as it did on a real host.
+func nvidiaServicesHost() *fakehost.Host {
+	h := desktopMachine()
+	for _, unit := range []string{"nvidia-powerd", "nvidia-dcgm"} {
+		h.SetFail("systemctl is-active --quiet "+unit, errors.New("inactive"))
+	}
+	h.OnRun["systemctl isolate"] = func(h *fakehost.Host, _ string) {
+		h.SetFail("systemctl is-active --quiet nvidia-persistenced", errors.New("inactive"))
+	}
+	h.OnRun["systemctl start nvidia-persistenced"] = func(h *fakehost.Host, _ string) {
+		h.SetFail("systemctl is-active --quiet nvidia-persistenced", nil)
+	}
+	return h
+}
+
+func TestCloseDesktopStartsNVIDIAServicesTheIsolateStopped(t *testing.T) {
+	h := nvidiaServicesHost()
+	notRestarted, err := CloseDesktop(h)
+	if err != nil || len(notRestarted) != 0 {
+		t.Fatalf("CloseDesktop = %v, %v", notRestarted, err)
+	}
+	before(t, h, "run systemctl isolate multi-user.target", "run systemctl start nvidia-persistenced")
+	if h.Run("systemctl", "is-active", "--quiet", "nvidia-persistenced") != nil {
+		t.Error("nvidia-persistenced is dead after the desktop closed")
+	}
+	for _, unit := range []string{"nvidia-powerd", "nvidia-dcgm"} {
+		if h.Ran("run systemctl start " + unit) {
+			t.Errorf("%s was started although it was not running before", unit)
+		}
+	}
+}
+
+func TestCloseDesktopSaysWhichServiceWouldNotStart(t *testing.T) {
+	h := nvidiaServicesHost()
+	delete(h.OnRun, "systemctl start nvidia-persistenced")
+	h.SetFail("systemctl start nvidia-persistenced", errors.New("Job for nvidia-persistenced.service failed"))
+	notRestarted, err := CloseDesktop(h)
+	if err != nil || strings.Join(notRestarted, ",") != "nvidia-persistenced" {
+		t.Errorf("CloseDesktop = %v, %v", notRestarted, err)
 	}
 }
 

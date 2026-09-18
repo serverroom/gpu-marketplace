@@ -120,3 +120,13 @@ made asynchronous) and the transient `nvidia-smi` holder fix.
 
 24. `Prepare` and `Stop` now name the last serial log the same way (a Windows-only test
     mismatch); `fakehost` gained OnSleep/SetLink/DeleteLink/Count/SleptFor for the tests.
+25. **`runtime prepare --headless` starts NVIDIA's services again after closing the
+    desktop** (found on SID 2457): `systemctl isolate multi-user.target` also stops
+    nvidia-persistenced on Ubuntu (a static unit wanted by the NVIDIA device, not by a
+    target). The NVIDIA services running before the isolate are started after it, and any
+    that will not start is named with the command to start it. This runs in the command's
+    own process, so it is done when the command is run over SSH, as the command already
+    asks; a command typed in a terminal on the desktop being closed may die with it. The
+    DGX Spark path stops only the display manager (no isolate) and was checked not to
+    have this side effect: the NVIDIA services it stops are the ones the rental records
+    and restarts.
