@@ -126,11 +126,18 @@ func (p *Provisioner) refreshWith(rep interconnect.Report) bool {
 }
 
 // RecoverPorts puts back any ConnectX-7 port a cable check that never finished
-// (the agent was killed mid-run) left up or with IPv6 off.
+// (the agent was killed mid-run) left up or with IPv6 off. A run that still
+// holds the ports -- a pair test from the command line -- owns the record, and
+// is left alone.
 func (p *Provisioner) RecoverPorts() {
-	if p.host == nil {
+	if !p.hasPairRuntime() {
 		return
 	}
+	unlock, ok, err := p.lockFrames()
+	if err != nil || !ok {
+		return
+	}
+	defer unlock()
 	for _, problem := range interconnect.RecoverPorts(p.host, p.dataDir) {
 		log.Printf("restoring a ConnectX-7 port after an unfinished cable check: %s", problem)
 	}

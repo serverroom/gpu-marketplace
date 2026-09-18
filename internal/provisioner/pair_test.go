@@ -415,3 +415,22 @@ func TestPairTestRefusalsAndFailures(t *testing.T) {
 		t.Errorf("a blocked test recorded %+v", saved)
 	}
 }
+
+// An agent that starts while a pair test from the command line holds the ports
+// leaves them to it; once nobody holds them it puts them back from the record.
+func TestRecoverPortsLeavesARunningTestAlone(t *testing.T) {
+	a, _, _ := sparkPair(t)
+	h := a.host.(*fakehost.Host)
+	journal := interconnect.JournalPath(dataDir)
+	h.Files[journal] = []byte(`[{"netdev":"enP1p1s0f0np0","was_up":false}]`)
+	unlock, _, _ := a.lockFrames()
+	a.RecoverPorts()
+	if h.Ran("run ip link set dev enP1p1s0f0np0 down") || !h.Exists(journal) {
+		t.Fatalf("recovered under a running test: %v", h.Calls)
+	}
+	unlock()
+	a.RecoverPorts()
+	if !h.Ran("run ip link set dev enP1p1s0f0np0 down") || h.Exists(journal) {
+		t.Errorf("not recovered: %v", h.Calls)
+	}
+}
