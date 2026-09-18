@@ -148,14 +148,92 @@ func ReleaseVFIO(h Host, bound []BoundDevice) (ok bool, detail []string) {
 	return ok, detail
 }
 
-// GPUHolders are the host processes with an NVIDIA device open, other than
-// nvidia-persistenced (which the runtime stops itself). A GPU that something
-// holds cannot be unbound -- the kernel waits for the holder -- so the rental
-// is refused while any exist.
-func GPUHolders(h Host) []string {
+// NVIDIAService is one of NVIDIA's own background services. They open the
+// GPU's device files on most driver installs, but they are not anybody's
+// workload: the runtime stops the ones that are running for a rental and
+// starts them again when it ends.
+type NVIDIAService struct {
+	Unit string // systemd unit
+	Exe  string // the executable it runs
+}
+
+// NVIDIAServices are the services the runtime stops and restarts itself.
+var NVIDIAServices = []NVIDIAService{
+	{Unit: "nvidia-persistenced", Exe: "nvidia-persistenced"},
+	{Unit: "nvidia-powerd", Exe: "nvidia-powerd"},
+	{Unit: "nvidia-dcgm", Exe: "nv-hostengine"},
+}
+
+// desktopPrefixes name display servers, desktop shells and login screens. A
+// GPU that draws this machine's desktop cannot be handed to a microVM: the
+// machine has to run without a desktop first (runtime prepare --headless).
+// Prefixes, because /proc/<pid>/comm is cut to 15 characters
+// ("mutter-x11-frames" reads "mutter-x11-fram").
+var desktopPrefixes = []string{
+	"Xorg", "Xwayland", "gnome-shell", "gnome-session", "gnome-remote-de", "mutter", "gdm", "sddm",
+	"lightdm", "kwin", "plasmashell", "xfwm4", "xfce4-session", "cinnamon", "mate-session", "budgie-wm",
+}
+
+// commLen is how much of a process name /proc/<pid>/comm keeps.
+const commLen = 15
+
+// processName is the name of a process: its executable's file name when that
+// can be read, which is never truncated, else /proc/<pid>/comm.
+func processName(h Host, pid string) string {
+	if exe, err := h.Readlink("/proc/" + pid + "/exe"); err == nil {
+		exe = strings.TrimSuffix(exe, " (deleted)")
+		if i := strings.LastIndex(exe, "/"); i >= 0 {
+			exe = exe[i+1:]
+		}
+		if exe != "" {
+			return exe
+		}
+	}
+	comm, _ := h.ReadFile("/proc/" + pid + "/comm")
+	return strings.TrimSpace(string(comm))
+}
+
+// sameProgram reports whether a process name is the executable exe, allowing
+// for comm's truncation.
+func sameProgram(name, exe string) bool {
+	if name == exe {
+		return true
+	}
+	return len(exe) > commLen && len(name) == commLen && strings.HasPrefix(exe, name)
+}
+
+// IsNVIDIAService reports whether a process name is one of NVIDIAServices.
+func IsNVIDIAService(name string) bool {
+	for _, s := range NVIDIAServices {
+		if sameProgram(name, s.Exe) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsDesktopProcess reports whether a process name is a display server,
+// desktop shell or login screen.
+func IsDesktopProcess(name string) bool {
+	if name == "X" {
+		return true
+	}
+	for _, p := range desktopPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClassifyGPUHolders lists the host processes with an NVIDIA device open, as
+// "name (pid N)", split into the machine's desktop and everything else.
+// NVIDIA's own services are left out: the runtime stops them itself. A GPU
+// that something holds cannot be unbound -- the kernel waits for the holder --
+// so a rental is refused while either list is non-empty.
+func ClassifyGPUHolders(h Host) (desktop, other []string) {
 	fds, _ := h.Glob("/proc/[0-9]*/fd/*")
 	seen := map[string]bool{}
-	var holders []string
 	for _, fd := range fds {
 		target, err := h.Readlink(fd)
 		if err != nil || !strings.HasPrefix(target, "/dev/nvidia") {
@@ -166,17 +244,38 @@ func GPUHolders(h Host) []string {
 			continue
 		}
 		pid := parts[2]
-		comm, _ := h.ReadFile("/proc/" + pid + "/comm")
-		name := strings.TrimSpace(string(comm))
-		if name == "nvidia-persistenced" {
+		name := processName(h, pid)
+		if IsNVIDIAService(name) {
 			continue
 		}
 		who := fmt.Sprintf("%s (pid %s)", name, pid)
-		if !seen[who] {
-			seen[who] = true
-			holders = append(holders, who)
+		if seen[who] {
+			continue
+		}
+		seen[who] = true
+		if IsDesktopProcess(name) {
+			desktop = append(desktop, who)
+		} else {
+			other = append(other, who)
 		}
 	}
-	sort.Strings(holders)
-	return holders
+	sort.Strings(desktop)
+	sort.Strings(other)
+	return desktop, other
+}
+
+// GPUHolders are the host processes with an NVIDIA device open, other than
+// NVIDIA's own services: the desktop and everything else together.
+func GPUHolders(h Host) []string {
+	desktop, other := ClassifyGPUHolders(h)
+	all := append(append([]string{}, desktop...), other...)
+	sort.Strings(all)
+	return all
+}
+
+// DesktopOnGPUProblem is the refusal for a machine whose desktop runs on the
+// GPU, naming the processes and the one command that fixes it.
+func DesktopOnGPUProblem(desktop []string) string {
+	return fmt.Sprintf("this machine's desktop is running on the GPU (%s); a hosting machine runs without one: "+
+		"run 'sudo gpu-agent runtime prepare --headless', then try again", strings.Join(desktop, ", "))
 }

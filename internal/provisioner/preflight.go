@@ -73,6 +73,14 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	if len(rep.BDFs) > 0 && len(rep.Reasons) == 0 {
 		rep.Reasons = append(rep.Reasons, vmrt.GroupProblems(h, rep.BDFs)...)
 	}
+	// A desktop drawn on the GPU holds it for as long as it runs. Desktop
+	// machines such as the DGX Spark ship that way; say so before a test boot
+	// finds out, with the one command that fixes it.
+	if rep.Vendor == VendorNVIDIA {
+		if desktop, _ := vmrt.ClassifyGPUHolders(h); len(desktop) > 0 {
+			add("%s", vmrt.DesktopOnGPUProblem(desktop))
+		}
+	}
 
 	if missing := vmrt.MissingTools(h, spec.Arch); len(missing) > 0 {
 		add("the rental runtime's tools are missing (%s); run 'sudo gpu-agent runtime prepare --install-deps'", strings.Join(missing, ", "))

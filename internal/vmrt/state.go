@@ -12,18 +12,38 @@ import (
 // finds it on the next start and knows exactly what to tear down, instead of
 // leaving a GPU on vfio-pci and an encrypted mapping nobody remembers.
 type State struct {
-	RentalID            string        `json:"rental_id"`
-	Rental              Rental        `json:"rental"`
-	Fenced              bool          `json:"fenced"`
-	Net                 NetState      `json:"net"`
-	Disk                DiskState     `json:"disk"`
-	Devices             []BoundDevice `json:"devices"`
-	StoppedPersistenced bool          `json:"stopped_persistenced"`
-	StartedAt           int64         `json:"started_at"`
+	RentalID string        `json:"rental_id"`
+	Rental   Rental        `json:"rental"`
+	Fenced   bool          `json:"fenced"`
+	Net      NetState      `json:"net"`
+	Disk     DiskState     `json:"disk"`
+	Devices  []BoundDevice `json:"devices"`
+	// StoppedPersistenced is what agents up to v0.1.8 recorded; still read so a
+	// rental they started is torn down properly.
+	StoppedPersistenced bool `json:"stopped_persistenced,omitempty"`
+	// StoppedServices are the NVIDIA services the rental stopped (NVIDIAServices).
+	StoppedServices []string `json:"stopped_services,omitempty"`
+	StartedAt       int64    `json:"started_at"`
 	// Dirty is set when a teardown did not verify. The state stays on disk, so
 	// the machine refuses the next rental until it is cleaned up.
 	Dirty       bool     `json:"dirty"`
 	DirtyDetail []string `json:"dirty_detail,omitempty"`
+}
+
+// ServicesToRestart are the NVIDIA services to start again when the rental
+// ends: the ones it stopped, and nvidia-persistenced for a rental an older
+// agent started.
+func (st *State) ServicesToRestart() []string {
+	units := append([]string{}, st.StoppedServices...)
+	if st.StoppedPersistenced {
+		for _, u := range units {
+			if u == persistencedSvc {
+				return units
+			}
+		}
+		units = append(units, persistencedSvc)
+	}
+	return units
 }
 
 // StatePath is where the rental state lives.

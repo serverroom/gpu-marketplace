@@ -46,6 +46,25 @@ func goodHost(t *testing.T, gpuLine string) *fakehost.Host {
 
 func reasons(rep HostReport) string { return strings.Join(rep.Reasons, " | ") }
 
+// A DGX Spark straight out of the box draws its desktop on the GB10. The check
+// must say so, and name the command that fixes it, before a test boot finds out.
+func TestPreflightNamesADesktopOnTheGPU(t *testing.T) {
+	h := goodHost(t, "00000000:0F:01.0, NVIDIA GB10, [N/A]")
+	h.Links["/proc/2558/fd/7"] = "/dev/nvidia0"
+	h.Files["/proc/2558/comm"] = []byte("Xorg\n")
+	h.Links["/proc/2411/fd/7"] = "/dev/nvidia0"
+	h.Files["/proc/2411/comm"] = []byte("nvidia-persiste\n")
+	rep := Preflight(h, "linux", spec(), version)
+	got := reasons(rep)
+	if !strings.Contains(got, "desktop is running on the GPU (Xorg (pid 2558))") ||
+		!strings.Contains(got, "sudo gpu-agent runtime prepare --headless") {
+		t.Errorf("reasons = %q", got)
+	}
+	if strings.Contains(got, "persiste") {
+		t.Errorf("nvidia-persistenced was reported: %q", got)
+	}
+}
+
 // A machine that baked its image under an older agent keeps that image across the
 // upgrade. It must not rent out the old Ubuntu, nor an image nobody can name.
 func TestPreflightRefusesABaseImageFromAnotherRelease(t *testing.T) {

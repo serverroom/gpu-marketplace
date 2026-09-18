@@ -170,14 +170,24 @@ func (rt *Runtime) copyVars(r Rental) error {
 }
 
 func (rt *Runtime) takeGPUs(st *State, r *Rental) error {
-	if holders := GPUHolders(rt.h); len(holders) > 0 {
-		return fmt.Errorf("the GPU is in use on this machine by %s; stop them first", strings.Join(holders, ", "))
+	desktop, other := ClassifyGPUHolders(rt.h)
+	if len(desktop) > 0 {
+		return errors.New(DesktopOnGPUProblem(desktop))
 	}
-	if rt.h.Run("systemctl", "is-active", "--quiet", persistencedSvc) == nil {
-		if err := rt.h.Run("systemctl", "stop", persistencedSvc); err != nil {
-			return fmt.Errorf("stop %s: %w", persistencedSvc, err)
+	if len(other) > 0 {
+		return fmt.Errorf("the GPU is in use on this machine by %s; stop them first", strings.Join(other, ", "))
+	}
+	// NVIDIA's own services are stopped for the rental and started again when
+	// it ends. Recorded one at a time, so a start that dies halfway restarts
+	// exactly the ones it stopped.
+	for _, svc := range NVIDIAServices {
+		if rt.h.Run("systemctl", "is-active", "--quiet", svc.Unit) != nil {
+			continue
 		}
-		st.StoppedPersistenced = true
+		if err := rt.h.Run("systemctl", "stop", svc.Unit); err != nil {
+			return fmt.Errorf("stop %s: %w", svc.Unit, err)
+		}
+		st.StoppedServices = append(st.StoppedServices, svc.Unit)
 	}
 	funcs, err := GroupFunctions(rt.h, rt.spec.GPUs)
 	if err != nil {
@@ -277,8 +287,8 @@ func (rt *Runtime) Stop() StopResult {
 
 	released, detail := ReleaseVFIO(rt.h, st.Devices)
 	res.Detail = append(res.Detail, detail...)
-	if st.StoppedPersistenced {
-		_ = rt.h.Run("systemctl", "start", persistencedSvc)
+	for _, unit := range st.ServicesToRestart() {
+		_ = rt.h.Run("systemctl", "start", unit)
 	}
 	res.GPUClean = released && vmGone
 	if len(st.Devices) > 0 && res.GPUClean && rt.verifyGPU != nil && !rt.verifyGPU() {

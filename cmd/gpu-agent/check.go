@@ -141,12 +141,61 @@ func runSelfTest(svc service.Service, yes bool) {
 	os.Exit(2)
 }
 
+// runHeadless switches this machine to start without a desktop and closes the
+// running one, after saying exactly what happens and how to undo it. The
+// desktop closes last: it may be the session this command was typed in.
+func runHeadless(yes bool) {
+	h := vmrt.OSHost{}
+	dataDir := config.DataDir()
+	current, err := vmrt.DefaultTarget(h)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime prepare --headless failed: %v\n", err)
+		os.Exit(1)
+	}
+	desktop, _ := vmrt.ClassifyGPUHolders(h)
+
+	fmt.Println("A machine that hosts rentals runs without a desktop: while a desktop is on the screen, it holds")
+	fmt.Println("the GPU, and a rental cannot be given the GPU.")
+	fmt.Println()
+	fmt.Println("This will:")
+	fmt.Printf("  1. make this machine start without a desktop from now on (it starts into %s today)\n", current)
+	if len(desktop) > 0 {
+		fmt.Printf("  2. close the desktop now: %s\n", strings.Join(desktop, ", "))
+		fmt.Println("     Anything open on the screen closes with it. If you are typing this in a window on the")
+		fmt.Println("     machine's own screen, reconnect over SSH (or log in on the text screen) to continue.")
+	} else {
+		fmt.Println("  2. switch the running system to the same mode (no desktop is using the GPU right now)")
+	}
+	fmt.Println()
+	fmt.Println("Nothing else changes. 'sudo gpu-agent remove' brings the desktop back from the next start,")
+	fmt.Printf("and so does 'sudo systemctl set-default %s'.\n", current)
+	fmt.Println()
+	if !yes && !confirm("Continue? [y/N]: ") {
+		fmt.Println("Nothing was changed.")
+		return
+	}
+
+	if _, err := vmrt.MakeHeadless(h, dataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime prepare --headless failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("This machine now starts without a desktop.")
+	fmt.Println("Next: sudo gpu-agent check --boot")
+	os.Stdout.Sync()
+	if err := vmrt.CloseDesktop(h); err != nil {
+		fmt.Fprintf(os.Stderr, "the desktop could not be closed now (%v); restart the machine instead ('sudo reboot').\n", err)
+		os.Exit(1)
+	}
+}
+
 // runPrepare installs the runtime's packages (with --install-deps) and bakes
 // the rental base image.
 func runPrepare(args []string) {
 	fs := flag.NewFlagSet("runtime prepare", flag.ExitOnError)
 	driver := fs.String("driver", vmrt.DefaultDriver, "NVIDIA driver branch to bake into the rental image, e.g. 580-server-open or 580-server")
 	deps := fs.Bool("install-deps", false, "install QEMU, UEFI firmware, cloud-image-utils, cryptsetup and nftables with apt-get")
+	headless := fs.Bool("headless", false, "make this machine run without a desktop, so its GPU is free to rent (closes the desktop now); does nothing else")
+	yes := fs.Bool("yes", false, "with --headless: do not ask for confirmation")
 	fs.Parse(args)
 
 	if runtime.GOOS != "linux" {
@@ -156,6 +205,10 @@ func runPrepare(args []string) {
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stderr, "runtime prepare needs root: run 'sudo gpu-agent runtime prepare'")
 		os.Exit(1)
+	}
+	if *headless {
+		runHeadless(*yes)
+		return
 	}
 	spec := detectProvisioner().Runtime().Spec()
 	fence := netguard.New(vmrt.OSHost{}, netguard.Bridge, vmrt.GuestSubnet, netguard.HostNetworks)

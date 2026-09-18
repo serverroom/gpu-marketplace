@@ -16,6 +16,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
 	"github.com/serverroom/gpu-marketplace/internal/register"
+	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
 // runRemove takes the agent off this machine completely and revokes it, so a
@@ -96,6 +97,16 @@ func runRemove(svc service.Service, args []string) {
 	if runtime.GOOS == "linux" {
 		if _, err := exec.LookPath("nft"); err == nil {
 			_ = exec.Command("nft", "delete", "table", "inet", netguard.Table).Run()
+		}
+	}
+	// A machine the agent switched to start without a desktop starts with it
+	// again. Read before the data directory, which holds the record, goes.
+	if runtime.GOOS == "linux" {
+		if restored, target, err := vmrt.RestoreDesktop(vmrt.OSHost{}, config.DataDir()); err != nil {
+			fmt.Printf("Desktop:  could not restore it (%v); run 'sudo systemctl set-default graphical.target'.\n", err)
+		} else if restored {
+			fmt.Printf("Desktop:  this machine starts with its desktop again (%s) from its next start;\n", target)
+			fmt.Println("          'sudo systemctl isolate graphical.target' brings it back now.")
 		}
 	}
 	removeTree("Rentals:  ", config.DataDir())

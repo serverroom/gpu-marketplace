@@ -257,7 +257,7 @@ func main() {
 
 		case "runtime":
 			if len(args) < 2 || args[1] != "prepare" {
-				fmt.Println("Usage: gpu-agent runtime prepare [--install-deps] [--driver 580-server-open]")
+				fmt.Println("Usage: gpu-agent runtime prepare [--install-deps] [--driver 580-server-open]  |  gpu-agent runtime prepare --headless [--yes]")
 				os.Exit(1)
 			}
 			runPrepare(args[2:])
