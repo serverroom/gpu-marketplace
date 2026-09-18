@@ -13,8 +13,12 @@ import (
 // each cable on the serial console. Every value in them has been through
 // ValidatePair.
 
-// pairHosts is the pair VM's whole /etc/hosts: its own name on 127.0.1.1, the
-// other machine as "peer" on the first link, and a name per link for both.
+// pairHosts is the pair VM's whole /etc/hosts. Both machines' names resolve
+// over the cable and never through DNS or the rental network: this machine's
+// name to its own address on the first link, the other machine's name (and
+// "peer") to its address on the first link -- so `ping gpu-<8>-b` on machine a
+// checks the cable -- and a name per link for both, counted from 1:
+// <name>-l1 on the first link, <name>-l2 on the second.
 func pairHosts(id string, p *PairOptions) string {
 	self := PairHostname(id, p.Node)
 	var b strings.Builder
@@ -22,15 +26,15 @@ func pairHosts(id string, p *PairOptions) string {
 	b.WriteString("::1 localhost ip6-localhost ip6-loopback\n")
 	b.WriteString("ff02::1 ip6-allnodes\n")
 	b.WriteString("ff02::2 ip6-allrouters\n")
-	fmt.Fprintf(&b, "127.0.1.1 %s\n", self)
 	for i, l := range p.Links {
 		own, _, _ := net.ParseCIDR(l.CIDR)
-		fmt.Fprintf(&b, "%s %s-l%d\n", own, self, i)
 		if i == 0 {
-			fmt.Fprintf(&b, "%s %s peer %s-l%d\n", l.PeerIP, p.PeerHostname, p.PeerHostname, i)
-		} else {
-			fmt.Fprintf(&b, "%s %s-l%d\n", l.PeerIP, p.PeerHostname, i)
+			fmt.Fprintf(&b, "%s %s %s-l%d\n", own, self, self, i+1)
+			fmt.Fprintf(&b, "%s %s peer %s-l%d\n", l.PeerIP, p.PeerHostname, p.PeerHostname, i+1)
+			continue
 		}
+		fmt.Fprintf(&b, "%s %s-l%d\n", own, self, i+1)
+		fmt.Fprintf(&b, "%s %s-l%d\n", l.PeerIP, p.PeerHostname, i+1)
 	}
 	return b.String()
 }

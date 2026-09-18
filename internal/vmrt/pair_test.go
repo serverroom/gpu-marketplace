@@ -191,8 +191,11 @@ func TestPairSeed(t *testing.T) {
 		}
 	}
 	for path, want := range map[string][]string{
-		"/etc/hosts": {"127.0.1.1 gpu-1a2b3c4d-a\n", "10.200.0.1 gpu-1a2b3c4d-a-l0\n", "10.200.0.2 gpu-1a2b3c4d-b peer gpu-1a2b3c4d-b-l0\n",
-			"10.200.1.2 gpu-1a2b3c4d-b-l1\n", "127.0.0.1 localhost\n"},
+		// The renter's page says `ping -c 3 gpu-1a2b3c4d-b` on machine a: the
+		// peer's name is its first-link address, and this machine's own name
+		// its own first-link address, never 127.0.1.1.
+		"/etc/hosts": {"10.200.0.1 gpu-1a2b3c4d-a gpu-1a2b3c4d-a-l1\n", "10.200.0.2 gpu-1a2b3c4d-b peer gpu-1a2b3c4d-b-l1\n",
+			"10.200.1.1 gpu-1a2b3c4d-a-l2\n", "10.200.1.2 gpu-1a2b3c4d-b-l2\n", "127.0.0.1 localhost\n"},
 		"/etc/gpu-pair.json":                 {`"node": "a"`, `"peer": "gpu-1a2b3c4d-b"`, `"name": "cx7p1"`, `"address": "10.200.1.1/30"`, `"mtu": 9000`},
 		"/etc/profile.d/gpu-pair.sh":         {`NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-cx7}"`, `NCCL_IB_HCA="${NCCL_IB_HCA:-mlx5}"`, "NCCL_IB_GID_INDEX"},
 		"/usr/local/sbin/gpuagent-linkcheck": {"ping -c3 -W1 -M do -s 8972", "check 0 cx7p0 10.200.0.2 &", "check 1 cx7p1 10.200.1.2 &", "GPUAGENT-LINK ok $i", "GPUAGENT-LINK fail $i"},
@@ -444,5 +447,61 @@ func TestPrepareRecordsTheRDMAExtra(t *testing.T) {
 	}
 	if !GoldenHasExtra(h, testSpec(), ExtraRDMA) || GoldenProblem(h, testSpec()) != "" {
 		t.Errorf("the new image is not accepted")
+	}
+}
+
+// The names the renter uses resolve over the cable on both machines, from the
+// first boot's own /etc/hosts: each machine's name is its first-link address,
+// the other machine's name the other end of that link, and per-link names are
+// counted from 1.
+func TestPairHostsResolveOverTheCable(t *testing.T) {
+	a := goodPair(t)
+	if err := ValidatePair(pairID, a); err != nil {
+		t.Fatal(err)
+	}
+	b := &PairOptions{Node: "b", PeerHostname: "gpu-1a2b3c4d-a", MTU: 9000, Functions: []string{nic0},
+		Links: []GuestLink{{LocalMAC: "58:a2:e1:00:01:01", CIDR: "10.200.0.2/30", PeerIP: "10.200.0.1"}}}
+	if err := ValidatePair(pairID, b); err != nil {
+		t.Fatal(err)
+	}
+	k, _ := ThrowawayPubkey()
+	for _, c := range []struct {
+		pair      *PairOptions
+		want, not []string
+	}{
+		{a, []string{"\n10.200.0.1 gpu-1a2b3c4d-a gpu-1a2b3c4d-a-l1\n10.200.0.2 gpu-1a2b3c4d-b peer gpu-1a2b3c4d-b-l1\n" +
+			"10.200.1.1 gpu-1a2b3c4d-a-l2\n10.200.1.2 gpu-1a2b3c4d-b-l2\n"}, []string{"127.0.1.1", "-l0"}},
+		{b, []string{"\n10.200.0.2 gpu-1a2b3c4d-b gpu-1a2b3c4d-b-l1\n10.200.0.1 gpu-1a2b3c4d-a peer gpu-1a2b3c4d-a-l1\n"},
+			[]string{"127.0.1.1", "-l2"}},
+	} {
+		ud, err := BuildUserData(SeedOptions{ID: pairID, Pubkey: k, Pair: c.pair})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			WriteFiles []struct{ Path, Content string } `yaml:"write_files"`
+		}
+		if err := yaml.Unmarshal([]byte(ud), &doc); err != nil {
+			t.Fatal(err)
+		}
+		hosts := ""
+		for _, f := range doc.WriteFiles {
+			if f.Path == "/etc/hosts" {
+				hosts = f.Content
+			}
+		}
+		for _, w := range c.want {
+			if !strings.Contains(hosts, w) {
+				t.Errorf("node %s /etc/hosts missing %q:\n%s", c.pair.Node, w, hosts)
+			}
+		}
+		for _, n := range c.not {
+			if strings.Contains(hosts, n) {
+				t.Errorf("node %s /etc/hosts has %q:\n%s", c.pair.Node, n, hosts)
+			}
+		}
+		if !strings.Contains(ud, "manage_etc_hosts: false\n") {
+			t.Errorf("cloud-init would rewrite /etc/hosts")
+		}
 	}
 }
