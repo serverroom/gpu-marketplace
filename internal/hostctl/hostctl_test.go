@@ -198,8 +198,8 @@ func TestUpdateAnswers202BeforeAnythingRestarts(t *testing.T) {
 	a.mu.Lock()
 	all := strings.Join(a.commands, "\n")
 	a.mu.Unlock()
-	if !strings.Contains(all, "systemd-run --on-active=2 --collect --unit=gpu-agent-update-restart-") ||
-		!strings.Contains(all, "systemd-run --on-active=180 --collect --unit=gpu-agent-update-check-") {
+	if !strings.Contains(all, "systemd-run --on-active=2 --timer-property=AccuracySec=1s --collect --unit=gpu-agent-update-restart-") ||
+		!strings.Contains(all, "systemd-run --on-active=180 --timer-property=AccuracySec=1s --collect --unit=gpu-agent-update-check-") {
 		t.Errorf("restart and check not scheduled: %s", all)
 	}
 	// A second request while it runs is refused.

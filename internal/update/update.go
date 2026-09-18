@@ -400,15 +400,19 @@ func copyFile(from, to string) error {
 	return os.WriteFile(to, data, 0755)
 }
 
+// timerAccuracy overrides systemd's default timer accuracy of one minute: on
+// a real host the 2 s restart fired 9-19 s late without it.
+const timerAccuracy = "--timer-property=AccuracySec=1s"
+
 // schedule has the old binary check the new one CheckDelay from now and
 // restarts the agent RestartDelay from now, both as transient systemd units:
 // they run whatever happens to this process. If either cannot be scheduled,
 // the old binary goes back.
 func (u *Updater) schedule(rec Record) error {
 	stamp := strconv.FormatInt(u.now().Unix(), 10)
-	check := []string{"--on-active=" + seconds(CheckDelay), "--collect", "--unit=gpu-agent-update-check-" + stamp,
+	check := []string{"--on-active=" + seconds(CheckDelay), timerAccuracy, "--collect", "--unit=gpu-agent-update-check-" + stamp,
 		u.Binary + ".prev", "update-check", "--to", rec.To, "--binary", u.Binary}
-	restart := []string{"--on-active=" + seconds(RestartDelay), "--collect", "--unit=gpu-agent-update-restart-" + stamp,
+	restart := []string{"--on-active=" + seconds(RestartDelay), timerAccuracy, "--collect", "--unit=gpu-agent-update-restart-" + stamp,
 		"systemctl", "restart", ServiceUnit}
 	if _, err := u.exec("systemd-run", check...); err != nil {
 		_ = os.Rename(u.Binary+".prev", u.Binary)

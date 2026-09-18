@@ -130,3 +130,20 @@ made asynchronous) and the transient `nvidia-smi` holder fix.
     DGX Spark path stops only the display manager (no isolate) and was checked not to
     have this side effect: the NVIDIA services it stops are the ones the rental records
     and restarts.
+26. **The update's transient timers set `AccuracySec=1s`** (`--timer-property`): with
+    systemd's default accuracy of one minute, the 2 s restart fired 9-19 s late on SID 2457.
+
+## Verified on real hardware (SID 2457: Dell C4130, CMP 170HX, headless; build of 294a71f stamped v0.1.10)
+
+- Installed over v0.1.9: the automatic setup found the v0.1.9 test boot, planned one step
+  (the image's `580-server` kept, matching the host's proprietary 580.173.02), ran the test
+  rental, passed in about 2 minutes; capability ready.
+- `POST /withdrawn`: the control channel closed and `status` showed the removal message.
+- A build stamped v0.1.8 updated itself to the real v0.1.9 release: download, checksum,
+  swap, restart, and the `.prev update-check` said ok at +3 minutes. With the service
+  stopped after the swap, the check rolled back to `.prev`, restarted the service and
+  recorded `rolled_back` in update.json.
+- Found there and fixed afterwards: nvidia-persistenced left dead by
+  `runtime prepare --headless` (item 25), and the late restart timer (item 26).
+- Not yet on real hardware: anything DGX Spark (DMI match, desktop closing with its apps,
+  GB10 handover), and the session-based desktop classification (325c3c9).

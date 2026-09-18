@@ -142,11 +142,11 @@ func TestAnUpdateSwapsTheBinaryAndSchedulesRestartAndCheck(t *testing.T) {
 	if r.ran("systemctl restart") {
 		t.Error("the agent was restarted directly, not scheduled")
 	}
-	if !r.ran("systemd-run --on-active=2 --collect --unit=gpu-agent-update-restart-") ||
+	if !r.ran("systemd-run --on-active=2 --timer-property=AccuracySec=1s --collect --unit=gpu-agent-update-restart-") ||
 		!strings.Contains(strings.Join(r.commands, "\n"), "systemctl restart gpu-agent") {
 		t.Errorf("no delayed restart scheduled: %v", r.commands)
 	}
-	if !r.ran("systemd-run --on-active=180 --collect --unit=gpu-agent-update-check-") ||
+	if !r.ran("systemd-run --on-active=180 --timer-property=AccuracySec=1s --collect --unit=gpu-agent-update-check-") ||
 		!strings.Contains(strings.Join(r.commands, "\n"), "gpu-agent.prev update-check --to v0.1.11") {
 		t.Errorf("no rollback check scheduled with the old binary: %v", r.commands)
 	}
