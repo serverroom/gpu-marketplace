@@ -362,3 +362,51 @@ DESIGN.md (reasoning). Everything not listed here is implemented as written.
   (`deps`, `image`, `test-boot`), `state` one of running, passed, failed, interrupted.
 - **Command-line runs** (`check --boot`, `check --boot --pair`, `setup`) write their
   failures to the same `errors.json`; the daemon sends them with its next report.
+
+# v0.2.2: any GPU, not NVIDIA only (owner decision, 2026-09-19)
+
+The owner's rule: the microVM only has to make sure the GPU is passed through,
+for any GPU; the image gets a driver per make; a machine whose only GPU is its
+processor's own keeps hosting CPU-only. This supersedes item 20 and the AMD/ROCm
+bullet above.
+
+- **GPUs come from the PCI bus, any make** (`internal/pcidev`): display-class
+  devices, plus NVIDIA and AMD accelerator-class ones (the MI300 family is class
+  0x12). BMC displays (ASPEED, Matrox, Huawei iBMC, Pilot, Silicon Motion, XGI),
+  virtual displays and SR-IOV virtual functions are not GPUs. The host needs no
+  driver: `nvidia-smi` only adds names and unified memory where installed.
+- **An NVIDIA GPU without its host driver is rented**, not refused (was item 20):
+  it is still never passed off as a machine without a GPU. **An AMD GPU no longer
+  needs ROCm.** The Ryzen case item 20 guarded is now the integrated-GPU rule: the
+  processor's own GPU (Intel at 00:02.0; an AMD APU's behind bridge 00:08.1, or
+  with the processor's PSP in its slot) is never rented, so a machine with only that hosts CPU-only, as before.
+- **Left out, not refused:** a card already on `vfio-pci`, one drawing a desktop
+  that does not close for rentals, one whose IOMMU group holds a non-graphics
+  device, and the boot display when another card can be rented (judged after the
+  groups, on the cards that can) are listed in the new `capability.excluded`; the
+  machine is refused only when it has cards and none is left. Cards sharing a
+  group are judged together. Anything else holding a card is judged at rental
+  start, as before: a brief holder at agent start takes nothing off the market.
+- **Holders, per GPU:** an NVIDIA GPU is its `/dev/nvidia*` nodes only, exactly
+  as before (its DRM node is also logind's copy of a desktop's, which would take
+  a DGX Spark off the market); other makes are their DRM nodes, plus `/dev/kfd`
+  for AMD; every GPU its VFIO group node. systemd and systemd-logind are never
+  holders. The same-slot rule accepts any function in an NVIDIA GPU's slot, as
+  before; other makes' slots only graphics-card functions (an APU's slot holds
+  the host's USB and its PSP).
+- **Onboard chips:** besides the BMC vendors, the ATI ES1000, Rage XL and Radeon
+  7000 by device, AWS Nitro and Renesas by vendor, and any non-NVIDIA VGA-class
+  device whose largest memory window is under 256 MB. The processor's own GPU is
+  also any Intel or AMD display function on a root bus (pre-Zen APUs).
+- **Image:** `GoldenInfo.vendors`; AMD and Intel cards get
+  `linux-firmware-amd-graphics` / `linux-firmware-intel-graphics`. NVIDIA stays
+  as items 21 and the driver match decided; an image from before makes were
+  recorded counts as NVIDIA when it has a driver, so no NVIDIA host rebuilds.
+- **Test boot:** passes when the VM sees each passed GPU by vendor:device with
+  every standard memory BAR mapped (an unplaced legacy I/O window is normal); a driver that did not take it is a note. The record's
+  `gpus` (model, memory, driver) go to the marketplace as `capability.gpus`.
+- **Teardown:** the verifier works from the drivers the rental recorded (an agent
+  restarted mid-rental still asks), looks only at the rented GPUs' rows, and runs
+  `nvidia-smi`/`rocm-smi` only where installed; an NVIDIA GPU with no memory
+  figure is checked by what holds it, like a GB10.
+- Not verified on AMD or Intel hardware.

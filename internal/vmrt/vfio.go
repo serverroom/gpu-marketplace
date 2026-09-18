@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/serverroom/gpu-marketplace/internal/pcidev"
 )
 
 // BoundDevice is one PCI function the runtime took from its driver, and the
@@ -68,21 +70,56 @@ func slotOf(bdf string) string {
 // audio device, its USB-C controller) go with it; anything else -- a NIC, a
 // disk controller in the same group -- is a reason not to host.
 func GroupProblems(h Host, gpus []string) []string {
+	return groupProblems(h, gpus, gpus)
+}
+
+// GroupProblemsWith is GroupProblems for one GPU that goes to the VM together
+// with others: two GPUs behind one PCIe switch without ACS share a group, and
+// each is then no problem for the other.
+func GroupProblemsWith(h Host, gpu string, with []string) []string {
+	return groupProblems(h, []string{gpu}, append([]string{gpu}, with...))
+}
+
+func groupProblems(h Host, gpus, going []string) []string {
 	funcs, err := GroupFunctions(h, gpus)
 	if err != nil {
 		return []string{err.Error()}
 	}
 	slots := map[string]bool{}
-	for _, g := range gpus {
+	nvidiaSlots := map[string]bool{}
+	for _, g := range going {
 		slots[slotOf(g)] = true
+		if pcidev.Read(h, g).Vendor == pcidev.NVIDIA {
+			nvidiaSlots[slotOf(g)] = true
+		}
 	}
 	var problems []string
 	for _, f := range funcs {
-		if !slots[slotOf(f)] {
+		switch {
+		case !slots[slotOf(f)]:
 			problems = append(problems, fmt.Sprintf("PCI device %s shares an IOMMU group with the GPU, so passing the GPU through would take it from this machine too; move the GPU to another slot or enable ACS", f))
+		case nvidiaSlots[slotOf(f)]:
+			// An NVIDIA GPU's slot holds only its own functions (audio, USB-C),
+			// as every version before this one took for granted.
+		case !graphicsCardFunction(pcidev.Read(h, f).Class):
+			problems = append(problems, fmt.Sprintf("PCI device %s sits in the GPU's own slot but is not part of a graphics card (class %s), so passing the GPU through would take it from this machine too", f, pcidev.Read(h, f).Class))
 		}
 	}
 	return problems
+}
+
+// graphicsCardFunction reports whether a function in a GPU's own slot is one a
+// graphics card carries: the GPU itself, its HDMI/DP audio, and (NVIDIA Turing)
+// its USB-C controller and UCSI. An APU's slot also holds the host's own USB
+// controllers and its security processor, which the display, audio and USB
+// classes alone do not cover -- the PSP is class 0x10.
+func graphicsCardFunction(class string) bool {
+	for _, prefix := range []string{"03", "12", "0403", "0c03", "0c80"} {
+		if strings.HasPrefix(class, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // BindVFIO moves each function to vfio-pci. It returns what it bound so far
@@ -303,7 +340,7 @@ func isAgentChild(h Host, pid string) bool {
 	return processName(h, ppid) == agentName
 }
 
-// gpuHolders are the host processes with an NVIDIA device open, as
+// gpuHolders are the host processes with a GPU open (gpuNodes), as
 // "name (pid N)", other than NVIDIA's own services (the runtime stops those
 // itself): the machine's desktop (its display server and shell by name, and
 // everything running in a graphical login -- session.go), short-lived tools,
@@ -326,14 +363,70 @@ func (g gpuHolders) busy() []string {
 	return all
 }
 
-func readGPUHolders(h Host) gpuHolders {
+// gpuNodes are the device files that stand for a set of GPUs. An NVIDIA GPU is
+// its driver's /dev/nvidia* nodes, which the driver shares across all of its
+// GPUs and cannot be told apart per GPU -- so a holder counts against every
+// NVIDIA GPU, which fails closed -- and nothing else, as before any other make
+// was rented: its DRM nodes are also the ones systemd-logind hands a desktop,
+// and a DGX Spark's desktop closes for a rental. Any other make is its own DRM
+// nodes (/dev/dri/cardN, renderDN), and for AMD the compute stack's /dev/kfd,
+// shared in the same way. Every GPU is also its VFIO group's node, which a VM
+// of the host's own has open.
+type gpuNodes struct {
+	own         map[string]bool
+	nvidia, amd bool
+}
+
+func nodesOf(h Host, gpus []string) gpuNodes {
+	n := gpuNodes{own: map[string]bool{}}
+	for _, gpu := range gpus {
+		if group, err := h.Readlink(devPath(gpu) + "/iommu_group"); err == nil {
+			n.own["/dev/vfio/"+path.Base(group)] = true
+		}
+		vendor := pcidev.Read(h, gpu).Vendor
+		if vendor == pcidev.NVIDIA {
+			n.nvidia = true
+			continue
+		}
+		nodes, _ := h.Glob(devPath(gpu) + "/drm/*")
+		for _, node := range nodes {
+			n.own["/dev/dri/"+path.Base(node)] = true
+		}
+		n.amd = n.amd || vendor == pcidev.AMD
+	}
+	return n
+}
+
+func (n gpuNodes) holds(target string) bool {
+	switch {
+	case n.own[target]:
+		return true
+	case n.nvidia && strings.HasPrefix(target, "/dev/nvidia"):
+		return true
+	case n.amd && target == "/dev/kfd":
+		return true
+	}
+	return false
+}
+
+// sessionPlumbing are the processes that keep a desktop's device files open on
+// its behalf -- systemd-logind hands the compositor its DRM node and keeps it,
+// and a copy sits in systemd's own descriptor store -- without using the GPU
+// themselves. They let go when the session ends; they are nobody's workload.
+func sessionPlumbing(name string) bool {
+	return name == "systemd" || name == "systemd-logind"
+}
+
+// readGPUHolders reads who holds these GPUs, of whatever make.
+func readGPUHolders(h Host, gpus []string) gpuHolders {
 	var g gpuHolders
+	nodes := nodesOf(h, gpus)
 	fds, _ := h.Glob("/proc/[0-9]*/fd/*")
 	seen := map[string]bool{}
 	sess := newSessions(h)
 	for _, fd := range fds {
 		target, err := h.Readlink(fd)
-		if err != nil || !strings.HasPrefix(target, "/dev/nvidia") {
+		if err != nil || !nodes.holds(target) {
 			continue
 		}
 		parts := strings.Split(fd, "/")
@@ -342,7 +435,7 @@ func readGPUHolders(h Host) gpuHolders {
 		}
 		pid := parts[2]
 		name := processName(h, pid)
-		if IsNVIDIAService(name) {
+		if IsNVIDIAService(name) || sessionPlumbing(name) {
 			continue
 		}
 		who := fmt.Sprintf("%s (pid %s)", name, pid)
@@ -369,33 +462,33 @@ func readGPUHolders(h Host) gpuHolders {
 	return g
 }
 
-// settleGPUHolders reads the GPU's holders, and while the only ones besides
+// settleGPUHolders reads the GPUs' holders, and while the only ones besides
 // the desktop are short-lived tools, reads them again every TransientPoll for
 // up to TransientWait.
-func settleGPUHolders(h Host) gpuHolders {
-	g := readGPUHolders(h)
+func settleGPUHolders(h Host, gpus []string) gpuHolders {
+	g := readGPUHolders(h, gpus)
 	for waited := time.Duration(0); len(g.other) == 0 && len(g.transient) > 0 && waited < TransientWait; waited += TransientPoll {
 		h.Sleep(TransientPoll)
-		g = readGPUHolders(h)
+		g = readGPUHolders(h, gpus)
 	}
 	return g
 }
 
-// ClassifyGPUHolders lists the host processes with an NVIDIA device open, as
+// ClassifyGPUHolders lists the host processes with any of these GPUs open, as
 // "name (pid N)", split into the machine's desktop and everything else.
 // NVIDIA's own services are left out: the runtime stops them itself. A GPU
 // that something holds cannot be unbound -- the kernel waits for the holder --
 // so a rental is refused while either list is non-empty (short-lived tools,
 // in the second list, are waited for briefly first).
-func ClassifyGPUHolders(h Host) (desktop, other []string) {
-	g := readGPUHolders(h)
+func ClassifyGPUHolders(h Host, gpus []string) (desktop, other []string) {
+	g := readGPUHolders(h, gpus)
 	return g.desktop, g.busy()
 }
 
-// GPUHolders are the host processes with an NVIDIA device open, other than
+// GPUHolders are the host processes with any of these GPUs open, other than
 // NVIDIA's own services: the desktop and everything else together.
-func GPUHolders(h Host) []string {
-	desktop, other := ClassifyGPUHolders(h)
+func GPUHolders(h Host, gpus []string) []string {
+	desktop, other := ClassifyGPUHolders(h, gpus)
 	all := append(append([]string{}, desktop...), other...)
 	sort.Strings(all)
 	return all

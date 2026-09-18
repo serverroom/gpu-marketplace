@@ -19,7 +19,7 @@ func cpuSpec() Spec {
 func TestARentalWithoutAGPU(t *testing.T) {
 	h := newHost()
 	h.SetFail("systemctl is-active --quiet nvidia-persistenced", nil)
-	rt := New(h, cpuSpec(), &fakeFence{h: h}, func() bool { t.Error("a GPU check ran"); return false })
+	rt := New(h, cpuSpec(), &fakeFence{h: h}, func([]BoundDevice) bool { t.Error("a GPU check ran"); return false })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestSelfTestWithoutAGPU(t *testing.T) {
 }
 
 func TestBakeWithoutTheDriver(t *testing.T) {
-	ud, err := BakeUserData(NoDriver)
+	ud, err := BakeUserData(NoDriver, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

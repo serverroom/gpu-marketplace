@@ -21,7 +21,7 @@ func firstStateWith(calls []string, want string) int {
 // an agent killed between the two still gives it back.
 func TestEachFunctionIsSavedBeforeItMoves(t *testing.T) {
 	h := pairHost()
-	rt, _, err := startPair(t, h, func() bool { return true })
+	rt, _, err := startPair(t, h, func([]BoundDevice) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestABusyCardLeavesTheDesktopAndGPUAlone(t *testing.T) {
 	h.NIC(nic1, "enP1p1s0f1np1", nicMAC1, "MT2412X00001", nic1)
 	h.Links["/proc/777/fd/4"] = "/dev/infiniband/uverbs0"
 	h.Files["/proc/777/comm"] = []byte("ib_write_bw\n")
-	rt, _ := sparkRuntime(h, func() bool { return true })
+	rt, _ := sparkRuntime(h, func([]BoundDevice) bool { return true })
 	p := goodPair(t)
 	p.OtherMACs = nil
 	err := rt.Start(StartOptions{ID: pairID, Pubkey: key(t), Pair: p})

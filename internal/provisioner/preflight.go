@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/interconnect"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
+	"github.com/serverroom/gpu-marketplace/internal/pcidev"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/stats"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
@@ -57,7 +59,7 @@ type Finding struct {
 type HostReport struct {
 	Vendor   GPUVendor
 	BDFs     []string
-	Models   []string // GPU model names, as the vendor tool reports them
+	Models   []string // GPU model names: nvidia-smi's where the host has it, else the PCI ID database's
 	Unified  bool
 	Firmware vmrt.Firmware
 	Reasons  []string
@@ -69,17 +71,24 @@ type HostReport struct {
 	// desktop closes while rented or tested rather than refusing the rental.
 	DesktopOnDemand bool
 	// GPUCount is how many GPUs the machine has: the ones a rental would get,
-	// or, when the vendor tool sees none, the NVIDIA GPUs on the PCI bus.
+	// or, when it can rent none of them now, its GPU cards.
 	GPUCount int
+	// Excluded are GPUs on this machine that rentals leave out, and why. They
+	// are no reason to refuse the machine while another GPU can be rented.
+	Excluded []string
+	// GPUs are what the last passing test boot saw, once there is one for this
+	// version and these GPUs.
+	GPUs []vmrt.GuestGPU
 }
 
 // Preflight checks, without changing anything, whether this machine can host a
-// rental: a Linux KVM host, with the IOMMU on and GPUs that can be passed
-// through on their own when it has GPUs (a machine without one hosts too), the
-// runtime's tools, firmware and base image installed, enough memory and disk
-// -- and, once all of that holds, a passing test boot on this very machine for
-// this agent version. Every failing check is reported in words a provider can
-// act on, not just the first.
+// rental: a Linux KVM host, with the IOMMU on and GPUs of any make that can be
+// passed through on their own when it has GPUs (a machine without one, or with
+// only its processor's own, hosts CPU-only), the runtime's tools, firmware and
+// base image installed, enough memory and disk -- and, once all of that holds,
+// a passing test boot on this very machine for this agent version. Every
+// failing check is reported in words a provider can act on, not just the
+// first.
 func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostReport {
 	var rep HostReport
 	addKind := func(kind ReasonKind, format string, a ...interface{}) {
@@ -107,61 +116,72 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 		add("%s", missing)
 	}
 
-	var gpuNames []string
-	if nv, ok := detectNVIDIA(h); ok {
-		rep.Vendor = VendorNVIDIA
-		rep.BDFs = nv.bdfs
-		rep.Models = nv.names
-		rep.Unified = nv.unified
-		gpuNames = nv.names
-		for _, g := range nv.noMemory {
-			add("GPU %s (%s) reports no memory and is not a known unified-memory part, so the agent cannot tell what a tenant would get or prove it clean afterwards", g.bdf, g.name)
-		}
-	} else if bdfs, ok := detectAMD(h); ok {
-		rep.Vendor = VendorAMD
-		rep.BDFs = bdfs
-	} else if pci := vmrt.NVIDIAPCIGPUs(h); len(pci) > 0 {
-		// A GPU the driver cannot see is not a machine without a GPU: renting
-		// it out as one would hide the GPU the host means to rent.
-		rep.Vendor = VendorNVIDIA
-		rep.GPUCount = len(pci)
-		add("this machine has an NVIDIA GPU (PCI %s), but nvidia-smi does not see it: install the NVIDIA driver on this machine and check again", strings.Join(pci, ", "))
-	} else {
-		// No GPU at all: the machine rents its CPUs, memory and disk.
-		rep.Vendor = VendorNone
+	// GPUs, of any make, from the PCI bus. The host needs no GPU driver or
+	// vendor tool: the rental's VM is where a GPU has to work, and its test boot
+	// proves the GPU gets there. nvidia-smi, where the host has it, adds names
+	// and says which GPUs share the machine's memory (a GB10).
+	nv := hostNVIDIA(h)
+	var nvNames []string
+	for _, bdf := range sortedKeys(nv) {
+		nvNames = append(nvNames, nv[bdf].name)
 	}
-	if len(rep.BDFs) > 0 {
-		rep.GPUCount = len(rep.BDFs)
-	}
-	// The IOMMU is what hands a GPU to a microVM; without a GPU it is not needed.
-	if rep.GPUCount > 0 {
-		if groups, _ := h.Glob("/sys/kernel/iommu_groups/*"); len(groups) == 0 {
-			add("the IOMMU is off, so no GPU can be handed to a microVM: enable VT-d / AMD-Vi (or the SMMU on Arm) in the firmware and on the kernel command line")
-		}
-	}
-	if len(rep.BDFs) > 0 && len(rep.Reasons) == 0 {
-		for _, problem := range vmrt.GroupProblems(h, rep.BDFs) {
-			add("%s", problem)
-		}
-	}
-
-	id := ReadIdentity(h, goos, spec.Arch, gpuNames)
+	id := ReadIdentity(h, goos, spec.Arch, nvNames)
 	rep.Identity = &id
 	if id.ConfirmedDGXSpark {
 		// Made headless on purpose (runtime prepare --headless): left that way.
 		_, err := vmrt.LoadHeadless(h, spec.DataDir)
 		rep.DesktopOnDemand = errors.Is(err, os.ErrNotExist)
 	}
-	// A desktop drawn on the GPU holds it for as long as it runs. On a DGX
-	// Spark it closes for a rental and comes back after -- as long as the agent
-	// can close it, through the display manager. Anywhere else, say so before a
-	// test boot finds out, with the one command that fixes it.
-	if rep.Vendor == VendorNVIDIA {
-		if desktop, _ := vmrt.ClassifyGPUHolders(h); len(desktop) > 0 &&
-			(!rep.DesktopOnDemand || vmrt.ActiveDisplayManager(h) == "") {
-			add("%s", vmrt.DesktopOnGPUProblem(desktop))
+
+	groups, _ := h.Glob("/sys/kernel/iommu_groups/*")
+	ours := ownRentalDevices(h, spec.DataDir)
+	var cards []pcidev.Device
+	var excluded []string
+	for _, d := range pcidev.Display(h) {
+		if pcidev.Integrated(h, d) && !ours[d.BDF] {
+			excluded = append(excluded, fmt.Sprintf("GPU %s (%s) is the processor's integrated GPU; it stays with the host", d.BDF, gpuName(h, d, nv)))
+			continue
 		}
+		cards = append(cards, d)
 	}
+	// A DGX Spark's desktop closes for a rental and comes back after -- as long
+	// as the agent can close it, through the display manager.
+	desktopCloses := rep.DesktopOnDemand && vmrt.ActiveDisplayManager(h) != ""
+	rentable, left := rentableGPUs(h, cards, nv, len(groups) > 0, ours, desktopCloses)
+	switch {
+	case len(cards) == 0:
+		// No GPU a rental could take -- none at all, or only the processor's
+		// own: the machine rents its CPUs, memory and disk.
+		rep.Vendor = VendorNone
+		rep.Excluded = excluded
+	case len(rentable) == 0:
+		// Cards the host cannot give up now are not a machine without a GPU:
+		// renting it out as one would hide the GPU the host means to rent.
+		rep.Vendor = VendorPCI
+		rep.GPUCount = len(cards)
+		for _, why := range left {
+			add("%s", why)
+		}
+		rep.Excluded = excluded
+	default:
+		rep.Vendor = VendorPCI
+		rep.BDFs = rentable
+		rep.GPUCount = len(rentable)
+		rep.Excluded = append(excluded, left...)
+	}
+	rentsNVIDIA := false
+	for _, bdf := range rep.BDFs {
+		d := pcidev.Read(h, bdf)
+		rep.Models = append(rep.Models, gpuName(h, d, nv))
+		rentsNVIDIA = rentsNVIDIA || d.Vendor == pcidev.NVIDIA
+	}
+	rep.Unified = hostUnified(nv, rep.BDFs)
+	// The IOMMU is what hands a GPU to a microVM; without a GPU it is not needed.
+	if rep.GPUCount > 0 && len(groups) == 0 {
+		add("the IOMMU is off, so no GPU can be handed to a microVM: enable VT-d / AMD-Vi (or the SMMU on Arm) in the firmware and on the kernel command line")
+	}
+	// The base image is judged against the GPUs a rental would get.
+	spec.GPUs = rep.BDFs
 
 	apt := AptDistro(h)
 	if missing := vmrt.MissingTools(h, spec.Arch); len(missing) > 0 {
@@ -183,9 +203,9 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 		addKind(ReasonImage, "the rental base image has not been built; run 'sudo gpu-agent runtime prepare'")
 	} else if problem := vmrt.GoldenProblem(h, spec); problem != "" {
 		addKind(ReasonImage, "%s", problem)
-	} else if rep.Vendor == VendorNVIDIA && vmrt.GoldenDriver(h, spec) == vmrt.NoDriver {
+	} else if rentsNVIDIA && vmrt.GoldenDriver(h, spec) == vmrt.NoDriver {
 		addKind(ReasonImage, "the rental base image was built without the NVIDIA driver, when this machine had no NVIDIA GPU; rebuild it with 'sudo gpu-agent runtime prepare'")
-	} else if rep.Vendor == VendorNVIDIA {
+	} else if rentsNVIDIA {
 		if problem := vmrt.GoldenDriverProblem(h, spec, vmrt.ChooseDriver(h)); problem != "" {
 			addKind(ReasonImage, "%s", problem)
 		}
@@ -201,13 +221,20 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	}
 
 	// A test boot proves what the checks above cannot: that this GPU really
-	// works inside a VM on this hardware. It only means anything once they pass.
+	// reaches a VM on this hardware. It only means anything once they pass.
+	res, err := vmrt.LoadSelfTest(h, spec.DataDir)
+	current := err == nil && vmrt.SelfTestProblem(res, version, rep.BDFs) == ""
 	if len(rep.Reasons) == 0 {
-		res, err := vmrt.LoadSelfTest(h, spec.DataDir)
 		if err != nil {
 			addKind(ReasonTestBoot, "its last test boot could not be read (%v); run 'sudo gpu-agent check --boot'", err)
 		} else if problem := vmrt.SelfTestProblem(res, version, rep.BDFs); problem != "" {
 			addKind(ReasonTestBoot, "%s", problem)
+		}
+	}
+	if current && len(rep.BDFs) > 0 {
+		rep.GPUs = res.GPUs
+		for _, g := range res.GPUs {
+			rep.Unified = rep.Unified || g.Unified
 		}
 	}
 	return rep
@@ -247,7 +274,7 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	spec.NICs = pair.Functions()
 
 	fence := netguard.New(h, netguard.Bridge, vmrt.GuestSubnet, netguard.HostNetworks)
-	rt := vmrt.New(h, spec, fence, gpuVerifier(h, rep.Vendor, rep.Unified, rep.BDFs))
+	rt := vmrt.New(h, spec, fence, gpuVerifier(h))
 	p := New(rt, rep.Vendor, rep.BDFs, rep.Unified)
 	p.runtime = rt
 	p.findings = rep.Findings
@@ -296,8 +323,14 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		AgentVersion:  version,
 		UnifiedMemory: rep.Unified,
 		VMUser:        vmrt.VMUser,
+		Excluded:      rep.Excluded,
 		Identity:      rep.Identity,
 		Interconnect:  ic,
+	}
+	for _, g := range rep.GPUs {
+		p.capability.GPUs = append(p.capability.GPUs, control.GPU{
+			Model: g.Model, PCIID: g.ID, MemoryMB: g.MemoryMB, Unified: g.Unified, Driver: g.Driver,
+		})
 	}
 	return p
 }
@@ -391,98 +424,168 @@ func rentalDiskGB(h vmrt.Host, dataDir string) int {
 	return gb
 }
 
-type gpuRef struct{ bdf, name string }
-
-type nvidiaGPUs struct {
-	bdfs  []string
-	names []string
-	// unified is set when the GPUs share the machine's memory pool (a GB10).
-	// A rental then gets that pool as both its system memory and its GPU memory.
-	unified bool
-	// noMemory are GPUs that report no memory and are NOT a known unified part.
-	noMemory []gpuRef
+// nvidiaRow is one GPU as nvidia-smi on the host describes it.
+type nvidiaRow struct {
+	name     string
+	memoryMB float64 // 0 when nvidia-smi says [N/A]
 }
 
-// detectNVIDIA lists the NVIDIA GPUs by PCI address. nvidia-smi reports
-// memory.total as [N/A] for a GPU with no memory of its own; for a known
-// unified-memory part (GB10) that is expected and the machine's pool is the
-// GPU's memory, for anything else it is a GPU whose memory cannot be read.
-func detectNVIDIA(r Runner) (nvidiaGPUs, bool) {
-	var nv nvidiaGPUs
+// hostNVIDIA is what nvidia-smi on the host says about its GPUs, by PCI
+// address; empty when the host has no NVIDIA driver -- which is no reason not
+// to host: it only adds names, and which GPUs share the machine's memory.
+func hostNVIDIA(r Runner) map[string]nvidiaRow {
+	rows := map[string]nvidiaRow{}
 	out, err := r.Output("nvidia-smi", "--query-gpu=pci.bus_id,name,memory.total", "--format=csv,noheader,nounits")
 	if err != nil {
-		return nv, false
+		return rows
 	}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Split(line, ",")
-		if len(fields) < 3 {
+		// The name sits between the first and the last comma.
+		first, last := strings.Index(line, ","), strings.LastIndex(line, ",")
+		if first < 0 || last <= first {
 			continue
 		}
-		bdf := NormalizeBDF(fields[0])
+		bdf := NormalizeBDF(line[:first])
 		if bdf == "" {
 			continue
 		}
-		name := strings.TrimSpace(fields[1])
-		nv.bdfs = append(nv.bdfs, bdf)
-		nv.names = append(nv.names, name)
-		if total, err := strconv.ParseFloat(strings.TrimSpace(fields[2]), 64); err == nil && total > 0 {
-			continue
-		}
-		if stats.IsUnifiedMemoryModel(name) {
-			nv.unified = true
-		} else {
-			nv.noMemory = append(nv.noMemory, gpuRef{bdf: bdf, name: name})
-		}
+		mem, _ := strconv.ParseFloat(strings.TrimSpace(line[last+1:]), 64)
+		rows[bdf] = nvidiaRow{name: strings.TrimSpace(line[first+1 : last]), memoryMB: mem}
 	}
-	return nv, len(nv.bdfs) > 0
+	return rows
 }
 
-// detectAMD lists the AMD GPUs by PCI address from `rocm-smi --showbus --csv`.
-func detectAMD(r Runner) ([]string, bool) {
-	out, err := r.Output("rocm-smi", "--showbus", "--csv")
-	if err != nil {
-		return nil, false
+func sortedKeys(m map[string]nvidiaRow) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) < 2 {
-		return nil, false
+	sort.Strings(keys)
+	return keys
+}
+
+// gpuName is how a GPU is shown: nvidia-smi's name where the host has it,
+// else the PCI ID database's.
+func gpuName(fs pcidev.FS, d pcidev.Device, nv map[string]nvidiaRow) string {
+	if row, ok := nv[d.BDF]; ok && row.name != "" {
+		return row.name
 	}
-	col := -1
-	for i, h := range strings.Split(lines[0], ",") {
-		if strings.Contains(strings.ToLower(h), "bus") {
-			col = i
-			break
+	return pcidev.Name(fs, d)
+}
+
+// hostUnified reports whether nvidia-smi describes one of these GPUs as a
+// unified-memory part: memory.total is [N/A] for a GB10 because its memory is
+// the machine's pool, which a rental then gets as both its system memory and
+// its GPU memory. A GPU that reports no memory and is not such a part is
+// simply a GPU whose memory the host cannot read; the test boot says from
+// inside the VM.
+func hostUnified(nv map[string]nvidiaRow, bdfs []string) bool {
+	for _, b := range bdfs {
+		if row, ok := nv[b]; ok && row.memoryMB <= 0 && stats.IsUnifiedMemoryModel(row.name) {
+			return true
 		}
 	}
-	if col < 0 {
-		return nil, false
+	return false
+}
+
+// ownRentalDevices are the PCI functions this agent's own rental (or test
+// boot) holds, from its state: they are on vfio-pci and held by its QEMU, and
+// they are this machine's to rent all the same.
+func ownRentalDevices(h vmrt.Host, dataDir string) map[string]bool {
+	ours := map[string]bool{}
+	if st, err := vmrt.LoadState(h, dataDir); err == nil && st != nil {
+		for _, d := range st.Devices {
+			ours[d.BDF] = true
+		}
 	}
-	var bdfs []string
-	for _, line := range lines[1:] {
-		cols := strings.Split(line, ",")
-		if col < len(cols) {
-			if bdf := NormalizeBDF(cols[col]); bdf != "" {
-				bdfs = append(bdfs, bdf)
+	return ours
+}
+
+// rentableGPUs splits the machine's GPU cards, of whatever make, into those a
+// rental can take and those it has to leave, each with why:
+//   - one already on vfio-pci belongs to a VM of the provider's own;
+//   - one that draws the machine's desktop, unless that desktop closes for a
+//     rental (a DGX Spark's) -- the fix is running headless;
+//   - one whose IOMMU group holds a device that is not part of a graphics card
+//     would take that device from the host too. Cards that share a group with
+//     each other are judged together, so they rent or stay together:
+//     group-mates have the same group, so they get the same verdict. Isolation
+//     is only judged with the IOMMU on; without it nothing can be passed
+//     through, which is its own reason;
+//   - the boot display (the firmware's and the kernel's console) stays with
+//     the host whenever another card can be rented; a machine whose only card
+//     it is rents it.
+//
+// Anything else holding a card is judged when a rental starts, as it always
+// was: a process that has it open for a moment when the agent starts is no
+// reason to take a card off the market until someone restarts the agent.
+// GPUs of this agent's own rental (ours) are this machine's to rent.
+func rentableGPUs(h vmrt.Host, cards []pcidev.Device, nv map[string]nvidiaRow, iommu bool, ours map[string]bool, desktopCloses bool) (rentable, excluded []string) {
+	names := map[string]string{}
+	var free []string
+	for _, d := range cards {
+		names[d.BDF] = gpuName(h, d, nv)
+		if ours[d.BDF] {
+			free = append(free, d.BDF)
+			continue
+		}
+		if d.Driver == "vfio-pci" {
+			excluded = append(excluded, fmt.Sprintf("GPU %s (%s) is already bound to vfio-pci on this machine, for a VM of its own; unbind it to rent it",
+				d.BDF, names[d.BDF]))
+			continue
+		}
+		if desktop, _ := vmrt.ClassifyGPUHolders(h, []string{d.BDF}); len(desktop) > 0 && !desktopCloses {
+			excluded = append(excluded, fmt.Sprintf("GPU %s (%s): %s", d.BDF, names[d.BDF], vmrt.DesktopOnGPUProblem(desktop)))
+			continue
+		}
+		free = append(free, d.BDF)
+	}
+
+	// isolated keeps the cards whose groups hold nothing but cards going with
+	// them, and says why of the rest.
+	isolated := func(going []string) (ok []string, why []string) {
+		for _, bdf := range going {
+			if iommu {
+				if problems := vmrt.GroupProblemsWith(h, bdf, going); len(problems) > 0 {
+					why = append(why, fmt.Sprintf("GPU %s (%s) cannot be passed through on its own: %s",
+						bdf, names[bdf], strings.Join(problems, "; ")))
+					continue
+				}
+			}
+			ok = append(ok, bdf)
+		}
+		return ok, why
+	}
+	rentable, why := isolated(free)
+
+	// The boot display stays with the host when another card can go -- judged
+	// on the cards that can, so it is never left out for a card that cannot.
+	if len(rentable) > 1 {
+		var keep, boot []string
+		for _, bdf := range rentable {
+			if data, err := h.ReadFile("/sys/bus/pci/devices/" + bdf + "/boot_vga"); err == nil && strings.TrimSpace(string(data)) == "1" && !ours[bdf] {
+				boot = append(boot, bdf)
+			} else {
+				keep = append(keep, bdf)
 			}
 		}
+		// Without the boot display, a card that shared its group would take it
+		// along anyway: the rest are judged again without it.
+		if kept, keptWhy := isolated(keep); len(boot) > 0 && len(kept) > 0 {
+			for _, bdf := range boot {
+				why = append(why, fmt.Sprintf("GPU %s (%s) is this machine's boot display, its console; it stays with the host while another GPU can be rented",
+					bdf, names[bdf]))
+			}
+			rentable = kept
+			why = append(why, keptWhy...)
+		}
 	}
-	return bdfs, len(bdfs) > 0
+	return rentable, append(excluded, why...)
 }
 
 // NormalizeBDF turns nvidia-smi's 8-digit PCI domain ("00000000:0F:01.0") into
-// the 4-digit form sysfs and VFIO use ("0000:0f:01.0"). Anything that does not
-// look like a PCI address is dropped.
-func NormalizeBDF(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	parts := strings.Split(s, ":")
-	if len(parts) != 3 || !strings.Contains(parts[2], ".") {
-		return ""
-	}
-	if len(parts[0]) == 8 {
-		parts[0] = parts[0][4:]
-	}
-	return strings.Join(parts, ":")
-}
+// the 4-digit form sysfs and VFIO use ("0000:0f:01.0").
+func NormalizeBDF(s string) string { return pcidev.NormalizeBDF(s) }
 
 // rentalTookGPUs reports whether the rental state on disk handed GPUs to its
 // VM (an unreadable state counts as yes: fail closed).

@@ -6,13 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/serverroom/gpu-marketplace/internal/pcidev"
 )
 
 // The base image every rental starts from: Ubuntu 26.04 LTS's official cloud
-// image, verified against Canonical's published SHA256SUMS, with the NVIDIA
-// driver baked in once so a rental boots straight to a working GPU.
+// image, verified against Canonical's published SHA256SUMS, with what this
+// machine's GPUs need baked in once (the NVIDIA driver, or the firmware AMD and
+// Intel GPUs load) so a rental boots straight to a working GPU.
 var (
 	UbuntuRelease = "resolute"
 	BakeTimeout   = 45 * time.Minute
@@ -48,6 +52,36 @@ type GoldenInfo struct {
 	// Extras are optional additions baked in besides the driver: "rdma" (the
 	// RDMA userspace tools and the mlx5_ib module a linked pair needs).
 	Extras []string `json:"extras,omitempty"`
+	// Vendors are the GPU makes (PCI vendor IDs) the image was baked for.
+	// Absent from images built by agents up to v0.2.0.
+	Vendors []string `json:"vendors,omitempty"`
+}
+
+// vendors are the makes an image serves. Agents up to v0.2.0 baked the NVIDIA
+// driver or nothing, and recorded no makes; such an image serves NVIDIA when it
+// has the driver, so an upgraded NVIDIA machine does not rebuild for nothing.
+func (g GoldenInfo) vendors() []string {
+	if len(g.Vendors) == 0 && g.Driver != "" && g.Driver != NoDriver {
+		return []string{pcidev.NVIDIA}
+	}
+	return g.Vendors
+}
+
+// machineVendors are the makes of the machine's rentable GPUs, sorted --
+// including GPUs the host is using now, so the image is already right on the
+// day they are free to rent. A processor's integrated GPU is never rented, so
+// it asks nothing of the image.
+func machineVendors(h Host) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range pcidev.Display(h) {
+		if !pcidev.Integrated(h, d) && !seen[d.Vendor] {
+			seen[d.Vendor] = true
+			out = append(out, d.Vendor)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // LoadGoldenInfo reads the record next to the baked image.
@@ -93,16 +127,35 @@ func GoldenDriver(h Host, spec Spec) string {
 
 // GoldenProblem says why the baked image on disk is not the one this agent
 // builds, or "" when it is. A golden image outlives an agent upgrade, so without
-// this a machine upgraded to a new release would keep renting out the old one.
+// this a machine upgraded to a new release would keep renting out the old one --
+// and one that gained a GPU of another make would rent it out with nothing for
+// it in the image.
 func GoldenProblem(h Host, spec Spec) string {
+	const rebuild = "; rebuild it with 'sudo gpu-agent runtime prepare'"
 	want := cloudImageName(spec.Arch)
 	info, err := LoadGoldenInfo(h, spec)
 	if err != nil || info.Base == "" {
-		return "the rental base image does not say which Ubuntu image it was built from; rebuild it with 'sudo gpu-agent runtime prepare'"
+		return "the rental base image does not say which Ubuntu image it was built from" + rebuild
 	}
 	if info.Base != want {
-		return "the rental base image was built from " + info.Base + ", and this agent rents out " + want +
-			"; rebuild it with 'sudo gpu-agent runtime prepare'"
+		return "the rental base image was built from " + info.Base + ", and this agent rents out " + want + rebuild
+	}
+	has := map[string]bool{}
+	for _, v := range info.vendors() {
+		has[v] = true
+	}
+	var missing []string
+	for _, gpu := range spec.GPUs {
+		v := pcidev.Read(h, gpu).Vendor
+		// NVIDIA's driver is judged by GoldenDriver and GoldenDriverProblem;
+		// here only what the other makes need (their firmware).
+		if len(GPUPackages(NoDriver, []string{v})) > 0 && !has[v] {
+			has[v] = true
+			missing = append(missing, pcidev.VendorName(v))
+		}
+	}
+	if len(missing) > 0 {
+		return "the rental base image was not built for this machine's " + strings.Join(missing, " and ") + " GPU" + rebuild
 	}
 	return ""
 }
@@ -193,7 +246,8 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	case o.DriverSource == "":
 		o.DriverSource = DriverFromFlag
 	}
-	userData, err := BakeUserData(o.Driver)
+	vendors := machineVendors(h)
+	userData, err := BakeUserData(o.Driver, vendors)
 	if err != nil {
 		return err
 	}
@@ -304,10 +358,10 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return err
 	}
 
-	if o.Driver == NoDriver {
-		log("Booting the base image to install the RDMA tools, without an NVIDIA driver: this machine has no NVIDIA GPU (this takes a while) ...")
+	if pkgs := GPUPackages(o.Driver, vendors); len(pkgs) > 0 {
+		log("Booting the base image to install %s and the RDMA tools (this takes a while) ...", strings.Join(pkgs, " "))
 	} else {
-		log("Booting the base image to install NVIDIA driver %s and the RDMA tools (this takes a while) ...", o.Driver)
+		log("Booting the base image to install the RDMA tools; this machine's GPUs need nothing beyond its kernel (this takes a while) ...")
 	}
 	if err := h.Run("systemd-run", LaunchArgs(spec, r)...); err != nil {
 		return fmt.Errorf("boot bake VM: %w", err)
@@ -333,7 +387,7 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	}
 	serial, _ := h.ReadFile(lastSerialLog(spec.DataDir))
 	if !strings.Contains(string(serial), markBake+" DONE") {
-		return errors.New("the driver install inside the base image did not succeed; see " + lastSerialLog(spec.DataDir))
+		return errors.New("the GPU package install inside the base image did not succeed; see " + lastSerialLog(spec.DataDir))
 	}
 
 	log("Flattening into %s ...", spec.GoldenImage)
@@ -355,7 +409,7 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	}
 	info, _ := json.MarshalIndent(GoldenInfo{Base: name, BaseSHA256: want, Driver: o.Driver,
 		AgentVersion: version, CreatedAt: time.Now().Unix(), DriverSource: o.DriverSource,
-		HostDriver: host.Describe(), Extras: extras}, "", "  ")
+		HostDriver: host.Describe(), Extras: extras, Vendors: vendors}, "", "  ")
 	_ = h.WriteFile(spec.GoldenImage+".json", info, 0600)
 	log("Golden image ready. Next: sudo gpu-agent check --boot")
 	return nil

@@ -250,7 +250,7 @@ func pairHost() *fakehost.Host {
 	return h
 }
 
-func startPair(t *testing.T, h *fakehost.Host, verify func() bool) (*Runtime, *fakeFence, error) {
+func startPair(t *testing.T, h *fakehost.Host, verify func([]BoundDevice) bool) (*Runtime, *fakeFence, error) {
 	t.Helper()
 	rt, fence := newRuntime(h, verify)
 	p := goodPair(t)
@@ -260,7 +260,7 @@ func startPair(t *testing.T, h *fakehost.Host, verify func() bool) (*Runtime, *f
 
 func TestPairStartTakesTheCardLast(t *testing.T) {
 	h := pairHost()
-	rt, _, err := startPair(t, h, func() bool { return true })
+	rt, _, err := startPair(t, h, func([]BoundDevice) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestPairStartTakesTheCardLast(t *testing.T) {
 func TestFailedPairBootGivesBothBack(t *testing.T) {
 	h := pairHost()
 	h.Fail["systemd-run"] = errors.New("qemu: vfio 0001:01:00.0: failed to setup container")
-	_, fence, err := startPair(t, h, func() bool { return true })
+	_, fence, err := startPair(t, h, func([]BoundDevice) bool { return true })
 	if err == nil {
 		t.Fatal("a failed boot started")
 	}
@@ -333,7 +333,7 @@ func TestRDMAUsersKeepTheCard(t *testing.T) {
 	h := pairHost()
 	h.Links["/proc/777/fd/4"] = "/dev/infiniband/uverbs0"
 	h.Files["/proc/777/comm"] = []byte("ib_write_bw\n")
-	_, _, err := startPair(t, h, func() bool { return true })
+	_, _, err := startPair(t, h, func([]BoundDevice) bool { return true })
 	if err == nil || !strings.Contains(err.Error(), "ib_write_bw (pid 777)") {
 		t.Fatalf("Start = %v", err)
 	}
@@ -363,7 +363,7 @@ func TestPairTeardownCatchesAChangedCard(t *testing.T) {
 		},
 	} {
 		h := pairHost()
-		rt, _, err := startPair(t, h, func() bool { return true })
+		rt, _, err := startPair(t, h, func([]BoundDevice) bool { return true })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -389,7 +389,7 @@ func TestGuestLinkMarkers(t *testing.T) {
 	}
 
 	h := pairHost()
-	rt, _, err := startPair(t, h, func() bool { return true })
+	rt, _, err := startPair(t, h, func([]BoundDevice) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestGuestLinkMarkers(t *testing.T) {
 }
 
 func TestBakeInstallsTheRDMATools(t *testing.T) {
-	ud, err := BakeUserData(DefaultDriver)
+	ud, err := BakeUserData(DefaultDriver, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +529,7 @@ func TestPairRentalOnASparkClosesItsDesktop(t *testing.T) {
 	h := sparkHost()
 	h.NIC(nic0, "enP1p1s0f0np0", nicMAC0, "MT2412X00001", nic0)
 	h.NIC(nic1, "enP1p1s0f1np1", nicMAC1, "MT2412X00001", nic1)
-	rt, _ := sparkRuntime(h, func() bool { return true })
+	rt, _ := sparkRuntime(h, func([]BoundDevice) bool { return true })
 	p := goodPair(t)
 	p.OtherMACs = nil
 	if err := rt.Start(StartOptions{ID: pairID, Pubkey: key(t), Pair: p}); err != nil {

@@ -29,7 +29,7 @@ func sparkHost() *fakehost.Host {
 	return h
 }
 
-func sparkRuntime(h *fakehost.Host, verify func() bool) (*Runtime, *fakeFence) {
+func sparkRuntime(h *fakehost.Host, verify func([]BoundDevice) bool) (*Runtime, *fakeFence) {
 	spec := testSpec()
 	spec.DesktopOnDemand = true
 	fence := &fakeFence{h: h}
@@ -38,7 +38,7 @@ func sparkRuntime(h *fakehost.Host, verify func() bool) (*Runtime, *fakeFence) {
 
 func TestSparkDesktopClosesForTheRentalAndComesBackAfter(t *testing.T) {
 	h := sparkHost()
-	rt, _ := sparkRuntime(h, func() bool { return true })
+	rt, _ := sparkRuntime(h, func([]BoundDevice) bool { return true })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatalf("Start = %v; a Spark's desktop must close for the rental", err)
 	}
@@ -81,12 +81,12 @@ func TestSparkDesktopComesBackWhenTheStartFails(t *testing.T) {
 // teardown of a VM that is gone brings the desktop back too.
 func TestSparkResumeTeardownStartsTheDesktop(t *testing.T) {
 	h := sparkHost()
-	rt, _ := sparkRuntime(h, func() bool { return true })
+	rt, _ := sparkRuntime(h, func([]BoundDevice) bool { return true })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatal(err)
 	}
 	h.SetFail("systemctl is-active --quiet gpu-rental-R1", errors.New("inactive")) // the machine rebooted
-	again, _ := sparkRuntime(h, func() bool { return true })
+	again, _ := sparkRuntime(h, func([]BoundDevice) bool { return true })
 	if again.Alive() {
 		t.Fatal("VM still alive")
 	}
@@ -197,7 +197,7 @@ func TestSparkDesktopLeavesNVIDIAServicesAsItFoundThem(t *testing.T) {
 	h.OnRun["systemctl start nvidia-persistenced"] = func(h *fakehost.Host, _ string) {
 		h.SetFail("systemctl is-active --quiet nvidia-persistenced", nil)
 	}
-	rt, _ := sparkRuntime(h, func() bool { return true })
+	rt, _ := sparkRuntime(h, func([]BoundDevice) bool { return true })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatal(err)
 	}

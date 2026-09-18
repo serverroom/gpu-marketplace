@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/serverroom/gpu-marketplace/internal/pcidev"
 )
 
 var pubkeyTypes = map[string]bool{
@@ -282,25 +284,46 @@ func ValidDriver(d string) bool { return driverPattern.MatchString(d) }
 // tools only -- no DOCA, no NCCL).
 var RDMAPackages = []string{"rdma-core", "ibverbs-utils", "perftest", "infiniband-diags", "rdmacm-utils", "ethtool"}
 
-// BakeUserData installs the NVIDIA driver (unless driver is NoDriver: a
-// machine without an NVIDIA GPU) and the RDMA tools into the base image once
-// (and the kernel's extra modules when the image's kernel lacks mlx5_ib), then
-// wipes cloud-init's memory of this boot (so every rental's first boot is a
-// first boot) and powers off. The host reads the result from the serial
-// console.
-func BakeUserData(driver string) (string, error) {
-	if driver != NoDriver && !ValidDriver(driver) {
-		return "", fmt.Errorf("invalid driver branch %q", driver)
-	}
-	install := "apt-get install -y --no-install-recommends"
-	nvidia := "true"
+// GPUPackages is what the rental image needs for this machine's GPUs: the
+// NVIDIA driver on the branch chosen for it (none when driver is NoDriver),
+// and the firmware AMD's amdgpu and Intel's i915 and xe load -- those drivers
+// are in the cloud image's kernel already, but the image ships no firmware and
+// the GPUs do not come up without it. Any other make gets what the kernel has.
+// vendors are PCI vendor IDs.
+func GPUPackages(driver string, vendors []string) []string {
+	var pkgs []string
 	if driver != NoDriver {
 		branch := strings.TrimSuffix(strings.TrimSuffix(driver, "-open"), "-server")
 		utils := "nvidia-utils-" + branch
 		if strings.Contains(driver, "-server") {
 			utils += "-server"
 		}
-		nvidia = install + " linux-headers-generic nvidia-driver-" + driver + " " + utils + " || ok=0"
+		pkgs = append(pkgs, "linux-headers-generic", "nvidia-driver-"+driver, utils)
+	}
+	for _, v := range vendors {
+		switch v {
+		case pcidev.AMD:
+			pkgs = append(pkgs, "linux-firmware-amd-graphics")
+		case pcidev.Intel:
+			pkgs = append(pkgs, "linux-firmware-intel-graphics")
+		}
+	}
+	return pkgs
+}
+
+// BakeUserData installs what this machine's GPUs need (GPUPackages) and the
+// RDMA tools into the base image once (and the kernel's extra modules when the
+// image's kernel lacks mlx5_ib), then wipes cloud-init's memory of this boot
+// (so every rental's first boot is a first boot) and powers off. The host reads
+// the result from the serial console.
+func BakeUserData(driver string, vendors []string) (string, error) {
+	if driver != NoDriver && !ValidDriver(driver) {
+		return "", fmt.Errorf("invalid driver branch %q", driver)
+	}
+	install := "apt-get install -y --no-install-recommends"
+	gpu := "true"
+	if pkgs := GPUPackages(driver, vendors); len(pkgs) > 0 {
+		gpu = install + " " + strings.Join(pkgs, " ") + " || ok=0"
 	}
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
@@ -317,7 +340,7 @@ func BakeUserData(driver string) (string, error) {
 		"ok=1",
 		"rdma=1",
 		"apt-get update || ok=0",
-		nvidia,
+		gpu,
 		install + " " + strings.Join(RDMAPackages, " ") + " || rdma=0",
 		"modinfo mlx5_ib >/dev/null 2>&1 || " + install + " linux-modules-extra-$(uname -r) || rdma=0",
 		"if [ $ok = 1 ] && [ $rdma = 1 ]; then /usr/local/sbin/gpuagent-say '" + markBake + " EXTRA " + ExtraRDMA + "'; fi",
@@ -334,6 +357,18 @@ func BakeUserData(driver string) (string, error) {
 // counts as blocked -- `timeout` exits 124 when nothing answered, while a
 // refused connection means the packet got through the fence and is reported
 // as REACHED.
+//
+// GPUs are reported from sysfs, whatever their make: each display-class or
+// accelerator-class PCI function as "PCI <vendor>:<device> <driver|none>
+// <memory MB|0> <guest address> <unmapped BARs>". The VM has no display of its
+// own (QEMU runs -nodefaults), so every such function is one the host passed
+// through. Memory comes from amdgpu's and xe's own sysfs files where the driver
+// has them. A BAR is unmapped when the kernel could not place it -- sysfs then
+// shows it at address 0 with its size, or with IORESOURCE_UNSET -- and only
+// the six standard memory BARs count: an unplaced expansion ROM, SR-IOV window
+// or legacy I/O window (which no GPU driver needs, and which a VM with many
+// cards runs out of) is normal in a VM. nvidia-smi, when the image has it, adds NVIDIA's names and
+// memory as NVSMI lines.
 func selfTestScript(probes []string, gpu bool) (string, error) {
 	for _, p := range probes {
 		host, port, err := net.SplitHostPort(p)
@@ -349,10 +384,30 @@ func selfTestScript(probes []string, gpu bool) (string, error) {
 	lines := []string{"#!/bin/bash", say + " '" + m + " BEGIN'"}
 	if gpu {
 		lines = append(lines,
-			"if out=$(nvidia-smi --query-gpu=pci.bus_id,name,memory.total --format=csv,noheader 2>&1); then",
-			"  while IFS= read -r line; do "+say+" \""+m+" GPU $line\"; done <<< \"$out\"",
-			"else",
-			"  "+say+" \""+m+" GPUFAIL $(printf '%s' \"$out\" | tr '\\n' ' ' | cut -c1-300)\"",
+			"udevadm settle --timeout=60 >/dev/null 2>&1",
+			"for d in /sys/bus/pci/devices/*; do",
+			"  case \"$(cat \"$d/class\" 2>/dev/null)\" in 0x03*|0x12*) ;; *) continue ;; esac",
+			"  id=\"$(sed 's/^0x//' \"$d/vendor\"):$(sed 's/^0x//' \"$d/device\")\"",
+			"  drv=none; [ -e \"$d/driver\" ] && drv=$(basename \"$(readlink -f \"$d/driver\")\")",
+			"  mem=0",
+			"  for f in \"$d/mem_info_vram_total\" \"$d/tile0/physical_vram_size_bytes\"; do",
+			"    v=$(cat \"$f\" 2>/dev/null); case \"$v\" in ''|*[!0-9]*) continue ;; esac",
+			"    mem=$(( v / 1048576 )); break",
+			"  done",
+			"  unmapped=0; n=0",
+			"  while read -r s e fl; do",
+			"    n=$((n + 1)); [ \"$n\" -le 6 ] || break",
+			"    [ \"$((fl & 0x200))\" -ne 0 ] || continue",
+			"    if [ \"$((fl & 0x20000000))\" -ne 0 ] || { [ \"$((s))\" -eq 0 ] && [ \"$((e))\" -ne 0 ]; }; then unmapped=$((unmapped + 1)); fi",
+			"  done < \"$d/resource\"",
+			"  "+say+" \""+m+" PCI $id $drv $mem ${d##*/} $unmapped\"",
+			"done",
+			"if command -v nvidia-smi >/dev/null 2>&1; then",
+			"  if out=$(nvidia-smi --query-gpu=pci.bus_id,name,memory.total --format=csv,noheader,nounits 2>&1); then",
+			"    while IFS= read -r line; do "+say+" \""+m+" NVSMI $line\"; done <<< \"$out\"",
+			"  else",
+			"    "+say+" \""+m+" NVSMIFAIL $(printf '%s' \"$out\" | tr '\\n' ' ' | cut -c1-300)\"",
+			"  fi",
 			"fi")
 	}
 	lines = append(lines,

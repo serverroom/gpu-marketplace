@@ -4,6 +4,8 @@ import (
 	"os"
 	"runtime"
 	"time"
+
+	"github.com/serverroom/gpu-marketplace/internal/pcidev"
 )
 
 // CPUInfo holds CPU details.
@@ -126,6 +128,13 @@ func collectGPUs() []GPUInfo {
 	if runtime.GOOS == "darwin" {
 		gpus, err = collectAppleGPU()
 		if err == nil && len(gpus) > 0 {
+			return gpus
+		}
+	}
+
+	// Any other GPU on Linux, straight from the PCI bus
+	if runtime.GOOS == "linux" {
+		if gpus := gpusFromPCI(pcidev.OS{}); len(gpus) > 0 {
 			return gpus
 		}
 	}

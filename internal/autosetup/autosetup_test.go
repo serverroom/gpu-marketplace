@@ -38,6 +38,7 @@ func machine(t *testing.T) *fakehost.Host {
 	h.Outputs["nvidia-smi --query-gpu=driver_version"] = "580.82.07\n"
 	h.Outputs["modinfo -F license nvidia"] = "NVIDIA\n"
 	h.PCI(gpu, "nvidia", "0x030200", gpu)
+	h.PCIID(gpu, "10de", "20c2")
 	h.Files["/proc/meminfo"] = []byte("MemTotal:       32000000 kB\n")
 	h.Files[dataDir] = nil
 	h.Outputs["df --output=avail"] = " Avail\n  900G\n"
@@ -237,12 +238,6 @@ func TestNothingRunsForAReasonOnlyAPersonCanFix(t *testing.T) {
 		},
 		"too little memory": func(h *fakehost.Host) { h.SetFile("/proc/meminfo", []byte("MemTotal: 4000000 kB\n")) },
 		"too little disk":   func(h *fakehost.Host) { h.Outputs["df --output=avail"] = " Avail\n  30G\n" },
-		// Since v0.2.0 a machine without a GPU hosts; one whose NVIDIA GPU the
-		// driver cannot see needs a person (to install the driver).
-		"a GPU without its driver": func(h *fakehost.Host) {
-			delete(h.Outputs, "nvidia-smi --query-gpu=pci.bus_id,name")
-			h.SetFile("/sys/bus/pci/devices/"+gpu+"/vendor", []byte("0x10de\n"))
-		},
 		"a desktop, not a Spark": func(h *fakehost.Host) {
 			h.SetLink("/proc/2558/fd/7", "/dev/nvidia0")
 			h.SetFile("/proc/2558/comm", []byte("Xorg\n"))
@@ -291,6 +286,13 @@ func TestEveryFixableReasonIsSetUp(t *testing.T) {
 		"never test-booted":         {noTestBoot, "test-boot"},
 		"test-booted by v0.1.9":     {func(h *fakehost.Host) { passed(h, "v0.1.9") }, "test-boot"},
 		"a fresh machine":           {func(h *fakehost.Host) { noTools(h, true); noImage(h); noTestBoot(h) }, "deps,image,test-boot"},
+		// Since v0.2.2 the host needs no GPU driver: an NVIDIA GPU nvidia-smi
+		// cannot see is set up and rented like any other GPU.
+		"a GPU without its driver": {func(h *fakehost.Host) {
+			delete(h.Outputs, "nvidia-smi --query-gpu=pci.bus_id,name")
+			delete(h.Outputs, "nvidia-smi --query-gpu=driver_version")
+			noImage(h)
+		}, "image,test-boot"},
 	} {
 		h := machine(t)
 		c.breakIt(h)
@@ -751,7 +753,9 @@ func TestASparkWithItsDesktopUpIsSetUp(t *testing.T) {
 	h.Outputs["nvidia-smi --query-gpu=driver_version"] = "580.95.05\n"
 	delete(h.Outputs, "modinfo -F license nvidia")
 	h.SetFile(vmrt.NVIDIAVersionFile, []byte("NVRM version: NVIDIA UNIX Open Kernel Module for aarch64  580.95.05\n"))
+	h.DeleteFile("/sys/bus/pci/devices/" + gpu + "/class") // the machine's GPU is the GB10 alone
 	h.PCI(spark, "nvidia", "0x030200", spark)
+	h.PCIID(spark, "10de", "2e12")
 	for name, v := range map[string]string{"sys_vendor": "NVIDIA", "product_name": "NVIDIA DGX Spark", "product_family": "DGX Spark"} {
 		h.SetFile("/sys/class/dmi/id/"+name, []byte(v+"\n"))
 	}

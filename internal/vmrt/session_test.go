@@ -54,7 +54,7 @@ func TestBrowsersInAGraphicalLoginAreTheDesktop(t *testing.T) {
 	h := newHost()
 	waylandLogin(h)
 	browsers(h)
-	desktop, other := ClassifyGPUHolders(h)
+	desktop, other := ClassifyGPUHolders(h, []string{testGPU})
 	if strings.Join(desktop, ", ") != "chrome (pid 3100), firefox (pid 3200)" || len(other) != 0 {
 		t.Errorf("desktop = %v, other = %v", desktop, other)
 	}
@@ -88,7 +88,7 @@ func TestWhatIsAndIsNotTheDesktop(t *testing.T) {
 		if c.parent != "" {
 			h.SetFile("/proc/4242/status", []byte("PPid:\t901\n"))
 		}
-		desktop, _ := ClassifyGPUHolders(h)
+		desktop, _ := ClassifyGPUHolders(h, []string{testGPU})
 		if (len(desktop) == 1) != c.desktop {
 			t.Errorf("%s: desktop = %v, want desktop=%v", name, desktop, c.desktop)
 		}
@@ -112,7 +112,7 @@ func TestCgroupV1PathIsRead(t *testing.T) {
 // browsers with it, and comes back after.
 func TestASparkWithBrowsersOpenIsRentedWithoutASingleStep(t *testing.T) {
 	h := sparkInUse()
-	rt, _ := sparkRuntime(h, func() bool { return true })
+	rt, _ := sparkRuntime(h, func([]BoundDevice) bool { return true })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatalf("Start = %v; a Spark with browsers open must close its desktop for the rental", err)
 	}
@@ -131,7 +131,7 @@ func TestASparkWithNvidiaSmiRunningOnItsDesktop(t *testing.T) {
 	inCgroup(h, "3300", "/user.slice/user-1000.slice/session-2.scope")
 	stop := h.OnRun["systemctl stop "+dm]
 	h.OnRun["systemctl stop "+dm] = func(h *fakehost.Host, cmd string) { stop(h, cmd); h.DeleteLink("/proc/3300/fd/3") }
-	rt, _ := sparkRuntime(h, func() bool { return true })
+	rt, _ := sparkRuntime(h, func([]BoundDevice) bool { return true })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatalf("Start = %v", err)
 	}

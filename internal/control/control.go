@@ -57,6 +57,15 @@ type Capability struct {
 	// Setup is where the automatic setup stands; absent before v0.2.0 and on
 	// a machine it never ran on.
 	Setup *SetupProgress `json:"setup,omitempty"`
+	// GPUs are what the last passing test boot saw inside the VM -- what a
+	// renter gets, of any make. Absent until the machine has passed one, and
+	// before v0.2.2.
+	GPUs []GPU `json:"gpus,omitempty"`
+	// Excluded names the GPUs on this machine that rentals leave out, and why:
+	// the host is using one, it is already given to a VM of the host's own, it
+	// is the processor's integrated GPU or the host's console, or it cannot be
+	// passed through on its own. Absent before v0.2.2.
+	Excluded []string `json:"excluded,omitempty"`
 }
 
 // SetupProgress is the automatic setup's last attempt in brief: the step
@@ -121,6 +130,18 @@ type Guest struct {
 	MemoryGB int    `json:"memory_gb"`
 	DiskGB   int    `json:"disk_gb"`
 	CPU      string `json:"cpu"`
+}
+
+// GPU is one GPU a rental gets, as the rental's own VM saw it.
+type GPU struct {
+	Model string `json:"model"`
+	PCIID string `json:"pci_id"`
+	// MemoryMB is absent when nothing in the VM could say (a driver without a
+	// memory figure, or no driver at all).
+	MemoryMB int  `json:"memory_mb,omitempty"`
+	Unified  bool `json:"unified_memory,omitempty"`
+	// Driver is absent when no driver took the GPU inside the VM.
+	Driver string `json:"driver,omitempty"`
 }
 
 // Provisioner is the agent action layer the control channel drives. The real

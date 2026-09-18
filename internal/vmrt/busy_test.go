@@ -118,7 +118,7 @@ func TestSelfTestStopsWhenCancelled(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.OnSleep = func(*fakehost.Host) { cancel() } // the VM never reports; the agent stops
-	rt, fence := newRuntime(h, func() bool { return true })
+	rt, fence := newRuntime(h, func([]BoundDevice) bool { return true })
 	res := rt.SelfTestContext(ctx, "v0.1.10")
 	if res.Passed || !res.Stopped || len(res.Problems) == 0 || !strings.Contains(res.Problems[0], "stopped before it finished") {
 		t.Fatalf("result = %+v", res)
@@ -152,7 +152,7 @@ func TestSelfTestStoppedButDirtyIsRecorded(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.OnSleep = func(*fakehost.Host) { cancel() }
-	rt, _ := newRuntime(h, func() bool { return false }) // the GPU does not verify clean after the VM
+	rt, _ := newRuntime(h, func([]BoundDevice) bool { return false }) // the GPU does not verify clean after the VM
 	res := rt.SelfTestContext(ctx, "v0.1.10")
 	if res.Passed || res.Stopped {
 		t.Fatalf("result = %+v", res)

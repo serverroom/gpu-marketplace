@@ -31,12 +31,15 @@ type Runtime struct {
 	spec  Spec
 	fence Fence
 	// verifyGPU checks, after the GPUs are back on their driver, that nothing of
-	// the rental is left on them. Vendor-specific, so the provisioner supplies it.
-	verifyGPU func() bool
+	// the rental is left on them. Vendor-specific, so the provisioner supplies
+	// it. It is given the functions the rental took with the drivers they went
+	// back to, as the rental recorded them -- not what the host shows now, which
+	// after an agent restart mid-rental is vfio-pci.
+	verifyGPU func(returned []BoundDevice) bool
 }
 
 // New builds a runtime.
-func New(h Host, spec Spec, fence Fence, verifyGPU func() bool) *Runtime {
+func New(h Host, spec Spec, fence Fence, verifyGPU func(returned []BoundDevice) bool) *Runtime {
 	return &Runtime{h: h, spec: spec, fence: fence, verifyGPU: verifyGPU}
 }
 
@@ -216,7 +219,7 @@ func gpuInUse(holders []string) error {
 }
 
 func (rt *Runtime) takeGPUs(st *State, r *Rental, save func() error) error {
-	g := readGPUHolders(rt.h)
+	g := readGPUHolders(rt.h, rt.spec.GPUs)
 	if len(g.desktop) > 0 && !rt.spec.DesktopOnDemand {
 		return errors.New(DesktopOnGPUProblem(g.desktop))
 	}
@@ -227,7 +230,7 @@ func (rt *Runtime) takeGPUs(st *State, r *Rental, save func() error) error {
 	}
 	if len(g.desktop) == 0 {
 		// Short-lived tools (an nvidia-smi) are given a moment to exit.
-		g = settleGPUHolders(rt.h)
+		g = settleGPUHolders(rt.h, rt.spec.GPUs)
 		if busy := g.busy(); len(busy) > 0 {
 			return gpuInUse(busy)
 		}
@@ -368,7 +371,7 @@ func (rt *Runtime) Stop() StopResult {
 		_ = rt.h.Run("systemctl", "start", unit)
 	}
 	res.GPUClean = released && vmGone
-	if len(st.Devices) > 0 && res.GPUClean && rt.verifyGPU != nil && !rt.verifyGPU() {
+	if len(st.Devices) > 0 && res.GPUClean && rt.verifyGPU != nil && !rt.verifyGPU(st.Devices) {
 		res.GPUClean = false
 		res.Detail = append(res.Detail, "the GPU did not verify clean after the rental")
 	}

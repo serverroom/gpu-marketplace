@@ -73,7 +73,7 @@ func (rt *Runtime) releaseDesktop(st *State, desktop []string, save func() error
 		return errors.New(DesktopOnGPUProblem(desktop))
 	}
 	for waited := time.Duration(0); ; waited += desktopPoll {
-		left := readGPUHolders(rt.h).all()
+		left := readGPUHolders(rt.h, rt.spec.GPUs).all()
 		if len(left) == 0 {
 			return nil
 		}

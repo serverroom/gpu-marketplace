@@ -283,6 +283,15 @@ func (h *Host) LoseNetdev(bdf string) {
 	}
 }
 
+// PCIID gives a registered device its vendor and device IDs, as sysfs writes
+// them ("0x10de"). Pass them without the prefix: PCIID(bdf, "10de", "2684").
+func (h *Host) PCIID(bdf, vendor, device string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Files[pciDevices+bdf+"/vendor"] = []byte("0x" + vendor + "\n")
+	h.Files[pciDevices+bdf+"/device"] = []byte("0x" + device + "\n")
+}
+
 // Driver is the driver a device is bound to now.
 func (h *Host) Driver(bdf string) string {
 	h.mu.Lock()

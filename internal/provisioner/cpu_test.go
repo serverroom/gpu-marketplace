@@ -73,17 +73,18 @@ func TestTheIOMMUAndTheTestBootWithoutAGPU(t *testing.T) {
 	}
 }
 
-// A machine with a GPU the driver cannot see is refused, not rented as a
-// machine without one.
-func TestAnNVIDIAGPUWithoutItsDriverIsNotACPUMachine(t *testing.T) {
+// An NVIDIA GPU the host has no driver for is still a GPU: the host needs no
+// GPU driver (the rental's VM is where it has to work), so it is rented, and
+// never passed off as a machine without one.
+func TestAnNVIDIAGPUWithoutItsDriverIsStillAGPU(t *testing.T) {
 	h := cpuHost(t)
 	h.PCI("0000:41:00.0", "", "0x030200")
-	h.Files["/sys/bus/pci/devices/0000:41:00.0/vendor"] = []byte("0x10de\n")
+	h.PCIID("0000:41:00.0", "10de", "27b8")
 	rep := Preflight(h, "linux", spec(), version)
 	got := reasons(rep)
-	if rep.Vendor != VendorNVIDIA || rep.GPUCount != 1 || !strings.Contains(got, "NVIDIA GPU (PCI 0000:41:00.0), but nvidia-smi does not see it") ||
-		!strings.Contains(got, "IOMMU") {
-		t.Errorf("vendor %s count %d reasons %s", rep.Vendor, rep.GPUCount, got)
+	if rep.Vendor != VendorPCI || rep.GPUCount != 1 || strings.Join(rep.BDFs, " ") != "0000:41:00.0" ||
+		strings.Contains(got, "nvidia-smi does not see it") || !strings.Contains(got, "IOMMU") {
+		t.Errorf("vendor %s count %d bdfs %v reasons %s", rep.Vendor, rep.GPUCount, rep.BDFs, got)
 	}
 	if !HasNVIDIAGPU(h) {
 		t.Errorf("runtime prepare would bake no driver for a machine with an NVIDIA GPU")

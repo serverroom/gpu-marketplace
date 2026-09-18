@@ -78,7 +78,7 @@ func TestAPinnedVMRunsOnItsCores(t *testing.T) {
 // and the VM stays on the Cortex-X925 cores.
 func TestAPinnedPairRental(t *testing.T) {
 	h := pairHost()
-	rt := New(h, func() Spec { s := testSpec(); s.GuestCores = []int{0, 1, 2, 3}; return s }(), &fakeFence{h: h}, func() bool { return true })
+	rt := New(h, func() Spec { s := testSpec(); s.GuestCores = []int{0, 1, 2, 3}; return s }(), &fakeFence{h: h}, func([]BoundDevice) bool { return true })
 	p := goodPair(t)
 	p.OtherMACs = nil
 	if err := rt.Start(StartOptions{ID: pairID, Pubkey: key(t), Pair: p}); err != nil {
@@ -95,7 +95,7 @@ func TestTheRentalsLiveInTheStorageDir(t *testing.T) {
 	h := newHost()
 	s := testSpec()
 	s.StorageDir = "/mnt/nvme/gpu-agent"
-	rt := New(h, s, &fakeFence{h: h}, func() bool { return true })
+	rt := New(h, s, &fakeFence{h: h}, func([]BoundDevice) bool { return true })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatal(err)
 	}

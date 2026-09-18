@@ -21,7 +21,7 @@ func sparkDesktopHost() *fakehost.Host {
 }
 
 func TestClassifyGPUHoldersOnADesktopSpark(t *testing.T) {
-	desktop, other := ClassifyGPUHolders(sparkDesktopHost())
+	desktop, other := ClassifyGPUHolders(sparkDesktopHost(), []string{testGPU})
 	want := "Xorg (pid 2558), gnome-shell (pid 2872), mutter-x11-fram (pid 2909)"
 	if strings.Join(desktop, ", ") != want {
 		t.Errorf("desktop = %v, want %s", desktop, want)
@@ -39,7 +39,7 @@ func TestProcessNamePrefersTheExecutable(t *testing.T) {
 	h.Links["/proc/78/fd/3"] = "/dev/nvidiactl"
 	h.Files["/proc/78/comm"] = []byte("python3\n")
 	h.Links["/proc/78/exe"] = "/usr/bin/python3.12"
-	desktop, other := ClassifyGPUHolders(h)
+	desktop, other := ClassifyGPUHolders(h, []string{testGPU})
 	if len(desktop) != 0 || strings.Join(other, ",") != "python3.12 (pid 78)" {
 		t.Errorf("desktop = %v, other = %v", desktop, other)
 	}

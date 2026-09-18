@@ -20,6 +20,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/interconnect"
 	"github.com/serverroom/gpu-marketplace/internal/register"
+	"github.com/serverroom/gpu-marketplace/internal/stats"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
@@ -27,6 +28,7 @@ import (
 type Runner interface {
 	Run(name string, args ...string) error
 	Output(name string, args ...string) (string, error)
+	LookPath(name string) (string, error)
 }
 
 const (
@@ -43,12 +45,13 @@ const (
 	vramClearThresholdMiB = 512
 )
 
-// GPUVendor selects the toolchain used to verify the host's GPUs after a rental.
+// GPUVendor is the kind of GPU a machine has, as far as renting it goes.
 type GPUVendor string
 
 const (
-	VendorNVIDIA GPUVendor = "nvidia"
-	VendorAMD    GPUVendor = "amd"
+	// VendorPCI is a Linux machine's GPUs, of any make: PCI functions handed to
+	// the microVM over VFIO.
+	VendorPCI GPUVendor = "pci"
 	// VendorApple cannot host rentals: Apple Silicon has no IOMMU passthrough
 	// path, so there is no device to hand a guest. (Unified memory on its own is
 	// not the problem -- a GB10 has it and can host.)
@@ -66,10 +69,9 @@ var ErrVendorCannotIsolate = errors.New("this host's GPUs cannot be isolated for
 // host a rental. The reasons are in the error and in Capability().
 var ErrNotReady = errors.New("this machine cannot host a rental")
 
-// CanIsolate reports whether a host with these GPUs can hand one to a guest and
-// prove it clean afterwards.
+// CanIsolate reports whether a host with these GPUs can hand one to a guest.
 func (v GPUVendor) CanIsolate() bool {
-	return v == VendorNVIDIA || v == VendorAMD
+	return v == VendorPCI
 }
 
 // CanHost reports whether a machine with these GPUs -- or none -- can host a
@@ -560,56 +562,144 @@ func (p *Provisioner) resume() (freed bool) {
 // verifySleep is how long the verifier waits between looks; a variable for tests.
 var verifySleep = func() { time.Sleep(5 * time.Second) }
 
-// gpuVerifier checks, once the runtime has given the GPUs back, that they are
-// back with their driver and that nothing of the rental is on them.
-func gpuVerifier(r Runner, vendor GPUVendor, unified bool, bdfs []string) func() bool {
-	return func() bool {
-		switch vendor {
-		case VendorNVIDIA:
-			// The driver takes a moment to bring a GPU back after it is rebound.
-			back := false
-			for i := 0; i < 12 && !back; i++ {
-				out, err := r.Output("nvidia-smi", "--query-gpu=pci.bus_id", "--format=csv,noheader")
-				if err == nil && allListed(out, bdfs) {
-					back = true
-					break
-				}
-				verifySleep()
+// gpuVerifier is the vendor's own look at the GPUs, once the runtime has given
+// them back. For every make the release has already verified the part that
+// needs no vendor: the reset, and each GPU back on the driver it came from.
+// This adds what a vendor tool can see, where the tool is installed and the GPU
+// went back to that vendor's driver: nvidia-smi lists the GPU again and shows
+// nothing of the rental on it, and rocm-smi shows its memory clear. It looks at
+// the rented GPUs only -- a GPU the rental left out may be busy with the
+// provider's own work. Which GPUs those are, and their drivers, come from what
+// the rental recorded, so an agent restarted mid-rental still asks.
+func gpuVerifier(r Runner) func(returned []vmrt.BoundDevice) bool {
+	return func(returned []vmrt.BoundDevice) bool {
+		var nvidia, amd []string
+		for _, d := range returned {
+			switch d.Driver {
+			case "nvidia":
+				nvidia = append(nvidia, d.BDF)
+			case "amdgpu":
+				amd = append(amd, d.BDF)
 			}
-			if !back {
+		}
+		if _, err := r.LookPath("nvidia-smi"); len(nvidia) > 0 && err == nil && !nvidiaClear(r, nvidia) {
+			return false
+		}
+		if _, err := r.LookPath("rocm-smi"); len(amd) > 0 && err == nil {
+			out, err := r.Output("rocm-smi", "--showbus", "--showmeminfo", "vram", "--csv")
+			if err != nil || !amdClear(out, amd) {
 				return false
 			}
-			if unified {
-				// No VRAM figure exists: the GPU's memory is the machine's pool,
-				// which the kernel took back when the VM exited and only ever
-				// hands out again zeroed. What must be true is that nothing still
-				// holds the GPU.
-				out, err := r.Output("nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader")
-				return err == nil && strings.TrimSpace(out) == ""
-			}
-			out, err := r.Output("nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits")
-			return err == nil && VerifyVRAMClear(out)
-		case VendorAMD:
-			out, err := r.Output("rocm-smi", "--showmeminfo", "vram", "--csv")
-			return err == nil && VerifyAMDVRAMClear(out)
 		}
-		return false
+		return true
 	}
 }
 
-func allListed(out string, bdfs []string) bool {
-	listed := map[string]bool{}
+// smiRows reads nvidia-smi's "<bus id>, <name>, <value>" rows by PCI address.
+// The name sits between the first and the last comma.
+func smiRows(out string) map[string][2]string {
+	rows := map[string][2]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		first, last := strings.Index(line, ","), strings.LastIndex(line, ",")
+		if first < 0 || last <= first {
+			continue
+		}
+		if bdf := NormalizeBDF(line[:first]); bdf != "" {
+			rows[bdf] = [2]string{strings.TrimSpace(line[first+1 : last]), strings.TrimSpace(line[last+1:])}
+		}
+	}
+	return rows
+}
+
+func nvidiaClear(r Runner, bdfs []string) bool {
+	// The driver takes a moment to bring a GPU back after it is rebound.
+	var rows map[string][2]string
+	back := false
+	for i := 0; i < 12 && !back; i++ {
+		out, err := r.Output("nvidia-smi", "--query-gpu=pci.bus_id,name,memory.used", "--format=csv,noheader,nounits")
+		if err == nil {
+			rows = smiRows(out)
+			back = true
+			for _, b := range bdfs {
+				back = back && rows[b] != [2]string{}
+			}
+		}
+		if !back {
+			verifySleep()
+		}
+	}
+	if !back {
+		return false
+	}
+	var used, unified []string
+	for _, b := range bdfs {
+		// A GPU with no memory figure -- a GB10, whose memory is the machine's
+		// pool, or any GPU nvidia-smi says [N/A] for -- is checked by what
+		// holds it instead.
+		if _, err := strconv.Atoi(rows[b][1]); err != nil || stats.IsUnifiedMemoryModel(rows[b][0]) {
+			unified = append(unified, b)
+		} else {
+			used = append(used, rows[b][1])
+		}
+	}
+	if len(used) > 0 && !VerifyVRAMClear(strings.Join(used, "\n")) {
+		return false
+	}
+	if len(unified) == 0 {
+		return true
+	}
+	// A unified GPU has no VRAM figure: its memory is the machine's pool, which
+	// the kernel took back when the VM exited and only ever hands out again
+	// zeroed. What must be true is that nothing still holds the GPU.
+	out, err := r.Output("nvidia-smi", "--query-compute-apps=gpu_bus_id,pid", "--format=csv,noheader")
+	if err != nil {
+		return false
+	}
 	for _, line := range strings.Split(out, "\n") {
-		if bdf := NormalizeBDF(line); bdf != "" {
-			listed[bdf] = true
+		bus, _, _ := strings.Cut(line, ",")
+		for _, b := range unified {
+			if NormalizeBDF(bus) == b {
+				return false
+			}
 		}
 	}
-	for _, bdf := range bdfs {
-		if !listed[bdf] {
-			return false
+	return true
+}
+
+// amdClear is VerifyAMDVRAMClear over the rented GPUs' rows only, found by the
+// PCI Bus column --showbus adds. A rented GPU rocm-smi does not list is not
+// clear. Output without that column is judged whole, as before.
+func amdClear(out string, bdfs []string) bool {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 {
+		return false
+	}
+	col := -1
+	for i, h := range strings.Split(lines[0], ",") {
+		if strings.Contains(strings.ToLower(h), "bus") {
+			col = i
+			break
 		}
 	}
-	return len(bdfs) > 0
+	if col < 0 {
+		return VerifyAMDVRAMClear(out)
+	}
+	want := map[string]bool{}
+	for _, b := range bdfs {
+		want[b] = true
+	}
+	kept := []string{lines[0]}
+	seen := map[string]bool{}
+	for _, line := range lines[1:] {
+		cols := strings.Split(line, ",")
+		if col < len(cols) {
+			if bdf := NormalizeBDF(cols[col]); want[bdf] {
+				seen[bdf] = true
+				kept = append(kept, line)
+			}
+		}
+	}
+	return len(seen) == len(want) && VerifyAMDVRAMClear(strings.Join(kept, "\n"))
 }
 
 // VerifyVRAMClear returns true only if every GPU reports used VRAM below the clear

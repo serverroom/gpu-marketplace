@@ -12,7 +12,8 @@ import (
 const pairTestID = "1a2b3c4d" + PairTestSuffix
 
 const goodPairSerial = "GPUAGENT-SELFTEST BEGIN\n" +
-	"GPUAGENT-SELFTEST GPU 00000000:06:00.0, NVIDIA GB10, [N/A]\n" +
+	"GPUAGENT-SELFTEST PCI 10de:20b5 nvidia 0 0000:06:00.0 0\n" +
+	"GPUAGENT-SELFTEST NVSMI 00000000:06:00.0, NVIDIA GB10, [N/A]\n" +
 	"GPUAGENT-SELFTEST INTERNET ok\n" +
 	"GPUAGENT-SELFTEST BLOCKED 10.254.254.1:22\n" +
 	"GPUAGENT-SELFTEST BLOCKED 192.168.1.1:80\n" +
@@ -22,6 +23,9 @@ const goodPairSerial = "GPUAGENT-SELFTEST BEGIN\n" +
 	"GPUAGENT-SELFTEST PAIR PING ok 0\nGPUAGENT-SELFTEST RDMA 0 112.43\n" +
 	"GPUAGENT-SELFTEST PAIR PING ok 1\nGPUAGENT-SELFTEST RDMA 1 110.90\n" +
 	"GPUAGENT-SELFTEST NCCL skipped\nGPUAGENT-SELFTEST PAIR END\n"
+
+// gb10Host is the GPU the pair fixtures pass through.
+var gb10Host = []HostGPU{hostGPU(testGPU, "10de", "20b5", "NVIDIA GB10")}
 
 func testPair() *PairOptions {
 	p := &PairOptions{Node: "a", PeerHostname: "gpu-1a2b3c4d-b", MTU: 9000, Functions: []string{nic0, nic1},
@@ -45,14 +49,14 @@ func TestParsePairSerial(t *testing.T) {
 func TestEvaluatePair(t *testing.T) {
 	clean := StopResult{Wiped: true, GPUClean: true}
 	all := map[int]bool{0: true, 1: true}
-	good := EvaluatePair(ParseSerial(goodPairSerial), ParsePairSerial(goodPairSerial), all, []string{testGPU}, probes, true,
+	good := EvaluatePair(ParseSerial(goodPairSerial), ParsePairSerial(goodPairSerial), all, gb10Host, probes, true,
 		clean, testPair(), []string{"58:a2:e1:00:01:01", "58:a2:e1:00:01:02"}, 100, "v0.2.0-dev", 1)
 	if !good.Passed || good.Node != "a" || strings.Join(good.LocalMACs, ",") != nicMAC0+","+nicMAC1 || len(good.RDMAGbps) != 2 || good.RDMAGbps[1] != 110.9 {
 		t.Fatalf("a good pair test = %+v", good)
 	}
 
 	bad := strings.NewReplacer("RDMA 1 110.90", "RDMA 1 61.20", "PAIR PING ok 0", "PAIR PING fail 0", "RDMA 0 112.43", "RDMAFAIL 0 no RDMA device behind cx7p0 (mlx5_ib)").Replace(goodPairSerial)
-	res := EvaluatePair(ParseSerial(bad), ParsePairSerial(bad), map[int]bool{1: true}, []string{testGPU}, probes, true,
+	res := EvaluatePair(ParseSerial(bad), ParsePairSerial(bad), map[int]bool{1: true}, gb10Host, probes, true,
 		StopResult{Wiped: true, GPUClean: true, NICDirty: true, Detail: []string{"the firmware of the ConnectX function 0001:01:00.0 changed"}},
 		testPair(), nil, 100, "v0.2.0-dev", 1)
 	if res.Passed {
@@ -67,7 +71,7 @@ func TestEvaluatePair(t *testing.T) {
 		}
 	}
 
-	unfinished := EvaluatePair(ParseSerial(goodPairSerial), PairSerialReport{}, all, []string{testGPU}, probes, true, clean, testPair(), nil, 100, "v", 1)
+	unfinished := EvaluatePair(ParseSerial(goodPairSerial), PairSerialReport{}, all, gb10Host, probes, true, clean, testPair(), nil, 100, "v", 1)
 	if unfinished.Passed || !strings.Contains(strings.Join(unfinished.Problems, " "), "never finished its pair report") {
 		t.Errorf("an unfinished report passed: %+v", unfinished)
 	}
@@ -124,7 +128,7 @@ func TestPairSelfTestEndToEnd(t *testing.T) {
 		id := strings.TrimPrefix(unit, "gpu-rental-")
 		h.SetFile(NewRental(dataDir, id).SerialLog, []byte(goodPairSerial+"GPUAGENT-SELFTEST BLOCKED 192.168.1.50:22\n"))
 	}
-	rt, _ := newRuntime(h, func() bool { return true })
+	rt, _ := newRuntime(h, func([]BoundDevice) bool { return true })
 	res := rt.PairSelfTest("v0.2.0-dev", PairSelfTestOptions{ID: pairTestID, Pair: testPair(), MinRDMAGbps: 100,
 		PeerMACs: []string{"58:a2:e1:00:01:01", "58:a2:e1:00:01:02"}, PeerListing: "B"})
 	if !res.Passed {

@@ -40,8 +40,9 @@ func (f *fakeFence) Remove() error {
 func newHost() *fakehost.Host {
 	h := fakehost.New()
 	h.PCI(testGPU, "nvidia", "0x030200", testGPU, testAudio)
+	h.PCIID(testGPU, "10de", "20b5")
 	h.PCI(testAudio, "snd_hda_intel", "0x040300", testGPU, testAudio)
-	h.Files["/sys/bus/pci/devices/"+testGPU+"/vendor"] = []byte("0x10de")
+	h.PCIID(testAudio, "10de", "1aef")
 	h.Files["/proc/sys/net/ipv4/ip_forward"] = []byte("0\n")
 	h.Files["/usr/share/OVMF/OVMF_VARS_4M.fd"] = []byte("vars")
 	h.Outputs["losetup --find --show"] = "/dev/loop7\n"
@@ -79,7 +80,7 @@ func testSpec() Spec {
 	}
 }
 
-func newRuntime(h *fakehost.Host, verify func() bool) (*Runtime, *fakeFence) {
+func newRuntime(h *fakehost.Host, verify func([]BoundDevice) bool) (*Runtime, *fakeFence) {
 	fence := &fakeFence{h: h}
 	return New(h, testSpec(), fence, verify), fence
 }
@@ -204,7 +205,7 @@ func TestPersistencedIsStoppedAndRestarted(t *testing.T) {
 
 func TestStopVerifiesAndClears(t *testing.T) {
 	h := newHost()
-	rt, fence := newRuntime(h, func() bool { return true })
+	rt, fence := newRuntime(h, func([]BoundDevice) bool { return true })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,7 @@ func TestStopVerifiesAndClears(t *testing.T) {
 // and refuses the next rental.
 func TestUnverifiedWipeQuarantinesTheMachine(t *testing.T) {
 	h := newHost()
-	rt, _ := newRuntime(h, func() bool { return true })
+	rt, _ := newRuntime(h, func([]BoundDevice) bool { return true })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatal(err)
 	}
@@ -247,12 +248,32 @@ func TestUnverifiedWipeQuarantinesTheMachine(t *testing.T) {
 
 func TestGPUThatDoesNotVerifyIsDirty(t *testing.T) {
 	h := newHost()
-	rt, _ := newRuntime(h, func() bool { return false })
+	rt, _ := newRuntime(h, func([]BoundDevice) bool { return false })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatal(err)
 	}
 	if res := rt.Stop(); res.GPUClean {
 		t.Fatalf("an unverified GPU counted as clean: %+v", res)
+	}
+}
+
+// The agent can restart while a rental runs (an upgrade, a crash). Its new
+// runtime then sees the GPUs on vfio-pci, so the drivers they go back to must
+// come from what the rental recorded, or the vendor's checks would be skipped.
+func TestTheVerifierIsToldTheDriversTheRentalRecorded(t *testing.T) {
+	h := newHost()
+	first, _ := newRuntime(h, nil)
+	if err := first.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
+		t.Fatal(err)
+	}
+	var got []BoundDevice
+	restarted, _ := newRuntime(h, func(returned []BoundDevice) bool { got = returned; return true })
+	if res := restarted.Stop(); !res.Clean() {
+		t.Fatalf("Stop = %+v", res)
+	}
+	want := []BoundDevice{{BDF: testGPU, Driver: "nvidia"}, {BDF: testAudio, Driver: "snd_hda_intel"}}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("verifier got %+v, want %+v", got, want)
 	}
 }
 
@@ -273,7 +294,7 @@ func TestVMThatExitsWhileBootingFails(t *testing.T) {
 func TestDockerForwardPolicyIsOpenedForTheRentalOnlyWhileRented(t *testing.T) {
 	h := newHost()
 	h.SetFail("iptables -S DOCKER-USER", nil)
-	rt, _ := newRuntime(h, func() bool { return true })
+	rt, _ := newRuntime(h, func([]BoundDevice) bool { return true })
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatal(err)
 	}

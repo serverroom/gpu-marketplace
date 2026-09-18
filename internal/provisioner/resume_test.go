@@ -29,7 +29,7 @@ func runtimeWithState(t *testing.T, st *vmrt.State, desktopOnDemand bool) (*fake
 	}
 	s := spec()
 	s.DesktopOnDemand = desktopOnDemand
-	return h, vmrt.New(h, s, nopFence{}, func() bool { return true })
+	return h, vmrt.New(h, s, nopFence{}, func([]vmrt.BoundDevice) bool { return true })
 }
 
 // An agent restarted halfway through its own base image build must not take
@@ -41,7 +41,7 @@ func TestResumeTearsDownAnOrphanedSetupVM(t *testing.T) {
 		h.OnRun["systemctl stop gpu-rental-"+id] = func(h *fakehost.Host, cmd string) {
 			h.SetFail("systemctl is-active --quiet "+fakehost.LastField(cmd), errors.New("inactive"))
 		}
-		p := New(rt, VendorNVIDIA, []string{gpu}, false)
+		p := New(rt, VendorPCI, []string{gpu}, false)
 		withFakeForward(t, nil)
 		p.Resume()
 		if p.Status() != StatusFree || rt.Present() {
@@ -60,7 +60,7 @@ func TestResumeLeavesASetupVMAnotherProcessRuns(t *testing.T) {
 	other := os.Getpid() + 1
 	h.Files[vmrt.BusyPath(dataDir)] = []byte(fmt.Sprintf(`{"pid":%d,"what":"building the rental image"}`, other))
 	h.Files[fmt.Sprintf("/proc/%d", other)] = nil
-	p := New(rt, VendorNVIDIA, []string{gpu}, false)
+	p := New(rt, VendorPCI, []string{gpu}, false)
 	p.Resume()
 	if !rt.Present() || h.Ran("run systemctl stop") {
 		t.Error("another process's bake was torn down")
@@ -75,7 +75,7 @@ func TestResumeLeavesASetupVMAnotherProcessRuns(t *testing.T) {
 func TestResumeTeardownStartsTheSparkDesktop(t *testing.T) {
 	st := &vmrt.State{RentalID: "R1", Rental: vmrt.NewRental(dataDir, "R1"), StoppedDisplayManager: "display-manager.service"}
 	h, rt := runtimeWithState(t, st, true)
-	p := New(rt, VendorNVIDIA, []string{gpu}, false)
+	p := New(rt, VendorPCI, []string{gpu}, false)
 	p.Resume()
 	if p.Status() != StatusFree {
 		t.Errorf("status = %s (%s)", p.Status(), p.LastError())
@@ -95,14 +95,14 @@ func TestAdoptTakesAFreshDetectOnlyWhileFree(t *testing.T) {
 		t.Fatalf("a free machine did not adopt the fresh detect: %+v", p.Capability())
 	}
 	p.status = StatusRented
-	stale := New(&fakeMachine{}, VendorNVIDIA, nil, false)
+	stale := New(&fakeMachine{}, VendorPCI, nil, false)
 	if p.Adopt(stale) || !p.Capability().Ready {
 		t.Error("a rented machine's view was replaced")
 	}
 }
 
 func TestSetCapabilityNeverMakesAMachineReady(t *testing.T) {
-	p := New(&fakeMachine{}, VendorNVIDIA, nil, false)
+	p := New(&fakeMachine{}, VendorPCI, nil, false)
 	p.SetCapability(control.Capability{Ready: true, Reasons: []string{"x"}})
 	if p.Capability().Ready {
 		t.Error("SetCapability made a machine ready")

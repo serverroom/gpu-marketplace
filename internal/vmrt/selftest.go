@@ -9,24 +9,124 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/serverroom/gpu-marketplace/internal/pcidev"
 	"github.com/serverroom/gpu-marketplace/internal/stats"
 )
 
 // SelfTestTimeout bounds how long the host waits for the test VM's report.
 var SelfTestTimeout = 15 * time.Minute
 
+// GuestPCI is one display function the self-test VM saw on its PCI bus.
+type GuestPCI struct {
+	ID       string // vendor:device
+	Driver   string // "" when no driver took it
+	MemoryMB int    // 0 when the driver does not say
+	BDF      string // its address inside the VM
+	Unmapped int    // BARs the VM's kernel could not place
+}
+
+// NVSMIRow is one GPU as nvidia-smi inside the VM described it.
+type NVSMIRow struct {
+	BDF      string
+	Name     string
+	MemoryMB int // 0 for [N/A]: a GB10, whose memory is the machine's pool
+}
+
 // SerialReport is what a self-test VM printed.
 type SerialReport struct {
-	Begin    bool
-	End      bool
-	GPUs     []string
-	GPUFail  string
-	Internet string // "ok", "fail", or "" when never reported
-	Blocked  []string
-	Reached  []string
+	Begin     bool
+	End       bool
+	PCI       []GuestPCI
+	NVSMI     []NVSMIRow
+	NVSMIFail string
+	Internet  string // "ok", "fail", or "" when never reported
+	Blocked   []string
+	Reached   []string
+}
+
+// HostGPU is a GPU this machine passes through, as the host knows it.
+type HostGPU struct {
+	pcidev.Device
+	Name string // for people: "NVIDIA GeForce RTX 4090"
+}
+
+// HostGPUs describes the GPUs a rental gets.
+func HostGPUs(h Host, bdfs []string) []HostGPU {
+	out := make([]HostGPU, 0, len(bdfs))
+	for _, bdf := range bdfs {
+		d := pcidev.Read(h, bdf)
+		out = append(out, HostGPU{Device: d, Name: pcidev.Name(h, d)})
+	}
+	return out
+}
+
+// GuestGPU is one of this machine's GPUs as a rental saw it: what the
+// marketplace can truthfully say a renter gets.
+type GuestGPU struct {
+	HostBDF  string `json:"host_bdf"`
+	ID       string `json:"pci_id"`
+	Model    string `json:"model"`
+	Driver   string `json:"driver,omitempty"`
+	MemoryMB int    `json:"memory_mb,omitempty"`
+	Unified  bool   `json:"unified_memory,omitempty"`
+	// UnmappedBARs are memory windows the VM could not place: the GPU is on
+	// the VM's bus but cannot work.
+	UnmappedBARs int `json:"unmapped_bars,omitempty"`
+}
+
+func (g GuestGPU) String() string {
+	s := g.Model + " (" + g.ID
+	if g.MemoryMB > 0 {
+		s += fmt.Sprintf(", %d MB", g.MemoryMB)
+	} else if g.Unified {
+		s += ", the machine's memory"
+	}
+	if g.Driver != "" {
+		s += ", driver " + g.Driver
+	} else {
+		s += ", no driver"
+	}
+	return s + ")"
+}
+
+func parsePCI(rest string) (GuestPCI, bool) {
+	f := strings.Fields(rest)
+	if len(f) != 4 && len(f) != 5 {
+		return GuestPCI{}, false
+	}
+	g := GuestPCI{ID: strings.ToLower(f[0]), Driver: f[1], BDF: f[3]}
+	if g.Driver == "none" {
+		g.Driver = ""
+	}
+	g.MemoryMB, _ = strconv.Atoi(f[2])
+	if len(f) == 5 {
+		n, err := strconv.Atoi(f[4])
+		if err != nil {
+			// A count the host cannot read proves nothing was placed.
+			n = 1
+		}
+		g.Unmapped = n
+	}
+	return g, true
+}
+
+// parseNVSMI reads "<bus id>, <name>, <memory MiB>"; the name sits between the
+// first and the last comma, so a comma inside it cannot shift the columns.
+func parseNVSMI(rest string) (NVSMIRow, bool) {
+	first, last := strings.Index(rest, ","), strings.LastIndex(rest, ",")
+	if first < 0 || last <= first {
+		return NVSMIRow{}, false
+	}
+	row := NVSMIRow{
+		BDF:  pcidev.NormalizeBDF(rest[:first]),
+		Name: strings.TrimSpace(rest[first+1 : last]),
+	}
+	row.MemoryMB, _ = strconv.Atoi(strings.TrimSpace(rest[last+1:]))
+	return row, row.BDF != ""
 }
 
 // ParseSerial reads the self-test marker lines out of a serial log. The log
@@ -46,12 +146,16 @@ func ParseSerial(log string) SerialReport {
 			rep.Begin = true
 		case "END":
 			rep.End = true
-		case "GPU":
-			if rest != "" {
-				rep.GPUs = append(rep.GPUs, rest)
+		case "PCI":
+			if g, ok := parsePCI(rest); ok {
+				rep.PCI = append(rep.PCI, g)
 			}
-		case "GPUFAIL":
-			rep.GPUFail = rest
+		case "NVSMI":
+			if row, ok := parseNVSMI(rest); ok {
+				rep.NVSMI = append(rep.NVSMI, row)
+			}
+		case "NVSMIFAIL":
+			rep.NVSMIFail = rest
 		case "INTERNET":
 			rep.Internet = rest
 		case "BLOCKED":
@@ -71,27 +175,74 @@ type SelfTestResult struct {
 	Passed       bool     `json:"passed"`
 	AgentVersion string   `json:"agent_version"`
 	HostGPUs     []string `json:"host_gpus"`
-	GuestGPUs    []string `json:"guest_gpus"`
-	Internet     bool     `json:"internet"`
-	Blocked      []string `json:"blocked"`
-	Problems     []string `json:"problems"`
-	At           int64    `json:"at"`
+	// GuestGPUs describes, for people, what the VM saw; GPUs is the same record
+	// for the marketplace.
+	GuestGPUs []string   `json:"guest_gpus"`
+	GPUs      []GuestGPU `json:"gpus,omitempty"`
+	Internet  bool       `json:"internet"`
+	Blocked   []string   `json:"blocked"`
+	Problems  []string   `json:"problems"`
+	// Notes are what a provider should know that does not fail the test: a GPU
+	// no driver took inside the VM still reached the renter.
+	Notes []string `json:"notes,omitempty"`
+	At    int64    `json:"at"`
 	// Stopped: the test was stopped before it finished and its VM was torn
 	// down clean, so nothing was recorded -- the machine keeps the verdict of
 	// its last finished test boot. Never written to selftest.json.
 	Stopped bool `json:"-"`
 }
 
+// matchGPUs pairs each GPU the host passed through with a display function the
+// guest saw with the same vendor:device ID -- the one thing that is the same on
+// both sides of VFIO. Identical GPUs each need a device of their own. The
+// guest's nvidia-smi, when it answered, names the GPU and its memory; otherwise
+// the host's PCI name and the driver's own memory figure stand.
+func matchGPUs(rep SerialReport, host []HostGPU) (gpus []GuestGPU, missing []HostGPU) {
+	used := make([]bool, len(rep.PCI))
+	nv := map[string]NVSMIRow{}
+	for _, row := range rep.NVSMI {
+		nv[row.BDF] = row
+	}
+	for _, hg := range host {
+		found := -1
+		for i, g := range rep.PCI {
+			if !used[i] && g.ID == hg.ID() {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			missing = append(missing, hg)
+			continue
+		}
+		used[found] = true
+		g := rep.PCI[found]
+		gpu := GuestGPU{HostBDF: hg.BDF, ID: hg.ID(), Model: hg.Name, Driver: g.Driver, MemoryMB: g.MemoryMB, UnmappedBARs: g.Unmapped}
+		if row, ok := nv[g.BDF]; ok {
+			gpu.Model = row.Name
+			if row.MemoryMB > 0 {
+				gpu.MemoryMB = row.MemoryMB
+			} else {
+				gpu.Unified = stats.IsUnifiedMemoryModel(row.Name)
+			}
+		}
+		gpus = append(gpus, gpu)
+	}
+	return gpus, missing
+}
+
 // Evaluate turns what the VM printed and what the teardown verified into a
-// verdict. Every problem is listed, not just the first.
-func Evaluate(rep SerialReport, hostGPUs []string, probes []string, sshOpened bool, stop StopResult, version string, at int64) SelfTestResult {
+// verdict. Every problem is listed, not just the first. A GPU passes when the
+// VM sees it: whether a driver took it is the renter's to use, and is noted.
+func Evaluate(rep SerialReport, host []HostGPU, probes []string, sshOpened bool, stop StopResult, version string, at int64) SelfTestResult {
 	res := SelfTestResult{
 		AgentVersion: version,
-		HostGPUs:     append([]string(nil), hostGPUs...),
-		GuestGPUs:    rep.GPUs,
 		Internet:     rep.Internet == "ok",
 		Blocked:      rep.Blocked,
 		At:           at,
+	}
+	for _, hg := range host {
+		res.HostGPUs = append(res.HostGPUs, hg.BDF)
 	}
 	add := func(format string, a ...interface{}) { res.Problems = append(res.Problems, fmt.Sprintf(format, a...)) }
 
@@ -101,11 +252,24 @@ func Evaluate(rep SerialReport, hostGPUs []string, probes []string, sshOpened bo
 	if !sshOpened {
 		add("the test VM's SSH port never opened, so a renter could not have logged in")
 	}
-	if rep.GPUFail != "" {
-		add("nvidia-smi failed inside the VM: %s", rep.GPUFail)
+	gpus, missing := matchGPUs(rep, host)
+	res.GPUs = gpus
+	for _, g := range gpus {
+		res.GuestGPUs = append(res.GuestGPUs, g.String())
+		switch {
+		case g.UnmappedBARs > 0:
+			add("GPU %s (%s) reached the VM but %d of its memory windows could not be mapped there, so it cannot work in a rental", g.HostBDF, g.Model, g.UnmappedBARs)
+		case g.Driver == "":
+			res.Notes = append(res.Notes, fmt.Sprintf("GPU %s (%s) reached the VM but no driver took it there; a renter would have to install one", g.HostBDF, g.Model))
+		}
 	}
-	if rep.End && len(rep.GPUs) < len(hostGPUs) {
-		add("the VM saw %d GPU(s), and this machine passed through %d", len(rep.GPUs), len(hostGPUs))
+	if rep.End {
+		for _, hg := range missing {
+			add("the VM did not see GPU %s (%s, %s), so it was not passed through", hg.BDF, hg.Name, hg.ID())
+		}
+	}
+	if rep.NVSMIFail != "" {
+		res.Notes = append(res.Notes, "nvidia-smi failed inside the VM: "+rep.NVSMIFail)
 	}
 	if rep.End && rep.Internet != "ok" {
 		add("the VM could not reach the internet")
@@ -212,6 +376,9 @@ func (rt *Runtime) SelfTest(version string) SelfTestResult {
 // exactly as at the end of a test, and the result records that it was stopped.
 func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTestResult {
 	now := time.Now().Unix()
+	// Read before the VM takes the GPUs: once on vfio-pci their host driver is
+	// gone, and the names are wanted in the verdict.
+	host := HostGPUs(rt.h, rt.spec.GPUs)
 	fail := func(problem string) SelfTestResult {
 		res := SelfTestResult{AgentVersion: version, HostGPUs: rt.spec.GPUs, At: now, Problems: []string{problem}}
 		_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
@@ -257,7 +424,7 @@ func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTest
 
 	stopped := ctx.Err() != nil && !(rep.End && sshOpened)
 	stop := rt.Stop()
-	res := Evaluate(rep, rt.spec.GPUs, probes, sshOpened, stop, version, now)
+	res := Evaluate(rep, host, probes, sshOpened, stop, version, now)
 	if stopped {
 		res.Passed = false
 		res.Problems = append([]string{"the test boot was stopped before it finished"}, res.Problems...)

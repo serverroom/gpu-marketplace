@@ -68,7 +68,7 @@ func withFakeForward(t *testing.T, fail error) *int {
 func clean() vmrt.StopResult { return vmrt.StopResult{Wiped: true, GPUClean: true} }
 
 func readyProv(m Machine) *Provisioner {
-	p := New(m, VendorNVIDIA, []string{"0000:01:00.0"}, false)
+	p := New(m, VendorPCI, []string{"0000:01:00.0"}, false)
 	p.capability = control.Capability{Ready: true, Kind: KindQEMUVFIO}
 	p.async = false
 	return p
@@ -105,7 +105,7 @@ func TestProvisionRentsAndOpensTheSSHForward(t *testing.T) {
 // host. An unchecked provisioner must refuse, and touch nothing on the way.
 func TestUncheckedProvisionerRefuses(t *testing.T) {
 	m := &fakeMachine{}
-	p := New(m, VendorNVIDIA, []string{"0000:01:00.0"}, false)
+	p := New(m, VendorPCI, []string{"0000:01:00.0"}, false)
 	if err := p.Provision("R1", renterKey(t)); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("Provision = %v, want ErrNotReady", err)
 	}
@@ -229,9 +229,18 @@ func TestResume(t *testing.T) {
 type fakeRunner struct {
 	outputs map[string]string
 	fail    map[string]bool
+	// missing tools answer LookPath with an error; every other tool is installed.
+	missing map[string]bool
 }
 
 func (f *fakeRunner) Run(name string, args ...string) error { return nil }
+
+func (f *fakeRunner) LookPath(name string) (string, error) {
+	if f.missing[name] {
+		return "", fmt.Errorf("%s: not found", name)
+	}
+	return "/usr/bin/" + name, nil
+}
 
 func (f *fakeRunner) Output(name string, args ...string) (string, error) {
 	k := name + " " + strings.Join(args, " ")
@@ -254,43 +263,114 @@ func noSleep(t *testing.T) {
 	t.Cleanup(func() { verifySleep = orig })
 }
 
+// returned is what a rental hands back: its GPU with the driver it came from,
+// and the GPU's audio function.
+func returned(bdf, driver string) []vmrt.BoundDevice {
+	return []vmrt.BoundDevice{{BDF: bdf, Driver: driver}, {BDF: bdf[:len(bdf)-1] + "1", Driver: "snd_hda_intel"}}
+}
+
 func TestGPUVerifier(t *testing.T) {
 	noSleep(t)
-	bdfs := []string{"0000:01:00.0"}
-	listed := "00000000:01:00.0\n"
+	rented := returned("0000:01:00.0", "nvidia")
 
 	discrete := &fakeRunner{outputs: map[string]string{
-		"nvidia-smi --query-gpu=pci.bus_id":  listed,
-		"nvidia-smi --query-gpu=memory.used": "3\n",
+		"nvidia-smi --query-gpu=pci.bus_id,name,memory.used": "00000000:01:00.0, NVIDIA L4, 3\n",
 	}}
-	if !gpuVerifier(discrete, VendorNVIDIA, false, bdfs)() {
+	if !gpuVerifier(discrete)(rented) {
 		t.Error("a clear discrete GPU did not verify")
 	}
-	discrete.outputs["nvidia-smi --query-gpu=memory.used"] = "9000\n"
-	if gpuVerifier(discrete, VendorNVIDIA, false, bdfs)() {
+	discrete.outputs["nvidia-smi --query-gpu=pci.bus_id,name,memory.used"] = "00000000:01:00.0, NVIDIA L4, 9000\n"
+	if gpuVerifier(discrete)(rented) {
 		t.Error("a discrete GPU with memory in use verified")
 	}
 
 	unified := &fakeRunner{outputs: map[string]string{
-		"nvidia-smi --query-gpu=pci.bus_id":   listed,
-		"nvidia-smi --query-compute-apps=pid": "",
+		"nvidia-smi --query-gpu=pci.bus_id,name,memory.used": "0000000F:01:00.0, NVIDIA GB10, [N/A]\n",
+		"nvidia-smi --query-compute-apps":                    "",
 	}}
-	if !gpuVerifier(unified, VendorNVIDIA, true, bdfs)() {
+	gb10 := returned("000f:01:00.0", "nvidia")
+	if !gpuVerifier(unified)(gb10) {
 		t.Error("an idle unified-memory GPU did not verify")
 	}
-	unified.outputs["nvidia-smi --query-compute-apps=pid"] = "4242\n"
-	if gpuVerifier(unified, VendorNVIDIA, true, bdfs)() {
+	unified.outputs["nvidia-smi --query-compute-apps"] = "0000000F:01:00.0, 4242\n"
+	if gpuVerifier(unified)(gb10) {
 		t.Error("a unified-memory GPU still held by a process verified")
 	}
 
-	missing := &fakeRunner{outputs: map[string]string{"nvidia-smi --query-gpu=pci.bus_id": "00000000:41:00.0\n"}}
-	if gpuVerifier(missing, VendorNVIDIA, false, bdfs)() {
+	missing := &fakeRunner{outputs: map[string]string{"nvidia-smi --query-gpu=pci.bus_id,name,memory.used": "00000000:41:00.0, NVIDIA L4, 3\n"}}
+	if gpuVerifier(missing)(rented) {
 		t.Error("a GPU that never came back to its driver verified")
 	}
 
-	amd := &fakeRunner{outputs: map[string]string{"rocm-smi --showmeminfo": "device,VRAM Total Used Memory (B)\ncard0,4194304\n"}}
-	if !gpuVerifier(amd, VendorAMD, false, bdfs)() {
+	amd := returned("0000:41:00.0", "amdgpu")
+	rocm := &fakeRunner{outputs: map[string]string{"rocm-smi --showbus --showmeminfo vram --csv": "device,PCI Bus,VRAM Total Used Memory (B)\ncard0,0000:41:00.0,4194304\n"}}
+	if !gpuVerifier(rocm)(amd) {
 		t.Error("a clear AMD GPU did not verify")
+	}
+	rocm.outputs["rocm-smi --showbus --showmeminfo vram --csv"] = "device,PCI Bus,VRAM Total Used Memory (B)\ncard0,0000:41:00.0,8589934592\n"
+	if gpuVerifier(rocm)(amd) {
+		t.Error("an AMD GPU with memory in use verified")
+	}
+}
+
+// An NVIDIA GPU nvidia-smi gives no used-memory figure for, and that is not a
+// known unified part, is checked by what holds it -- not failed for the figure.
+func TestGPUVerifierChecksANoFigureGPUByItsHolders(t *testing.T) {
+	noSleep(t)
+	r := &fakeRunner{outputs: map[string]string{
+		"nvidia-smi --query-gpu=pci.bus_id,name,memory.used": "00000000:01:00.0, NVIDIA Mystery, [N/A]\n",
+		"nvidia-smi --query-compute-apps":                    "",
+	}}
+	if !gpuVerifier(r)(returned("0000:01:00.0", "nvidia")) {
+		t.Error("an idle GPU without a memory figure did not verify")
+	}
+	r.outputs["nvidia-smi --query-compute-apps"] = "00000000:01:00.0, 4242\n"
+	if gpuVerifier(r)(returned("0000:01:00.0", "nvidia")) {
+		t.Error("a GPU still held by a process verified")
+	}
+}
+
+// Only the rented GPUs are the rental's. A GPU the rental left out may be busy
+// with the provider's own work, and that is no reason to quarantine the machine.
+func TestGPUVerifierLooksOnlyAtTheRentedGPUs(t *testing.T) {
+	noSleep(t)
+	nv := &fakeRunner{outputs: map[string]string{
+		"nvidia-smi --query-gpu=pci.bus_id,name,memory.used": "00000000:01:00.0, NVIDIA L4, 3\n00000000:02:00.0, NVIDIA L4, 20000\n",
+		"nvidia-smi --query-compute-apps":                    "00000000:02:00.0, 777\n",
+	}}
+	if !gpuVerifier(nv)(returned("0000:01:00.0", "nvidia")) {
+		t.Error("a busy GPU the rental did not have made the rented one fail")
+	}
+	amd := &fakeRunner{outputs: map[string]string{"rocm-smi --showbus --showmeminfo vram --csv": "device,PCI Bus,VRAM Total Used Memory (B)\ncard0,0000:41:00.0,4194304\ncard1,0000:c4:00.0,2147483648\n"}}
+	if !gpuVerifier(amd)(returned("0000:41:00.0", "amdgpu")) {
+		t.Error("an APU the desktop is using made the rented AMD card fail")
+	}
+	gone := &fakeRunner{outputs: map[string]string{"rocm-smi --showbus --showmeminfo vram --csv": "device,PCI Bus,VRAM Total Used Memory (B)\ncard1,0000:c4:00.0,4194304\n"}}
+	if gpuVerifier(gone)(returned("0000:41:00.0", "amdgpu")) {
+		t.Error("an AMD GPU that rocm-smi does not list again verified")
+	}
+}
+
+// The vendor tools are an extra look where they are installed, never a
+// requirement: the release itself verified the reset and each GPU's return to
+// its own driver.
+func TestGPUVerifierNeedsNoVendorTool(t *testing.T) {
+	noSleep(t)
+	none := &fakeRunner{missing: map[string]bool{"nvidia-smi": true, "rocm-smi": true}}
+	for _, r := range [][]vmrt.BoundDevice{
+		returned("0000:01:00.0", ""),
+		returned("0000:01:00.0", "nvidia"),
+		returned("0000:41:00.0", "amdgpu"),
+		returned("0000:03:00.0", "xe"),
+	} {
+		if !gpuVerifier(none)(r) {
+			t.Errorf("%+v did not verify on a host without vendor tools", r)
+		}
+	}
+	// With nvidia-smi installed, an NVIDIA GPU it cannot see is a failure.
+	broken := &fakeRunner{fail: map[string]bool{"nvidia-smi": true}, missing: map[string]bool{"rocm-smi": true}}
+	if gpuVerifier(broken)(returned("0000:01:00.0", "nvidia")) {
+		t.Error("an NVIDIA GPU verified with nvidia-smi failing")
 	}
 }
 

@@ -83,7 +83,7 @@ func ParsePairSerial(log string) PairSerialReport {
 // which for a pair includes the ConnectX card), plus, on every link, 9000-byte
 // frames both ways (the pair test's own ping and the rental's link check) and
 // an RDMA write bandwidth of at least minGbps. Every problem is listed.
-func EvaluatePair(single SerialReport, pair PairSerialReport, guestOK map[int]bool, hostGPUs, probes []string, sshOpened bool,
+func EvaluatePair(single SerialReport, pair PairSerialReport, guestOK map[int]bool, hostGPUs []HostGPU, probes []string, sshOpened bool,
 	stop StopResult, plan *PairOptions, peerMACs []string, minGbps float64, version string, at int64) PairTestResult {
 	base := Evaluate(single, hostGPUs, probes, sshOpened, stop, version, at)
 	res := PairTestResult{AgentVersion: version, Node: plan.Node, PeerMACs: append([]string(nil), peerMACs...),
@@ -137,6 +137,9 @@ type PairSelfTestOptions struct {
 // the far end of every measurement.
 func (rt *Runtime) PairSelfTest(version string, o PairSelfTestOptions) PairTestResult {
 	now := time.Now().Unix()
+	// Read before the VM takes the GPUs: once on vfio-pci their host driver is
+	// gone, and the names are wanted in the verdict.
+	host := HostGPUs(rt.h, rt.spec.GPUs)
 	minGbps := o.MinRDMAGbps
 	if minGbps <= 0 {
 		minGbps = DefaultMinRDMAGbps
@@ -219,7 +222,7 @@ func (rt *Runtime) PairSelfTest(version string, o PairSelfTestOptions) PairTestR
 
 	stopped := ctx.Err() != nil && !(single.End && pair.End && sshOpened)
 	stop := rt.Stop()
-	res := EvaluatePair(single, pair, guestOK, rt.spec.GPUs, probes, sshOpened, stop, o.Pair, o.PeerMACs, minGbps, version, now)
+	res := EvaluatePair(single, pair, guestOK, host, probes, sshOpened, stop, o.Pair, o.PeerMACs, minGbps, version, now)
 	res.PeerListing = o.PeerListing
 	if stopped {
 		res.Passed = false

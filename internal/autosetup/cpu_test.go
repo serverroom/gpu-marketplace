@@ -16,6 +16,7 @@ func cpuMachine(t *testing.T) *fakehost.Host {
 	h := machine(t)
 	delete(h.Outputs, "nvidia-smi --query-gpu=pci.bus_id,name")
 	delete(h.Outputs, "nvidia-smi --query-gpu=driver_version")
+	h.DeleteFile("/sys/bus/pci/devices/" + gpu + "/class") // no GPU on the PCI bus either
 	h.DeleteFile("/sys/kernel/iommu_groups/13")
 	noTools(h, true)
 	noImage(h)

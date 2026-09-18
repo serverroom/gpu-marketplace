@@ -15,6 +15,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
+	"github.com/serverroom/gpu-marketplace/internal/pcidev"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
@@ -31,11 +32,33 @@ func detectProvisioner() *provisioner.Provisioner {
 
 // printCapability writes the hosting half of status/check.
 func printCapability(c control.Capability) {
+	for i, g := range c.GPUs {
+		label := "Rented GPUs:"
+		if i > 0 {
+			label = ""
+		}
+		detail := g.PCIID
+		if g.MemoryMB > 0 {
+			detail += fmt.Sprintf(", %d MB", g.MemoryMB)
+		}
+		if g.Driver != "" {
+			detail += ", driver " + g.Driver + " in the VM"
+		} else {
+			detail += ", no driver in the VM"
+		}
+		fmt.Printf("%-14s%s (%s)\n", label, g.Model, detail)
+	}
 	if c.GPUCount != nil && *c.GPUCount == 0 {
 		fmt.Println("GPU:          none — a rental on this machine gets its CPUs, memory and disk")
 	}
 	if c.UnifiedMemory {
 		fmt.Println("GPU memory:   unified — the GPU has no memory of its own; the machine's memory is one pool used by both CPU and GPU, and a rental gets that pool")
+	}
+	if len(c.Excluded) > 0 {
+		fmt.Println("Left out:     GPUs on this machine that rentals do not take:")
+		for _, e := range c.Excluded {
+			fmt.Printf("                - %s\n", e)
+		}
 	}
 	if c.Ready {
 		fmt.Println("Hosting:      ready — this machine can host a rental")
@@ -153,7 +176,7 @@ func runSelfTest(svc service.Service, yes bool) {
 		if rt.Spec().DesktopOnDemand {
 			fmt.Println("  - this machine's desktop closes for the test (anything open on its screen closes with it) and comes back after it")
 		}
-		fmt.Println("  - the VM reports what GPU it sees, whether it reaches the internet, and that it CANNOT reach this machine or its network")
+		fmt.Println("  - the VM reports which GPUs it sees (any make passes once it is there), whether it reaches the internet, and that it CANNOT reach this machine or its network")
 		fmt.Println("  - then it is destroyed, its disk key discarded, and the GPU given back and checked")
 	} else {
 		fmt.Println("  - a microVM is booted with a share of this machine's CPUs, memory and disk, as a rental gets them")
@@ -183,6 +206,9 @@ func runSelfTest(svc service.Service, yes bool) {
 				strings.Join(res.GuestGPUs, "; "), strings.Join(res.Blocked, ", "))
 		} else {
 			fmt.Printf("PASSED: the VM booted, reached the internet, and could not reach %s.\n", strings.Join(res.Blocked, ", "))
+		}
+		for _, note := range res.Notes {
+			fmt.Printf("  Note: %s\n", note)
 		}
 		if _, err := svc.Status(); err == nil {
 			if err := service.Control(svc, "restart"); err == nil {
@@ -215,7 +241,11 @@ func runHeadless(yes bool) {
 		fmt.Fprintf(os.Stderr, "runtime prepare --headless failed: %v\n", err)
 		os.Exit(1)
 	}
-	desktop, _ := vmrt.ClassifyGPUHolders(h)
+	var gpus []string
+	for _, d := range pcidev.Display(h) {
+		gpus = append(gpus, d.BDF)
+	}
+	desktop, _ := vmrt.ClassifyGPUHolders(h, gpus)
 
 	fmt.Println("A machine that hosts rentals runs without a desktop: while a desktop is on the screen, it holds")
 	fmt.Println("the GPU, and a rental cannot be given the GPU.")
@@ -262,7 +292,7 @@ func runHeadless(yes bool) {
 // the rental base image.
 func runPrepare(args []string) {
 	fs := flag.NewFlagSet("runtime prepare", flag.ExitOnError)
-	driver := fs.String("driver", "", "NVIDIA driver branch to bake into the rental image, e.g. 580-server-open or 580-server, or none (default: match this machine's own driver; none on a machine without an NVIDIA GPU)")
+	driver := fs.String("driver", "", "NVIDIA driver branch to bake into the rental image, e.g. 580-server-open (Turing and later) or 580-server (also Maxwell, Pascal and Volta), or none (default: match this machine's own driver; none on a machine without an NVIDIA GPU)")
 	deps := fs.Bool("install-deps", false, "install QEMU, UEFI firmware, cloud-image-utils, cryptsetup and nftables with apt-get")
 	headless := fs.Bool("headless", false, "make this machine run without a desktop, so its GPU is free to rent (closes the desktop now); does nothing else")
 	yes := fs.Bool("yes", false, "with --headless: do not ask for confirmation")
