@@ -168,10 +168,18 @@ echo "================================================"
 echo " GPU Marketplace Agent installed successfully!"
 echo "================================================"
 echo
-echo "Next: generate a one-time registration code in your dashboard, then run:"
-echo "  gpu-agent register --code <code>"
-echo "and restart the service to bring the tunnel up:"
-echo "  gpu-agent stop && gpu-agent start"
+if [ -f "$CONFIG_DIR/registration.json" ]; then
+    # An update over an agent that is already linked: registering again would
+    # make a second listing for the same machine.
+    echo "This machine is already linked to your account, so there is nothing else to run:"
+    echo "it keeps its listing and price, sets itself up and reports to the marketplace."
+    echo "See what it is doing:  sudo gpu-agent status"
+else
+    echo "Next: generate a one-time registration code in your dashboard, then run:"
+    echo "  gpu-agent register --code <code>"
+    echo "and restart the service to bring the tunnel up:"
+    echo "  gpu-agent stop && gpu-agent start"
+fi
 echo
 echo "Whether this machine can host a rental:  sudo gpu-agent check"
 echo "Remove the agent and withdraw the listing: sudo gpu-agent remove"
