@@ -122,7 +122,14 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	}
 
 	if len(rt.spec.GPUs) > 0 {
-		if err = rt.takeGPUs(st, &r); err != nil {
+		// Saved even when it fails: the teardown works from what is on disk,
+		// and must give back exactly what was taken -- functions already on
+		// vfio-pci, services stopped, a desktop closed.
+		err = rt.takeGPUs(st, &r, save)
+		if serr := save(); err == nil {
+			err = serr
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -169,13 +176,26 @@ func (rt *Runtime) copyVars(r Rental) error {
 	return nil
 }
 
-func (rt *Runtime) takeGPUs(st *State, r *Rental) error {
+func gpuInUse(holders []string) error {
+	return fmt.Errorf("the GPU is in use on this machine by %s; stop them first", strings.Join(holders, ", "))
+}
+
+func (rt *Runtime) takeGPUs(st *State, r *Rental, save func() error) error {
 	desktop, other := ClassifyGPUHolders(rt.h)
-	if len(desktop) > 0 {
+	if len(desktop) > 0 && !rt.spec.DesktopOnDemand {
 		return errors.New(DesktopOnGPUProblem(desktop))
 	}
 	if len(other) > 0 {
-		return fmt.Errorf("the GPU is in use on this machine by %s; stop them first", strings.Join(other, ", "))
+		return gpuInUse(other)
+	}
+	// A DGX Spark's desktop closes for the rental and comes back after it.
+	if len(desktop) > 0 {
+		if err := rt.releaseDesktop(st, desktop, save); err != nil {
+			return err
+		}
+		if _, other := ClassifyGPUHolders(rt.h); len(other) > 0 {
+			return gpuInUse(other)
+		}
 	}
 	// NVIDIA's own services are stopped for the rental and started again when
 	// it ends. Recorded one at a time, so a start that dies halfway restarts
@@ -294,6 +314,12 @@ func (rt *Runtime) Stop() StopResult {
 	if len(st.Devices) > 0 && res.GPUClean && rt.verifyGPU != nil && !rt.verifyGPU() {
 		res.GPUClean = false
 		res.Detail = append(res.Detail, "the GPU did not verify clean after the rental")
+	}
+	// The desktop comes back once the GPU is back with its driver. A GPU still
+	// on vfio-pci has nothing to draw it; the record stays with the dirty state
+	// and the teardown that frees the GPU starts the desktop.
+	if st.StoppedDisplayManager != "" && released {
+		_ = rt.h.Run("systemctl", "start", st.StoppedDisplayManager)
 	}
 
 	TeardownNetwork(rt.h, st.Net)

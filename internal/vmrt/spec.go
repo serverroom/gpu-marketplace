@@ -32,9 +32,13 @@ type Spec struct {
 	Firmware    Firmware // found by FindFirmware
 	GPUs        []string // primary GPU functions, as PCI addresses
 	Unified     bool     // the GPUs use the machine's memory pool (GB10)
-	TotalMemMB  int
-	CPUs        int
-	DiskGB      int
+	// DesktopOnDemand: a confirmed DGX Spark that was not made headless on
+	// purpose. Its desktop closes while the GPU is rented or tested and comes
+	// back after; on any other machine a desktop on the GPU refuses the rental.
+	DesktopOnDemand bool
+	TotalMemMB      int
+	CPUs            int
+	DiskGB          int
 }
 
 // QEMUBinary is the system emulator for this machine's architecture.

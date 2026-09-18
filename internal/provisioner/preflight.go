@@ -1,7 +1,9 @@
 package provisioner
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -25,6 +27,11 @@ type HostReport struct {
 	Unified  bool
 	Firmware vmrt.Firmware
 	Reasons  []string
+	// Identity is what the machine says it is (nil off Linux).
+	Identity *control.Identity
+	// DesktopOnDemand: a confirmed DGX Spark not made headless on purpose; its
+	// desktop closes while rented or tested rather than refusing the rental.
+	DesktopOnDemand bool
 }
 
 // Preflight checks, without changing anything, whether this machine can host a
@@ -57,10 +64,12 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 		add("the IOMMU is off, so no GPU can be handed to a microVM: enable VT-d / AMD-Vi (or the SMMU on Arm) in the firmware and on the kernel command line")
 	}
 
+	var gpuNames []string
 	if nv, ok := detectNVIDIA(h); ok {
 		rep.Vendor = VendorNVIDIA
 		rep.BDFs = nv.bdfs
 		rep.Unified = nv.unified
+		gpuNames = nv.names
 		for _, g := range nv.noMemory {
 			add("GPU %s (%s) reports no memory and is not a known unified-memory part, so the agent cannot tell what a tenant would get or prove it clean afterwards", g.bdf, g.name)
 		}
@@ -73,11 +82,21 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	if len(rep.BDFs) > 0 && len(rep.Reasons) == 0 {
 		rep.Reasons = append(rep.Reasons, vmrt.GroupProblems(h, rep.BDFs)...)
 	}
-	// A desktop drawn on the GPU holds it for as long as it runs. Desktop
-	// machines such as the DGX Spark ship that way; say so before a test boot
-	// finds out, with the one command that fixes it.
+
+	id := ReadIdentity(h, goos, spec.Arch, gpuNames)
+	rep.Identity = &id
+	if id.ConfirmedDGXSpark {
+		// Made headless on purpose (runtime prepare --headless): left that way.
+		_, err := vmrt.LoadHeadless(h, spec.DataDir)
+		rep.DesktopOnDemand = errors.Is(err, os.ErrNotExist)
+	}
+	// A desktop drawn on the GPU holds it for as long as it runs. On a DGX
+	// Spark it closes for a rental and comes back after -- as long as the agent
+	// can close it, through the display manager. Anywhere else, say so before a
+	// test boot finds out, with the one command that fixes it.
 	if rep.Vendor == VendorNVIDIA {
-		if desktop, _ := vmrt.ClassifyGPUHolders(h); len(desktop) > 0 {
+		if desktop, _ := vmrt.ClassifyGPUHolders(h); len(desktop) > 0 &&
+			(!rep.DesktopOnDemand || vmrt.ActiveDisplayManager(h) == "") {
 			add("%s", vmrt.DesktopOnGPUProblem(desktop))
 		}
 	}
@@ -131,6 +150,7 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	spec.GPUs = rep.BDFs
 	spec.Unified = rep.Unified
 	spec.Firmware = rep.Firmware
+	spec.DesktopOnDemand = rep.DesktopOnDemand
 
 	fence := netguard.New(h, netguard.Bridge, vmrt.GuestSubnet, netguard.HostNetworks)
 	rt := vmrt.New(h, spec, fence, gpuVerifier(h, rep.Vendor, rep.Unified, rep.BDFs))
@@ -143,6 +163,7 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		AgentVersion:  version,
 		UnifiedMemory: rep.Unified,
 		VMUser:        vmrt.VMUser,
+		Identity:      rep.Identity,
 	}
 	return p
 }
@@ -193,7 +214,8 @@ func rentalDiskGB(h vmrt.Host, dataDir string) int {
 type gpuRef struct{ bdf, name string }
 
 type nvidiaGPUs struct {
-	bdfs []string
+	bdfs  []string
+	names []string
 	// unified is set when the GPUs share the machine's memory pool (a GB10).
 	// A rental then gets that pool as both its system memory and its GPU memory.
 	unified bool
@@ -222,6 +244,7 @@ func detectNVIDIA(r Runner) (nvidiaGPUs, bool) {
 		}
 		name := strings.TrimSpace(fields[1])
 		nv.bdfs = append(nv.bdfs, bdf)
+		nv.names = append(nv.names, name)
 		if total, err := strconv.ParseFloat(strings.TrimSpace(fields[2]), 64); err == nil && total > 0 {
 			continue
 		}

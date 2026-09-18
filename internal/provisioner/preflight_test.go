@@ -2,6 +2,7 @@ package provisioner
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -187,5 +188,97 @@ func TestDetectBuildsACapability(t *testing.T) {
 	}
 	if p.Runtime() == nil || p.Runtime().Spec().DiskGB != 500 || p.Runtime().Spec().TotalMemMB != 125000 {
 		t.Errorf("runtime spec = %+v", p.Runtime().Spec())
+	}
+}
+
+// sparkGoodHost is a DGX Spark that passes everything, with its desktop up on
+// the GB10 under gdm (display-manager.service).
+func sparkGoodHost(t *testing.T) *fakehost.Host {
+	t.Helper()
+	h := goodHost(t, "0000000F:01:00.0, NVIDIA GB10, [N/A]\n")
+	for name, v := range map[string]string{"sys_vendor": "NVIDIA", "product_name": "NVIDIA DGX Spark", "product_family": "DGX Spark"} {
+		h.Files["/sys/class/dmi/id/"+name] = []byte(v + "\n")
+	}
+	h.Files["/usr/share/AAVMF/AAVMF_CODE.fd"] = nil
+	h.Files["/usr/share/AAVMF/AAVMF_VARS.fd"] = nil
+	golden, _ := json.Marshal(vmrt.GoldenInfo{Base: "resolute-server-cloudimg-arm64.img"})
+	h.Files[dataDir+"/golden.img.json"] = golden
+	h.Files[filepath.Join(dataDir, "golden.img")+".json"] = golden
+	h.Links["/proc/2558/fd/7"] = "/dev/nvidia0"
+	h.Files["/proc/2558/comm"] = []byte("Xorg\n")
+	h.Outputs["systemctl show -p LoadState --value display-manager.service"] = "loaded\n"
+	return h
+}
+
+func sparkSpec() vmrt.Spec {
+	s := spec()
+	s.Arch = "arm64"
+	return s
+}
+
+// On a confirmed DGX Spark the desktop is not a reason: it closes while the
+// machine is rented or tested and comes back after.
+func TestPreflightASparksDesktopIsNotAReason(t *testing.T) {
+	h := sparkGoodHost(t)
+	rep := Preflight(h, "linux", sparkSpec(), version)
+	if len(rep.Reasons) != 0 {
+		t.Fatalf("a Spark with its desktop up is not ready: %s", reasons(rep))
+	}
+	if !rep.DesktopOnDemand || rep.Identity == nil || !rep.Identity.ConfirmedDGXSpark {
+		t.Errorf("DesktopOnDemand=%v identity=%+v", rep.DesktopOnDemand, rep.Identity)
+	}
+}
+
+// ... unless the agent could not close it: no display manager runs it.
+func TestPreflightASparkDesktopWithoutADisplayManagerIsAReason(t *testing.T) {
+	h := sparkGoodHost(t)
+	h.Fail["systemctl is-active --quiet display-manager.service"] = errors.New("inactive")
+	if r := reasons(Preflight(h, "linux", sparkSpec(), version)); !strings.Contains(r, "desktop is running on the GPU") {
+		t.Errorf("reasons = %q", r)
+	}
+}
+
+// A Spark made headless on purpose stays that way: nothing on demand, and a
+// desktop that is somehow back on the GPU is the usual reason.
+func TestPreflightAHeadlessSparkIsLeftAlone(t *testing.T) {
+	h := sparkGoodHost(t)
+	h.Files[vmrt.HeadlessPath(dataDir)] = []byte(`{"previous_default":"graphical.target"}`)
+	rep := Preflight(h, "linux", sparkSpec(), version)
+	if rep.DesktopOnDemand || !strings.Contains(reasons(rep), "runtime prepare --headless") {
+		t.Errorf("DesktopOnDemand=%v reasons=%q", rep.DesktopOnDemand, reasons(rep))
+	}
+}
+
+// Another GB10 machine is not a Spark: its desktop is the v0.1.9 reason.
+func TestPreflightAnotherGB10MachineKeepsTheDesktopReason(t *testing.T) {
+	h := sparkGoodHost(t)
+	h.Files["/sys/class/dmi/id/sys_vendor"] = []byte("ASUSTeK COMPUTER INC.\n")
+	h.Files["/sys/class/dmi/id/product_name"] = []byte("Ascent GX10\n")
+	h.Files["/sys/class/dmi/id/product_family"] = []byte("\n")
+	rep := Preflight(h, "linux", sparkSpec(), version)
+	if rep.DesktopOnDemand || !strings.Contains(reasons(rep), "runtime prepare --headless") {
+		t.Errorf("DesktopOnDemand=%v reasons=%q", rep.DesktopOnDemand, reasons(rep))
+	}
+	if rep.Identity == nil || rep.Identity.SysVendor != "ASUSTeK COMPUTER INC." || rep.Identity.ConfirmedDGXSpark {
+		t.Errorf("identity = %+v", rep.Identity)
+	}
+}
+
+func TestDetectReportsIdentityAndDesktopOnDemand(t *testing.T) {
+	h := sparkGoodHost(t)
+	h.Files["/proc/meminfo"] = []byte("MemTotal:       128000000 kB\n")
+	h.Files[dataDir] = nil
+	h.Outputs["df --output=avail"] = " Avail\n  900G\n"
+	p := Detect(h, "linux", "arm64", dataDir, version)
+	c := p.Capability()
+	if !c.Ready || c.Identity == nil || !c.Identity.ConfirmedDGXSpark || c.Identity.ProductName != "NVIDIA DGX Spark" {
+		t.Fatalf("capability = %+v identity = %+v", c, c.Identity)
+	}
+	if !p.Runtime().Spec().DesktopOnDemand {
+		t.Error("the runtime of a Spark does not close its desktop on demand")
+	}
+	data, _ := json.Marshal(c)
+	if !strings.Contains(string(data), `"identity":{"sys_vendor":"NVIDIA","product_name":"NVIDIA DGX Spark","product_family":"DGX Spark","confirmed_dgx_spark":true}`) {
+		t.Errorf("capability JSON = %s", data)
 	}
 }

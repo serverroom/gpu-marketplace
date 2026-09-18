@@ -32,6 +32,20 @@ type Capability struct {
 	// VMUser: the login the rental's VM accepts the renter's key for. Absent from
 	// agents up to v0.1.7, whose VMs log in as renter.
 	VMUser string `json:"vm_user,omitempty"`
+	// Identity is what the machine says it is (DMI) and whether the agent
+	// confirmed it as an NVIDIA DGX Spark. Absent from agents up to v0.1.9, and
+	// from hosts that are not Linux.
+	Identity *Identity `json:"identity,omitempty"`
+}
+
+// Identity carries the raw DMI strings with the verdict, because the exact
+// values a DGX Spark reports are not yet verified on hardware: the control
+// plane can see what real machines say and the patterns can be corrected.
+type Identity struct {
+	SysVendor         string `json:"sys_vendor"`
+	ProductName       string `json:"product_name"`
+	ProductFamily     string `json:"product_family"`
+	ConfirmedDGXSpark bool   `json:"confirmed_dgx_spark"`
 }
 
 // Provisioner is the agent action layer the control channel drives. The real

@@ -23,7 +23,10 @@ type State struct {
 	StoppedPersistenced bool `json:"stopped_persistenced,omitempty"`
 	// StoppedServices are the NVIDIA services the rental stopped (NVIDIAServices).
 	StoppedServices []string `json:"stopped_services,omitempty"`
-	StartedAt       int64    `json:"started_at"`
+	// StoppedDisplayManager is the display manager a rental on a DGX Spark
+	// stopped so its desktop let go of the GPU; started again at teardown.
+	StoppedDisplayManager string `json:"stopped_display_manager,omitempty"`
+	StartedAt             int64  `json:"started_at"`
 	// Dirty is set when a teardown did not verify. The state stays on disk, so
 	// the machine refuses the next rental until it is cleaned up.
 	Dirty       bool     `json:"dirty"`

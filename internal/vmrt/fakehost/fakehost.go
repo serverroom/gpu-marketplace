@@ -42,6 +42,9 @@ type Host struct {
 	Downloads map[string][]byte
 	// Slept is the total time the code under test asked to sleep.
 	Slept time.Duration
+	// OnSleep, when set, runs after every Sleep: time passing, for anything
+	// the code under test waits for.
+	OnSleep func(h *Host)
 
 	home map[string]string // bdf -> driver the device binds to with no override
 }
@@ -320,8 +323,46 @@ func (h *Host) SHA256(p string) (string, error) {
 
 func (h *Host) Sleep(d time.Duration) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.Slept += d
+	fn := h.OnSleep
+	h.mu.Unlock()
+	if fn != nil {
+		fn(h)
+	}
+}
+
+// SleptFor is the total time slept so far.
+func (h *Host) SleptFor() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.Slept
+}
+
+// SetLink makes a symlink, as a side effect would.
+func (h *Host) SetLink(p, target string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Links[p] = target
+}
+
+// DeleteLink removes a symlink, as a side effect would.
+func (h *Host) DeleteLink(p string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.Links, p)
+}
+
+// Count is how many calls start with prefix.
+func (h *Host) Count(prefix string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, c := range h.Calls {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 // Index is the position of the first call starting with prefix, or -1.
