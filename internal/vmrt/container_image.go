@@ -9,7 +9,7 @@ import (
 // ContainerImageRef is the base image a container rental runs -- the container
 // analog of the golden disk. Bumped when the entrypoint below changes, so a
 // stale image is rebuilt.
-const ContainerImageRef = "localhost/gpu-agent-rental:1"
+const ContainerImageRef = "localhost/gpu-agent-rental:2"
 
 // containerBaseImage is what the rental image is built from. The NVIDIA driver
 // and nvidia-smi come from the host at run time over CDI, so a plain Ubuntu
@@ -17,15 +17,14 @@ const ContainerImageRef = "localhost/gpu-agent-rental:1"
 // their encrypted home.
 const containerBaseImage = "docker.io/library/ubuntu:24.04"
 
-// containerEntrypoint runs as PID 1 in a rental container. It works on a
-// read-only rootfs: host keys and the privilege-separation dir go on the /run
-// tmpfs, and the renter's authorized_keys is on the encrypted /home/renter
-// volume. With GPUAGENT_PROBE set it also prints the self-test marker lines
-// (the same GPUAGENT-SELFTEST format the microVM prints to serial) to its
-// stdout, which the host reads with `podman logs`.
+// containerEntrypoint runs as PID 1 in a rental container: it installs the
+// renter's authorized_keys on the encrypted /home/renter volume, generates
+// per-rental host keys on the /run tmpfs, and runs sshd. The self-test probe is
+// NOT run here -- the host runs it with `podman exec` once the container and its
+// network are up (see ContainerRuntime.SelfTest), which captures its output
+// reliably instead of racing sshd for the container's stdout.
 const containerEntrypoint = `#!/bin/bash
 set -u
-MARK=GPUAGENT-SELFTEST
 install -d -m 700 -o renter -g renter /home/renter/.ssh 2>/dev/null || true
 if [ -f /run/renter/authorized_keys ]; then
   install -m 600 -o renter -g renter /run/renter/authorized_keys /home/renter/.ssh/authorized_keys
@@ -34,26 +33,6 @@ mkdir -p /run/sshd /run/hostkeys
 for t in rsa ecdsa ed25519; do
   [ -f /run/hostkeys/ssh_host_${t}_key ] || ssh-keygen -q -t "$t" -N "" -f /run/hostkeys/ssh_host_${t}_key </dev/null
 done
-if [ -n "${GPUAGENT_PROBE:-}" ]; then
-  (
-    say() { echo "$MARK $*"; }
-    say BEGIN
-    if command -v nvidia-smi >/dev/null 2>&1; then
-      if out=$(nvidia-smi --query-gpu=pci.bus_id,name,memory.total --format=csv,noheader,nounits 2>&1); then
-        while IFS= read -r line; do say "NVSMI $line"; done <<< "$out"
-      else
-        say "NVSMIFAIL $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
-      fi
-    fi
-    probe() { timeout "$2" bash -c "exec 3<>/dev/tcp/${1%:*}/${1##*:}" 2>/dev/null; echo $?; }
-    if [ "$(probe 1.1.1.1:443 10)" = 0 ]; then say 'INTERNET ok'; else say 'INTERNET fail'; fi
-    for t in ${GPUAGENT_PROBE}; do
-      rc=$(probe "$t" 6)
-      if [ "$rc" = 124 ]; then say "BLOCKED $t"; else say "REACHED $t rc=$rc"; fi
-    done
-    say END
-  ) &
-fi
 exec /usr/sbin/sshd -D -e \
   -o AuthorizedKeysFile=/home/renter/.ssh/authorized_keys \
   -h /run/hostkeys/ssh_host_rsa_key \

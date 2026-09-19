@@ -81,7 +81,7 @@ func TestContainerStartOrderAndHardening(t *testing.T) {
 		t.Fatal("no podman run call recorded")
 	}
 	for _, want := range []string{"--userns=auto", "--security-opt=no-new-privileges", "--cap-drop=ALL",
-		"--read-only", "--network=none", "--device nvidia.com/gpu=GPU-abc"} {
+		"--cap-add=NET_BIND_SERVICE", "--network=none", "--device nvidia.com/gpu=GPU-abc"} {
 		if !strings.Contains(runLine, want) {
 			t.Errorf("podman run missing %q\n  got: %s", want, runLine)
 		}

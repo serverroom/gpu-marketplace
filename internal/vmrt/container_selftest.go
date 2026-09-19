@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -145,7 +144,10 @@ func (rt *ContainerRuntime) SelfTest(version string) ContainerTest {
 	return rt.SelfTestContext(context.Background(), version)
 }
 
-// SelfTestContext is SelfTest that ctx can stop early.
+// SelfTestContext is SelfTest that ctx can stop early. It starts a real rental
+// container (which waits for its sshd to open -- proving a renter could log in),
+// runs the probe inside it over `podman exec` (GPU over CDI, internet, and the
+// fenced targets), then tears it down and records the verdict.
 func (rt *ContainerRuntime) SelfTestContext(ctx context.Context, version string) ContainerTest {
 	now := time.Now().Unix()
 	fp := ContainerFingerprint(rt.spec, version)
@@ -174,30 +176,24 @@ func (rt *ContainerRuntime) SelfTestContext(ctx context.Context, version string)
 	probes := DefaultProbes(rt.h)
 	id := fmt.Sprintf("%s%d", SelfTestPrefix, now)
 	name := containerName(id)
-	if err := rt.Start(StartOptions{ID: id, Pubkey: pub, Probes: probes, NoWait: true}); err != nil {
+	// Start waits for the container's sshd to open (BootTimeout); its success
+	// is the proof that a renter could have logged in.
+	if err := rt.Start(StartOptions{ID: id, Pubkey: pub}); err != nil {
 		problem := "the test container did not start: " + err.Error()
 		if st, _ := LoadState(rt.h, rt.spec.DataDir); st != nil && st.Dirty {
 			problem += "; and its cleanup did not verify, so this machine refuses rentals until that is fixed"
 		}
 		return fail(problem)
 	}
+	sshOpened := true
 
-	var rep SerialReport
-	sshOpened := false
-	for waited := time.Duration(0); waited < SelfTestTimeout && ctx.Err() == nil; waited += pollInterval {
-		if !sshOpened && rt.h.DialTCP(net.JoinHostPort(GuestIP, "22"), 3*time.Second) == nil {
-			sshOpened = true
-		}
-		if out, err := rt.h.Output("podman", "logs", name); err == nil {
-			rep = ParseSerial(out)
-		}
-		if (rep.End && sshOpened) || !rt.running(name) {
-			break
-		}
-		rt.h.Sleep(pollInterval)
-	}
+	// Run the probe inside the live container and read its markers (its output
+	// is captured whether or not exec reports an error). Bounded by `timeout` so
+	// a wedged probe can never hang the agent.
+	out, _ := rt.h.Output("timeout", "120", "podman", "exec", name, "bash", "-c", probeScript(probes))
+	rep := ParseSerial(out)
 
-	stopped := ctx.Err() != nil && !(rep.End && sshOpened)
+	stopped := ctx.Err() != nil
 	stop := rt.Stop()
 	passed, gpuVerified, problems := EvaluateContainer(rep, expectGPU, len(rt.spec.GPUs), probes, sshOpened, stop)
 	t := stamp(ContainerTest{Passed: passed, GPUVerified: gpuVerified, Internet: rep.Internet == "ok", Blocked: rep.Blocked, Problems: problems})

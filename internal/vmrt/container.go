@@ -166,29 +166,36 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume string, o StartOptions)
 		"run", "--detach", "--name", name,
 		"--userns=auto",
 		"--security-opt=no-new-privileges",
+		// Drop every capability, then add back only the minimal set sshd needs to
+		// run and set up the renter's account: bind its port, generate keys, own
+		// the renter's home, drop privilege to the renter, and privsep-chroot.
+		// These are namespaced by --userns=auto (they apply inside the container's
+		// user namespace, not to host resources), and the dangerous ones
+		// (SYS_ADMIN, NET_ADMIN, SYS_PTRACE, ...) stay dropped. The rootfs is
+		// writable (the NVIDIA CDI hook injects the driver by writing the
+		// container's ldcache/symlinks, which a read-only rootfs breaks) but
+		// ephemeral (--rm); the renter's data lives on the encrypted /home/renter.
 		"--cap-drop=ALL",
-		"--read-only",
-		"--tmpfs", "/tmp:rw,nosuid,nodev,noexec",
-		"--tmpfs", "/run:rw,nosuid,nodev",
+		"--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE", "--cap-add=FOWNER",
+		"--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=KILL",
+		"--cap-add=NET_BIND_SERVICE", "--cap-add=SYS_CHROOT",
 		"--network=none",
 		"--pids-limit", "4096",
 		"--stop-timeout", "30",
 		// The renter's key, read-only; the image's entrypoint installs it for
 		// user 'renter' and starts sshd.
 		"--mount", "type=bind,src=" + akFile + ",dst=/run/renter/authorized_keys,ro",
-		// The encrypted writable space as the renter's home.
-		"--mount", "type=bind,src=" + volume + ",dst=/home/renter",
+		// The encrypted writable space as the renter's home. idmap remaps the
+		// host-root-owned volume into the container's user namespace, so the
+		// container can create and own the renter's files on it (without idmap
+		// the volume appears owned by an unmapped uid and is unwritable).
+		"--mount", "type=bind,src=" + volume + ",dst=/home/renter,idmap",
 	}
 	if mb := rt.spec.GuestMemoryMB(); mb > 0 {
 		args = append(args, "--memory", fmt.Sprintf("%dm", mb))
 	}
 	if n := rt.spec.GuestCPUs(); n > 0 {
 		args = append(args, "--cpus", fmt.Sprintf("%d", n))
-	}
-	// A self-test container also runs the probe once at boot (it prints the
-	// GPUAGENT-SELFTEST markers to its logs); a rental gets no probe env.
-	if len(o.Probes) > 0 {
-		args = append(args, "-e", "GPUAGENT_PROBE="+strings.Join(o.Probes, " "))
 	}
 	// The GPU(s), shared over CDI. Absent on a self-test that runs without the
 	// GPU, and on a machine renting CPU only.
@@ -201,18 +208,16 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume string, o StartOptions)
 	return args
 }
 
-// freeGPU gives the renter the GPU to themselves without taking it off the host
-// driver: a DGX Spark's desktop is closed (and restored at teardown), and the
-// host's NVIDIA services are stopped. Recorded before each stop so teardown
-// restarts exactly what it stopped.
+// freeGPU gives the renter the GPU to themselves. Unlike the microVM, it does
+// NOT take the GPU off the host driver or stop the host's NVIDIA services: the
+// container shares the GPU over CDI, and CDI mounts the nvidia-persistenced
+// socket, so those services must stay up. It only closes a DGX Spark's desktop
+// (restored at teardown) so nothing on the host's screen competes for the GPU.
 func (rt *ContainerRuntime) freeGPU(st *State, save func() error) error {
 	if len(rt.spec.GPUs) == 0 {
 		return nil
 	}
-	desktop, other := ClassifyGPUHolders(rt.h, rt.spec.GPUs)
-	if len(other) > 0 {
-		return gpuInUse(other)
-	}
+	desktop, _ := ClassifyGPUHolders(rt.h, rt.spec.GPUs)
 	if len(desktop) > 0 {
 		if !rt.spec.DesktopOnDemand {
 			return desktopInUse(desktop)
@@ -227,18 +232,6 @@ func (rt *ContainerRuntime) freeGPU(st *State, save func() error) error {
 		}
 		if _, err := CloseDesktop(rt.h); err != nil {
 			return fmt.Errorf("close the desktop for the rental: %w", err)
-		}
-	}
-	for _, svc := range NVIDIAServices {
-		if rt.h.Run("systemctl", "is-active", "--quiet", svc.Unit) != nil {
-			continue
-		}
-		st.StoppedServices = append(st.StoppedServices, svc.Unit)
-		if err := save(); err != nil {
-			return err
-		}
-		if err := rt.h.Run("systemctl", "stop", svc.Unit); err != nil {
-			return fmt.Errorf("stop %s: %w", svc.Unit, err)
 		}
 	}
 	return nil
@@ -286,6 +279,39 @@ func (rt *ContainerRuntime) attachVeth(name string) (string, error) {
 		}
 	}
 	return hostVeth, nil
+}
+
+// probeScript is the self-test probe the host runs inside a live rental
+// container with `podman exec`. It prints the same GPUAGENT-SELFTEST markers the
+// microVM prints to serial: the GPU nvidia-smi sees over CDI, whether the
+// internet is reachable, and that each fenced target is BLOCKED (a silent drop;
+// `timeout` exits 124 when nothing answered, a refused/answered connection is
+// REACHED). Running it after the container's network is up, over exec, avoids
+// racing sshd for the container's stdout.
+func probeScript(probes []string) string {
+	return `MARK=GPUAGENT-SELFTEST
+say() { echo "$MARK $*"; }
+say BEGIN
+if command -v nvidia-smi >/dev/null 2>&1; then
+  if out=$(nvidia-smi --query-gpu=pci.bus_id,name,memory.total --format=csv,noheader,nounits 2>&1); then
+    while IFS= read -r line; do say "NVSMI $line"; done <<< "$out"
+  else
+    say "NVSMIFAIL $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+  fi
+fi
+# curl's connect timeout is in-process (non-blocking connect + poll), so it is
+# reliably bounded -- unlike bash /dev/tcp + timeout, whose signal delivery is
+# not dependable under 'podman exec'. curl exit 28 is a connect timeout: the
+# fence dropped the packet, so the target is BLOCKED. Anything else (a reply, a
+# refusal) means the packet got through, so it is REACHED.
+if curl -s -o /dev/null --connect-timeout 8 -m 12 http://1.1.1.1 2>/dev/null; then say 'INTERNET ok'; else say 'INTERNET fail'; fi
+for t in ` + strings.Join(probes, " ") + `; do
+  curl -s -o /dev/null --connect-timeout 6 -m 8 "http://$t" 2>/dev/null
+  ec=$?
+  if [ "$ec" = 28 ]; then say "BLOCKED $t"; else say "REACHED $t ec=$ec"; fi
+done
+say END
+`
 }
 
 func (rt *ContainerRuntime) running(name string) bool {
