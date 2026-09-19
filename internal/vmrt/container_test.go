@@ -177,3 +177,59 @@ func TestEvaluateContainer(t *testing.T) {
 		t.Error("sshd never opening must fail the test")
 	}
 }
+
+// containerSparkHost is newContainerHost with a DGX Spark's desktop up on the
+// GPU: Xorg, GNOME's shell and mutter hold it, gdm runs as the display manager,
+// and isolating the headless target (what CloseDesktop does) closes them.
+func containerSparkHost() *fakehost.Host {
+	h := newContainerHost()
+	for _, p := range []struct{ pid, comm string }{
+		{"2558", "Xorg"}, {"2872", "gnome-shell"}, {"2909", "mutter-x11-fram"},
+	} {
+		h.Links["/proc/"+p.pid+"/fd/7"] = "/dev/nvidia0"
+		h.Files["/proc/"+p.pid+"/comm"] = []byte(p.comm + "\n")
+	}
+	h.Outputs["systemctl show -p LoadState --value "+dm] = "loaded\n"
+	h.SetFail("systemctl is-active --quiet "+dm, nil)
+	h.OnRun["systemctl isolate "+headlessTarget] = func(h *fakehost.Host, _ string) {
+		for _, pid := range []string{"2558", "2872", "2909"} {
+			h.DeleteLink("/proc/" + pid + "/fd/7")
+		}
+		h.SetFail("systemctl is-active --quiet "+dm, errors.New("inactive"))
+	}
+	h.OnRun["systemctl start "+dm] = func(h *fakehost.Host, _ string) {
+		h.SetFail("systemctl is-active --quiet "+dm, nil)
+	}
+	return h
+}
+
+// A container test boot shares the GPU, so it runs beside the host's desktop;
+// only a rental closes a DGX Spark's desktop, and its teardown brings it back.
+func TestContainerTestBootLeavesTheDesktopButARentalClosesIt(t *testing.T) {
+	spec := containerSpec()
+	spec.DesktopOnDemand = true
+	cdi := []string{"nvidia.com/gpu=GPU-abc"}
+
+	h := containerSparkHost()
+	rt := NewContainer(h, spec, &fakeFence{h: h}, ContainerImageRef, cdi, nil)
+	if err := rt.Start(StartOptions{ID: SelfTestPrefix + "1", Pubkey: key(t), NoWait: true}); err != nil {
+		t.Fatalf("test boot Start: %v", err)
+	}
+	if hasCall(h, "run systemctl isolate") {
+		t.Error("a test boot must not close the host's desktop")
+	}
+	rt.Stop()
+
+	h2 := containerSparkHost()
+	rt2 := NewContainer(h2, spec, &fakeFence{h: h2}, ContainerImageRef, cdi, nil)
+	if err := rt2.Start(StartOptions{ID: "R1", Pubkey: key(t), NoWait: true}); err != nil {
+		t.Fatalf("rental Start: %v", err)
+	}
+	if !hasCall(h2, "run systemctl isolate "+headlessTarget) {
+		t.Error("a rental must close a DGX Spark's desktop")
+	}
+	rt2.Stop()
+	if !hasCall(h2, "run systemctl start "+dm) {
+		t.Error("the rental's teardown must bring the desktop back")
+	}
+}

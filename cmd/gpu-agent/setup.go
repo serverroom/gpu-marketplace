@@ -144,7 +144,9 @@ func runSetup(svc service.Service, args []string) {
 	for i, s := range plan.Steps {
 		fmt.Printf("  %d. %s (about %s)\n", i+1, s.Doing(), s.Takes())
 	}
-	if spec.DesktopOnDemand {
+	// A container test boot shares the GPU beside the desktop; only a microVM's
+	// test rental takes it away from the screen.
+	if spec.DesktopOnDemand && !p.IsContainer() {
 		fmt.Println("The test rental takes the GPU: this machine's desktop closes during it (anything open on its screen closes")
 		fmt.Println("with it) and comes back after it.")
 	}

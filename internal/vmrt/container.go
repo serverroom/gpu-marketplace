@@ -221,6 +221,12 @@ func (rt *ContainerRuntime) freeGPU(st *State, save func() error) error {
 	if len(rt.spec.GPUs) == 0 {
 		return nil
 	}
+	// A test boot never stops a program of the host's (the microVM's rule too):
+	// the container shares the GPU over CDI, so a test runs beside the host's
+	// desktop. Only a real rental closes a DGX Spark's desktop.
+	if IsSetupID(st.RentalID) {
+		return nil
+	}
 	desktop, _ := ClassifyGPUHolders(rt.h, rt.spec.GPUs)
 	if len(desktop) > 0 {
 		if !rt.spec.DesktopOnDemand {
