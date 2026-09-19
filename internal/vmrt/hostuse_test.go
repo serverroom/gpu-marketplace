@@ -28,20 +28,26 @@ func meminfo(h *fakehost.Host, totalMB, availMB int) {
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
 
-// The host's own programs are its use of the GPU: not the desktop, not
-// NVIDIA's services, not a short-lived tool.
+// The host's own programs are its use of the GPU: not a DGX Spark's desktop
+// (it closes for a rental), not NVIDIA's services, not a short-lived tool. On
+// any other machine a desktop on a rented GPU does not close: the host's too.
 func TestReadHostUseNamesTheHostsPrograms(t *testing.T) {
 	h := busyHost()
-	u := ReadHostUse(h, testSpec())
+	spark := testSpec()
+	spark.DesktopOnDemand = true
+	u := ReadHostUse(h, spark)
 	if strings.Join(u.Holders, ", ") != "llama-server (pid 11435)" || u.MemoryShortMB != 0 || !u.Busy() {
 		t.Errorf("host use = %+v", u)
 	}
 	if got := u.Describe(); got != "llama-server" {
 		t.Errorf("described as %q", got)
 	}
+	if u := ReadHostUse(h, testSpec()); strings.Join(u.Holders, ", ") != "Xorg (pid 2558), llama-server (pid 11435)" {
+		t.Errorf("a workstation's desktop on a rented GPU: %+v", u)
+	}
 	delete(h.Links, "/proc/11435/fd/5")
-	if u := ReadHostUse(h, testSpec()); u.Busy() {
-		t.Errorf("a machine with only its desktop, NVIDIA's services and an nvidia-smi on the GPU is busy: %+v", u)
+	if u := ReadHostUse(h, spark); u.Busy() {
+		t.Errorf("a Spark with only its desktop, NVIDIA's services and an nvidia-smi on the GPU is busy: %+v", u)
 	}
 }
 
@@ -269,5 +275,53 @@ func TestALegacyRecordHoldsUntilTheImageIsRebuilt(t *testing.T) {
 	fp.ImageBuiltAt = 2000
 	if p := SelfTestProblem(res, fp); !strings.Contains(p, "rebuilt after its last test boot") {
 		t.Errorf("an image rebuilt after the test: %q", p)
+	}
+}
+
+// A host program that takes the GPU between the test's plan and its handover
+// makes no verdict: the start is refused as "in use", nothing is recorded,
+// and the result says so.
+func TestATestTheHostCutInOnRecordsNothing(t *testing.T) {
+	h := newHost()
+	h.OnRun["cryptsetup open"] = func(h *fakehost.Host, cmd string) {
+		h.SetFile("/dev/mapper/"+fakehost.LastField(cmd), nil)
+		holdGPU(h, "11500", "llama-server") // started while the disk was made
+	}
+	rt, _ := newRuntime(h, nil)
+	res := rt.SelfTestWith(context.Background(), "v0.2.3", TestOptions{})
+	if res.InUse == "" || res.Passed || !strings.Contains(res.InUse, "llama-server (pid 11500)") {
+		t.Fatalf("result = %+v", res)
+	}
+	if h.Exists(SelfTestPath(dataDir)) {
+		t.Error("a test the host cut in on was recorded")
+	}
+	if st, _ := LoadState(h, dataDir); st != nil {
+		t.Errorf("state left behind: %+v", st)
+	}
+}
+
+// A failed test by an agent up to v0.2.2 whose VM never got the GPU -- the
+// host held it -- is no verdict on the GPU: a pass without the GPU clears it.
+func TestALegacyInUseFailureIsNoGPUVerdict(t *testing.T) {
+	h := newHost()
+	h.Files[SelfTestPath(dataDir)] = []byte(`{"passed":false,"agent_version":"v0.2.2","host_gpus":["` + testGPU + `"],"at":1000,` +
+		`"problems":["the test VM did not start: the GPU is in use on this machine by llama-server (pid 11435); stop them first"]}`)
+	fp := Fingerprint{Version: "v0.2.3", GPUs: []string{testGPU}, HostDriver: "nvidia", BaseImage: "image A"}
+	res, _ := LoadSelfTest(h, dataDir)
+	if GPUTestFailed(res, fp) || SelfTestProblem(res, fp) == "" {
+		t.Fatalf("GPUTestFailed=%v problem=%q", GPUTestFailed(res, fp), SelfTestProblem(res, fp))
+	}
+	_ = SaveSelfTest(h, dataDir, SelfTestResult{Passed: true, WithoutGPU: true, AgentVersion: "v0.2.3", HostGPUs: fp.GPUs,
+		HostDriver: fp.HostDriver, BaseImage: fp.BaseImage, At: 2000})
+	res, _ = LoadSelfTest(h, dataDir)
+	if p := SelfTestProblem(res, fp); p != "" {
+		t.Errorf("a pass without the GPU did not clear an in-use failure: %q", p)
+	}
+	// A real GPU failure of that age still counts.
+	h.Files[SelfTestPath(dataDir)] = []byte(`{"passed":false,"agent_version":"v0.2.2","host_gpus":["` + testGPU + `"],"at":1000,` +
+		`"problems":["the VM did not see GPU 0000:01:00.0"]}`)
+	fp.ImageBuiltAt = 900
+	if res, _ := LoadSelfTest(h, dataDir); !GPUTestFailed(res, fp) {
+		t.Error("a legacy GPU failure was forgotten")
 	}
 }

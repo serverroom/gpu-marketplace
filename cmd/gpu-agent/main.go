@@ -243,6 +243,7 @@ const stopGrace = 75 * time.Second
 func (a *gpuAgent) Stop(s service.Service) error {
 	a.say("GPU Agent stopping...")
 
+	stopBy := time.Now().Add(stopGrace)
 	if a.tunnelCancel != nil {
 		a.tunnelCancel()
 	}
@@ -258,7 +259,13 @@ func (a *gpuAgent) Stop(s service.Service) error {
 		// A cable check or peer announcement in progress puts its ports back
 		// before the agent exits, and a test boot before a rental its VM.
 		a.prov.WaitFrames(30 * time.Second)
-		a.prov.WaitStarts(30 * time.Second)
+		// A test boot's teardown (up to about a minute and a half with the
+		// GPU check) runs in what is left of the grace, at least 30 s.
+		left := time.Until(stopBy)
+		if left < 30*time.Second {
+			left = 30 * time.Second
+		}
+		a.prov.WaitStarts(left)
 	}
 	if a.controlSrv != nil {
 		a.controlSrv.Stop()

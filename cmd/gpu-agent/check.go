@@ -277,6 +277,10 @@ func runSelfTest(svc service.Service, yes bool) {
 	fmt.Println("Booting ... (the first boot can take several minutes; Ctrl-C stops the test cleanly)")
 	res := rt.SelfTestWith(ctx, version, plan.TestOptions)
 	release()
+	if res.InUse != "" {
+		fmt.Printf("NOT RUN: the GPU was taken while the test started (%s). Nothing was recorded; run the test again.\n", res.InUse)
+		os.Exit(2)
+	}
 	if res.Passed {
 		switch {
 		case res.WithoutGPU:

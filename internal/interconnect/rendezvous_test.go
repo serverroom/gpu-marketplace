@@ -21,6 +21,7 @@ type met struct {
 func meet(t *testing.T, w *wiretest.Wire, rentals map[string]string, sides map[string]side) map[string]met {
 	t.Helper()
 	window, cutoff := 400*time.Millisecond, 100*time.Millisecond
+	slot := time.Now().Add(20 * time.Millisecond)
 	out := map[string]met{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -28,7 +29,7 @@ func meet(t *testing.T, w *wiretest.Wire, rentals map[string]string, sides map[s
 		wg.Add(1)
 		go func(name string, s side) {
 			defer wg.Done()
-			agreed, heard, err := interconnect.Rendezvous(context.Background(), s.h, w.Opener(name), s.ports, rentals[name], window, cutoff, own(s), "")
+			agreed, heard, err := interconnect.Rendezvous(context.Background(), s.h, w.Opener(name), s.ports, rentals[name], slot, window, cutoff, own(s), "")
 			mu.Lock()
 			out[name] = met{agreed, heard, err}
 			mu.Unlock()
@@ -72,15 +73,15 @@ func TestRendezvousHearsOnlyItsOwnRental(t *testing.T) {
 			t.Errorf("%s agreed with another rental's half: %+v", name, m)
 		}
 	}
-	payload := interconnect.StartPayload(pairRental, "58:a2:e1:00:01:01", true, 3)
-	if mac, heard, ok := interconnect.ParseStart([]byte(payload), pairRental); !ok || !heard || mac != "58:a2:e1:00:01:01" {
-		t.Errorf("parse = %q %v %v", mac, heard, ok)
+	payload := interconnect.StartPayload(pairRental, "58:a2:e1:00:01:01", true, 1789000020000, 3)
+	if mac, heard, slot, ok := interconnect.ParseStart([]byte(payload), pairRental); !ok || !heard || mac != "58:a2:e1:00:01:01" || slot != 1789000020000 {
+		t.Errorf("parse = %q %v %d %v", mac, heard, slot, ok)
 	}
 	forged := payload[:len(payload)-1] + "0"
 	if payload[len(payload)-1] == '0' {
 		forged = payload[:len(payload)-1] + "1"
 	}
-	if _, _, ok := interconnect.ParseStart([]byte(forged), pairRental); ok {
+	if _, _, _, ok := interconnect.ParseStart([]byte(forged), pairRental); ok {
 		t.Error("a frame with a wrong authenticator was accepted")
 	}
 }
@@ -105,5 +106,78 @@ func TestUntilRendezvousIsTheNextMinute(t *testing.T) {
 	now := time.Date(2026, 9, 19, 11, 4, 42, 0, time.UTC)
 	if d := interconnect.UntilRendezvous(now); d != 18*time.Second {
 		t.Errorf("until the next slot: %v", d)
+	}
+}
+
+// A half whose ports came up late in the slot can agree only while the other
+// still counts: the window is the slot's on the clock. Two halves in different
+// slots never agree.
+func TestRendezvousWindowsAreTheSlots(t *testing.T) {
+	fast(t)
+	a, b, w := cabled()
+	window, cutoff := 400*time.Millisecond, 100*time.Millisecond
+	slot := time.Now().Add(20 * time.Millisecond)
+	got := map[string]met{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	run := func(name string, s side, slot time.Time, delay time.Duration) {
+		defer wg.Done()
+		time.Sleep(delay)
+		agreed, heard, err := interconnect.Rendezvous(context.Background(), s.h, w.Opener(name), s.ports, pairRental, slot, window, cutoff, own(s), "")
+		mu.Lock()
+		got[name] = met{agreed, heard, err}
+		mu.Unlock()
+	}
+	// B opens its ports past A's cutoff: neither agrees (before, B agreed).
+	wg.Add(2)
+	go run("A", a, slot, 0)
+	go run("B", b, slot, 350*time.Millisecond)
+	wg.Wait()
+	if got["A"].agreed || got["B"].agreed {
+		t.Errorf("a late half agreed: %+v", got)
+	}
+	// Different slots: frames of another slot are not heard.
+	got = map[string]met{}
+	slot = time.Now().Add(20 * time.Millisecond)
+	wg.Add(2)
+	go run("A", a, slot, 0)
+	go run("B", b, slot.Add(time.Millisecond), 0)
+	wg.Wait()
+	if got["A"].heard || got["B"].heard {
+		t.Errorf("halves of different slots heard each other: %+v", got)
+	}
+}
+
+// A half that has heard the other keeps answering to the end of the window
+// when its agent stops, and reports the agreement it reached.
+func TestARendezvousHeardIsNotAbandoned(t *testing.T) {
+	fast(t)
+	a, b, w := cabled()
+	window, cutoff := 400*time.Millisecond, 100*time.Millisecond
+	slot := time.Now().Add(20 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	got := map[string]met{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		agreed, heard, err := interconnect.Rendezvous(ctx, a.h, w.Opener("A"), a.ports, pairRental, slot, window, cutoff, own(a), "")
+		mu.Lock()
+		got["A"] = met{agreed, heard, err}
+		mu.Unlock()
+	}()
+	go func() {
+		defer wg.Done()
+		agreed, heard, err := interconnect.Rendezvous(context.Background(), b.h, w.Opener("B"), b.ports, pairRental, slot, window, cutoff, own(b), "")
+		mu.Lock()
+		got["B"] = met{agreed, heard, err}
+		mu.Unlock()
+	}()
+	time.Sleep(150 * time.Millisecond)
+	cancel() // A's agent stops mid-window
+	wg.Wait()
+	if !got["A"].agreed || !got["B"].agreed {
+		t.Errorf("an agreement was abandoned: %+v", got)
 	}
 }

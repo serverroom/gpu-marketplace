@@ -5,12 +5,18 @@ import (
 	"strings"
 )
 
-// A desktop is more than its display server and shell: every program a person
-// runs in a graphical login -- a browser's GPU process, a video player, a
-// notebook started from a terminal on the desktop -- may hold the GPU, and a
-// DGX Spark used as a desktop nearly always has some. Naming processes is not
-// enough, so a holder also counts as the desktop when systemd places it in a
-// graphical login session, or when it descends from the display manager.
+// What is the desktop, and what is the host's own use? Since v0.2.3 (the
+// owner's rule) the desktop is only its infrastructure: the display server,
+// the compositor and shell, the display manager and its login screen. Every
+// program a person started -- in a graphical login or not: a browser's GPU
+// process, a video player, a llama-server typed in a terminal on the desktop --
+// is the host's own use, which a rental waits for (up to its deadline) and a
+// test boot leaves alone. Up to v0.2.2 a program in a graphical login counted
+// as the desktop and closed with it. Naming processes is not enough for the
+// infrastructure either -- a login screen runs helpers of every name -- so a
+// holder also counts as the desktop when systemd places it in the login
+// screen's session (class greeter), in a user unit of the login screen's own
+// user, or when the display manager started it outside any login.
 
 var (
 	// sessionScopePattern is a login session's scope: user-<uid>.slice/session-<id>.scope.
@@ -69,27 +75,27 @@ func (s *sessions) value(args ...string) string {
 	return strings.TrimSpace(out)
 }
 
-// graphicalSession: a desktop login (x11, wayland, mir) or a login screen
-// (class greeter).
-func (s *sessions) graphicalSession(id string) bool {
+// greeterSession: a login screen's session (class greeter).
+func (s *sessions) greeterSession(id string) bool {
 	if g, ok := s.graphical[id]; ok {
 		return g
 	}
-	g := graphicalTypes[s.value("show-session", id, "-p", "Type", "--value")] ||
-		s.value("show-session", id, "-p", "Class", "--value") == "greeter"
+	g := s.value("show-session", id, "-p", "Class", "--value") == "greeter"
 	s.graphical[id] = g
 	return g
 }
 
-// graphicalUser: a user with a graphical session open.
-func (s *sessions) graphicalUser(uid string) bool {
+// greeterUser: the login screen's own user (gdm, lightdm): every session it
+// has is a login screen.
+func (s *sessions) greeterUser(uid string) bool {
 	if g, ok := s.users[uid]; ok {
 		return g
 	}
-	g := false
-	for _, id := range strings.Fields(s.value("show-user", uid, "-p", "Sessions", "--value")) {
-		if s.graphicalSession(id) {
-			g = true
+	ids := strings.Fields(s.value("show-user", uid, "-p", "Sessions", "--value"))
+	g := len(ids) > 0
+	for _, id := range ids {
+		if !s.greeterSession(id) {
+			g = false
 			break
 		}
 	}
@@ -128,16 +134,18 @@ func (s *sessions) underDisplayManager(pid string) bool {
 	return false
 }
 
-// desktop reports whether a process is part of the machine's desktop by
-// where it runs: a graphical login session, an app unit of a user who has
-// one, or anything the display manager started.
+// desktop reports whether a process is part of the desktop's infrastructure
+// by where it runs: the login screen's session, a user unit of the login
+// screen's own user, or anything the display manager started outside every
+// login. A person's login -- graphical or not -- is theirs: nothing in it is
+// infrastructure but what is by name (desktopPrefixes).
 func (s *sessions) desktop(pid string) bool {
 	path := cgroupPath(s.h, pid)
-	if m := sessionScopePattern.FindStringSubmatch(path); m != nil && s.graphicalSession(m[2]) {
-		return true
+	if m := sessionScopePattern.FindStringSubmatch(path); m != nil {
+		return s.greeterSession(m[2])
 	}
-	if m := userManagerPattern.FindStringSubmatch(path); m != nil && s.graphicalUser(m[1]) {
-		return true
+	if m := userManagerPattern.FindStringSubmatch(path); m != nil {
+		return s.greeterUser(m[1])
 	}
 	return s.underDisplayManager(pid)
 }

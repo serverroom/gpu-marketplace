@@ -204,6 +204,10 @@ type SelfTestResult struct {
 	// down clean, so nothing was recorded -- the machine keeps the verdict of
 	// its last finished test boot. Never written to selftest.json.
 	Stopped bool `json:"-"`
+	// InUse: the test could not take the GPU, which something on the host
+	// held when it came to it (the refusal). Nothing was recorded: the GPU
+	// was never handed to a VM. Never written to selftest.json.
+	InUse string `json:"-"`
 	// legacy: written before v0.2.3, which recorded no driver or image (as
 	// is any record without an image).
 	legacy bool

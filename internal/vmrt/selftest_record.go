@@ -63,10 +63,26 @@ func LoadSelfTest(h Host, dataDir string) (*SelfTestResult, error) {
 	}
 	if res.LastFull != nil {
 		res.LastFull.legacy = res.LastFull.BaseImage == ""
-	} else if !res.WithoutGPU {
+	} else if !res.WithoutGPU && !(res.legacy && !res.Passed && neverHandedOver(res.Problems)) {
+		// A test by an agent up to v0.2.2 that failed because the host held
+		// the GPU never handed it to a VM: it is no verdict on the GPU.
 		res.LastFull = res.verdict()
 	}
 	return &res, nil
+}
+
+// neverHandedOver: a failed test whose VM never got the GPU, because the host
+// held it (the refusals of agents up to v0.2.2).
+func neverHandedOver(problems []string) bool {
+	for _, p := range problems {
+		for _, refusal := range []string{"the GPU is in use on this machine by", "this machine's desktop is running on the GPU",
+			"is still in use on this machine by"} {
+			if strings.Contains(p, refusal) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 const runTestBoot = "run 'sudo gpu-agent check --boot'"
@@ -235,6 +251,13 @@ func (rt *Runtime) SelfTestWith(ctx context.Context, version string, o TestOptio
 	probes := DefaultProbes(rt.h)
 	id := fmt.Sprintf("%s%d", SelfTestPrefix, now)
 	if err := rt.Start(StartOptions{ID: id, Pubkey: pub, Probes: probes, NoWait: true, NoGPU: o.NoGPU, MemoryMB: o.MemoryMB}); err != nil {
+		if st, _ := LoadState(rt.h, rt.spec.DataDir); st == nil && errors.Is(err, ErrGPUInUse) {
+			// The host took the GPU back between the plan and the handover:
+			// no verdict on the GPU, nothing recorded.
+			res := stamp(SelfTestResult{Problems: []string{"the test VM did not start: " + err.Error()}})
+			res.InUse = err.Error()
+			return res
+		}
 		problem := "the test VM did not start: " + err.Error()
 		if st, _ := LoadState(rt.h, rt.spec.DataDir); st != nil && st.Dirty {
 			problem += "; and its cleanup did not verify, so this machine refuses rentals until that is fixed"

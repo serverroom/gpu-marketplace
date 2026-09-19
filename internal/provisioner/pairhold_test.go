@@ -45,14 +45,14 @@ func (h *half) messages() []string {
 	return append([]string(nil), h.told...)
 }
 
-// fastHold makes a rendezvous a fraction of a second, every moment a slot.
+// fastHold makes a rendezvous slot 400 ms, its window 300 ms.
 func fastHold(t *testing.T) {
 	fastFrames(t)
-	window, cutoff, interval, until := interconnect.RendezvousWindow, interconnect.RendezvousCutoff, HostUseInterval, untilRendezvous
-	interconnect.RendezvousWindow, interconnect.RendezvousCutoff, HostUseInterval = 300*time.Millisecond, 80*time.Millisecond, 20*time.Millisecond
-	untilRendezvous = func(time.Time) time.Duration { return 0 }
+	slot, window, cutoff, interval := interconnect.RendezvousSlot, interconnect.RendezvousWindow, interconnect.RendezvousCutoff, HostUseInterval
+	interconnect.RendezvousSlot, interconnect.RendezvousWindow, interconnect.RendezvousCutoff, HostUseInterval =
+		400*time.Millisecond, 300*time.Millisecond, 80*time.Millisecond, 20*time.Millisecond
 	t.Cleanup(func() {
-		interconnect.RendezvousWindow, interconnect.RendezvousCutoff, HostUseInterval, untilRendezvous = window, cutoff, interval, until
+		interconnect.RendezvousSlot, interconnect.RendezvousWindow, interconnect.RendezvousCutoff, HostUseInterval = slot, window, cutoff, interval
 	})
 }
 
@@ -219,5 +219,22 @@ func TestAHeldHalfIsCancelledByATeardown(t *testing.T) {
 	}
 	if _, err := a.p.PairProvisionBy(halfRequest(t, "a", 1789000000+3600)); code(err) != http.StatusConflict {
 		t.Errorf("a pair rental on a rented machine: %v", err)
+	}
+}
+
+// A pair half on a Spark someone is logged in to warns before it meets the
+// other half: the desktop closes only after the warning.
+func TestAPairHalfWarnsItsDesktopFirst(t *testing.T) {
+	a, b := cabledHalves(t)
+	orig := DesktopWarning
+	DesktopWarning = 0
+	t.Cleanup(func() { DesktopWarning = orig })
+	a.p.desktopLogins = func() []string { return []string{"ana"} }
+	by := int64(1789000000 + 3600)
+	_, _ = a.p.PairProvisionBy(halfRequest(t, "a", by))
+	_, _ = b.p.PairProvisionBy(halfRequest(t, "b", by))
+	eventually(t, "both rented", func() bool { return a.p.Status() == StatusRented && b.p.Status() == StatusRented })
+	if told := a.messages(); len(told) != 1 || !strings.HasPrefix(told[0], DesktopWarningTitle) {
+		t.Errorf("A was told %q", told)
 	}
 }

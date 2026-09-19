@@ -35,6 +35,7 @@ func (p *Provisioner) PairProvisionBy(req control.PairProvisionRequest) (*contro
 	}
 	needTest := !p.fullTestIsCurrent()
 	use := p.hostUseNow()
+	desktop := !use.Busy() && startBy > p.clock().Unix() && len(p.loggedInDesktop()) > 0
 
 	// Take the machine, and the ports: no cable check, peer announcement or
 	// pair test may touch the card while it is being handed over.
@@ -57,8 +58,11 @@ func (p *Provisioner) PairProvisionBy(req control.PairProvisionRequest) (*contro
 	}
 	stored := req
 	rec := &pendingRecord{RentalID: req.RentalID, RenterPubkey: o.Pubkey, Pair: &stored, StartBy: startBy}
-	if use.Busy() {
+	if use.Busy() || desktop {
 		view, err := p.waitLocked(rec, use) // unlocks
+		if err == nil && desktop && p.desktopHold(rec) {
+			view = p.PendingRental()
+		}
 		if err == nil {
 			p.mu.Lock()
 			if p.pending == rec && !rec.running {
@@ -75,6 +79,7 @@ func (p *Provisioner) PairProvisionBy(req control.PairProvisionRequest) (*contro
 		p.pending = rec
 		p.status = StatusProvisioning
 		p.lastErr = ""
+		p.setHostUseLocked(vmrt.HostUse{}, rec.Since)
 		_ = p.savePendingLocked(rec)
 		p.launchHoldLocked(rec)
 		p.mu.Unlock()
@@ -82,6 +87,7 @@ func (p *Provisioner) PairProvisionBy(req control.PairProvisionRequest) (*contro
 	}
 	p.status = StatusProvisioning
 	p.lastErr = ""
+	p.startingLocked()
 	machine := p.machine
 	if needTest {
 		return nil, p.launchLocked(rec) // unlocks

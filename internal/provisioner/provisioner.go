@@ -173,6 +173,9 @@ type Provisioner struct {
 	fullTestCurrent func() bool
 	// loc is the machine's time zone for what the host reads; nil: time.Local.
 	loc *time.Location
+	// desktopLogins names the people logged in to a DGX Spark's desktop,
+	// which a rental closes (desktopwarn.go); nil: logind, on a Spark.
+	desktopLogins func() []string
 	// baseCtx ends when the agent stops (Watch); a pre-rental test runs in it.
 	baseCtx context.Context
 	starts  sync.WaitGroup
@@ -449,6 +452,8 @@ func (p *Provisioner) ProvisionBy(rentalID, renterPubkey string, startBy int64) 
 	}
 	needTest := !p.fullTestIsCurrent()
 	use := p.hostUseNow()
+	// A Spark's desktop someone is logged in to: warned before it closes.
+	desktop := !use.Busy() && startBy > p.clock().Unix() && len(p.loggedInDesktop()) > 0
 	p.mu.Lock()
 	if view, err := p.pendingConflictLocked(rentalID); view != nil || err != nil {
 		p.mu.Unlock()
@@ -464,11 +469,16 @@ func (p *Provisioner) ProvisionBy(rentalID, renterPubkey string, startBy int64) 
 		return nil, fmt.Errorf("this machine is %s, not free", status)
 	}
 	req := &pendingRecord{RentalID: rentalID, RenterPubkey: renterPubkey, StartBy: startBy}
-	if use.Busy() {
-		return p.waitLocked(req, use) // unlocks
+	if use.Busy() || desktop {
+		view, err := p.waitLocked(req, use) // unlocks
+		if err == nil && desktop && p.desktopHold(req) {
+			view = p.PendingRental()
+		}
+		return view, err
 	}
 	p.status = StatusProvisioning
 	p.lastErr = ""
+	p.startingLocked()
 	machine := p.machine
 	if needTest {
 		// The running agent has not handed this GPU to a VM yet: a full test
@@ -486,6 +496,12 @@ func (p *Provisioner) ProvisionBy(rentalID, renterPubkey string, startBy int64) 
 }
 
 func (p *Provisioner) start(machine Machine, o vmrt.StartOptions) error {
+	return p.startNoting(machine, o, true)
+}
+
+// startNoting is start; noteInUse false leaves a start refused because the
+// host held the GPU off the problem list -- the rental goes back to wait.
+func (p *Provisioner) startNoting(machine Machine, o vmrt.StartOptions, noteInUse bool) error {
 	id := o.ID
 	err := machine.Start(o)
 	var fwd stopper
@@ -505,7 +521,7 @@ func (p *Provisioner) start(machine Machine, o vmrt.StartOptions) error {
 			p.status = StatusDirty
 		}
 		log.Printf("rental %s did not start: %v", id, err)
-		if p.problems != nil {
+		if p.problems != nil && (noteInUse || !errors.Is(err, vmrt.ErrGPUInUse)) {
 			pr := p.problems
 			go pr.Note(control.AreaRental, "rental "+id+" did not start: "+err.Error(), "")
 		}

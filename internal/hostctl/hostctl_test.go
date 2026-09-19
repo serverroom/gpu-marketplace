@@ -253,13 +253,12 @@ func TestWithdrawIsRefusedWhileRented(t *testing.T) {
 	}
 }
 
-// A rental that waits for the host does not hold an update back: it is kept
-// on disk and waits on under the new agent.
-func TestAWaitingRentalDoesNotHoldAnUpdateBack(t *testing.T) {
+// A rental that waits for the host holds an update back.
+func TestAWaitingRentalHoldsAnUpdateBack(t *testing.T) {
 	a := newAgent(t)
 	a.m.status = provisioner.StatusWaiting
-	if why := a.busy(); why != "" {
-		t.Errorf("busy = %q", why)
+	if _, _, err := a.Update("v0.1.11"); codeOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "waiting for this machine") {
+		t.Errorf("Update = %v", err)
 	}
 }
 

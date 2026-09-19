@@ -225,14 +225,28 @@ func (rt *Runtime) copyVars(r Rental) error {
 	return nil
 }
 
+// ErrGPUInUse is matched by a start refused because something on the host
+// holds the GPU. It says nothing about whether the GPU can be handed to a
+// VM -- the VM never got it -- so it is never a test boot's verdict.
+var ErrGPUInUse = errors.New("the GPU is in use on this machine")
+
+// inUseError is a refusal for a GPU something on the host holds.
+type inUseError struct{ msg string }
+
+func (e *inUseError) Error() string        { return e.msg }
+func (e *inUseError) Is(target error) bool { return target == ErrGPUInUse }
+
 func gpuInUse(holders []string) error {
-	return fmt.Errorf("the GPU is in use on this machine by %s; stop them first", strings.Join(holders, ", "))
+	return &inUseError{fmt.Sprintf("the GPU is in use on this machine by %s; stop them first", strings.Join(holders, ", "))}
 }
+
+// desktopInUse is the refusal for a desktop on the GPU that does not close.
+func desktopInUse(desktop []string) error { return &inUseError{DesktopOnGPUProblem(desktop)} }
 
 func (rt *Runtime) takeGPUs(st *State, r *Rental, save func() error) error {
 	g := readGPUHolders(rt.h, rt.spec.GPUs)
 	if len(g.desktop) > 0 && !rt.spec.DesktopOnDemand {
-		return errors.New(DesktopOnGPUProblem(g.desktop))
+		return desktopInUse(g.desktop)
 	}
 	// Anything outside the desktop that is not short-lived: refused before the
 	// desktop is touched, for a rental that could not start anyway.
@@ -246,7 +260,7 @@ func (rt *Runtime) takeGPUs(st *State, r *Rental, save func() error) error {
 			return gpuInUse(busy)
 		}
 		if len(g.desktop) > 0 && !rt.spec.DesktopOnDemand {
-			return errors.New(DesktopOnGPUProblem(g.desktop))
+			return desktopInUse(g.desktop)
 		}
 	}
 	// A DGX Spark's desktop closes for the rental and comes back after it --

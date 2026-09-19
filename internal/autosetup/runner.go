@@ -214,6 +214,16 @@ func (r *Runner) step(ctx context.Context, s Step, a Attempt) error {
 				"when the GPU is free, and always before a rental starts.", strings.Join(plan.InUse, ", "))
 		}
 		res := r.testBoot(ctx, rt, plan.TestOptions)
+		if res.InUse != "" && !plan.NoGPU {
+			// The host took the GPU back as the test came to it: the test
+			// runs without it, as it would have had the host been faster.
+			r.log("The GPU was taken while the test started (%s): the test runs without it.", res.InUse)
+			plan.NoGPU = true
+			res = r.testBoot(ctx, rt, plan.TestOptions)
+		}
+		if res.InUse != "" {
+			return fmt.Errorf("the test boot could not run: %s", res.InUse)
+		}
 		if !res.Passed {
 			return fmt.Errorf("the test boot failed: %s", strings.Join(res.Problems, "; "))
 		}

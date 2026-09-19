@@ -2,6 +2,7 @@ package vmrt
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -85,7 +86,15 @@ func MemAvailableMB(h Host) int {
 func ReadHostUse(h Host, spec Spec) HostUse {
 	var u HostUse
 	if len(spec.GPUs) > 0 {
-		u.Holders = readGPUHolders(h, spec.GPUs).other
+		g := readGPUHolders(h, spec.GPUs)
+		u.Holders = g.other
+		if len(g.desktop) > 0 && !spec.DesktopOnDemand {
+			// A desktop that does not close for rentals, on a GPU rentals get
+			// (it came up after the checks left such GPUs out): the host's to
+			// close.
+			u.Holders = append(append([]string{}, g.other...), g.desktop...)
+			sort.Strings(u.Holders)
+		}
 	}
 	if need, free := spec.GuestMemoryMB(), MemAvailableMB(h); need > 0 && free >= 0 && free < need {
 		u.MemoryShortMB = need - free
@@ -144,10 +153,13 @@ func PlanTest(h Host, spec Spec, closeDesktop bool) TestPlan {
 	if len(plan.InUse) == 0 {
 		plan.InUse = append(plan.InUse, g.transient...)
 	}
-	if len(g.desktop) > 0 && !closeDesktop {
-		if !spec.DesktopOnDemand {
-			plan.InUse = append(plan.InUse, g.desktop...)
-		} else if logins := GraphicalLogins(h); len(logins) > 0 {
+	switch {
+	case len(g.desktop) == 0:
+	case !spec.DesktopOnDemand:
+		// Only a DGX Spark's desktop closes for a test.
+		plan.InUse = append(plan.InUse, g.desktop...)
+	case !closeDesktop:
+		if logins := GraphicalLogins(h); len(logins) > 0 {
 			var users []string
 			for _, l := range logins {
 				users = append(users, l.User)

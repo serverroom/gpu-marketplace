@@ -64,6 +64,9 @@ type pendingRecord struct {
 	// PeerWait: a pair half whose machine is free, waiting for the other half
 	// (pairhold.go).
 	PeerWait bool `json:"peer_wait,omitempty"`
+	// DesktopWarnedAt: when the person logged in to the desktop was told it
+	// closes for the rental (desktopwarn.go).
+	DesktopWarnedAt int64 `json:"desktop_warned_at,omitempty"`
 
 	// cancelled: torn down while it started; booting: past its test, the VM
 	// is being started (a teardown then waits for it, as for any start);
@@ -74,8 +77,12 @@ type pendingRecord struct {
 
 func (r *pendingRecord) view() *control.PendingRental {
 	holders := append([]string{}, r.Holders...)
-	return &control.PendingRental{RentalID: r.RentalID, Since: r.Since, StartBy: r.StartBy, Holders: holders,
+	v := &control.PendingRental{RentalID: r.RentalID, Since: r.Since, StartBy: r.StartBy, Holders: holders,
 		MemoryShortGB: r.MemoryShortGB, State: r.State, Reason: r.Reason, Detail: r.Detail, WaitingForPeer: r.PeerWait}
+	if r.DesktopWarnedAt > 0 && r.State == control.PendingWaiting && len(r.Holders) == 0 && r.MemoryShortGB == 0 && !r.PeerWait {
+		v.DesktopClosesAt = time.Unix(r.DesktopWarnedAt, 0).Add(DesktopWarning).Unix()
+	}
+	return v
 }
 
 // PendingPath is where a rental that waits for the host is kept.
@@ -202,7 +209,22 @@ func (p *Provisioner) runPreRentalTest(ctx context.Context) (vmrt.SelfTestResult
 		return vmrt.SelfTestResult{}, err.Error()
 	}
 	defer release()
-	return rt.SelfTestWith(ctx, p.version, plan.TestOptions), ""
+	res := rt.SelfTestWith(ctx, p.version, plan.TestOptions)
+	if res.InUse != "" {
+		// The host took the GPU back as the test came to it: no verdict.
+		return vmrt.SelfTestResult{}, res.InUse
+	}
+	return res, ""
+}
+
+// startingLocked: a rental is starting on a free machine. A failed record of
+// an earlier rental gives way to it, and the host's use (none) is cleared.
+func (p *Provisioner) startingLocked() {
+	if p.pending != nil && p.pending.State == control.PendingFailed {
+		p.pending = nil
+		p.removePendingLocked()
+	}
+	p.setHostUseLocked(vmrt.HostUse{}, p.clock().Unix())
 }
 
 // refreshTestView puts the last test boot back into the capability.
@@ -250,6 +272,9 @@ func (p *Provisioner) pendingConflictLocked(id string) (*control.PendingRental, 
 func (p *Provisioner) waitLocked(rec *pendingRecord, use vmrt.HostUse) (*control.PendingRental, error) {
 	now := p.clock().Unix()
 	switch {
+	case !use.Busy():
+		// Free but for a desktop someone is logged in to: it waits for its
+		// warning (desktopHold), which the caller sends.
 	case rec.StartBy == 0:
 		p.mu.Unlock()
 		return nil, control.Conflict("this machine is in use by its owner (%s); a rental can wait for it only with a start_by", use.Describe())
@@ -291,15 +316,16 @@ func (p *Provisioner) launchLocked(rec *pendingRecord) error {
 	ctx, cancel := context.WithCancel(base)
 	rec.cancel = cancel
 	p.pending = rec
+	p.setHostUseLocked(vmrt.HostUse{}, p.clock().Unix())
 	if err := p.savePendingLocked(rec); err != nil {
 		log.Printf("record the rental %s that is starting: %v", rec.RentalID, err)
 	}
 	p.starts.Add(1)
 	p.mu.Unlock()
 	if !p.async {
-		return p.startPending(ctx, rec)
+		return p.startPending(ctx, cancel, rec)
 	}
-	go p.startPending(ctx, rec)
+	go p.startPending(ctx, cancel, rec)
 	return nil
 }
 
@@ -316,9 +342,9 @@ func (p *Provisioner) WaitStarts(timeout time.Duration) {
 
 // startPending runs the full test boot when the running agent owes one, then
 // starts the rental rec stands for.
-func (p *Provisioner) startPending(ctx context.Context, rec *pendingRecord) error {
+func (p *Provisioner) startPending(ctx context.Context, cancel context.CancelFunc, rec *pendingRecord) error {
 	defer p.starts.Done()
-	defer rec.cancel()
+	defer cancel()
 	if !p.fullTestIsCurrent() {
 		res, busy := p.runPreRentalTest(ctx)
 		p.mu.Lock()
@@ -370,9 +396,10 @@ func (p *Provisioner) startPending(ctx context.Context, rec *pendingRecord) erro
 			return p.backToWaiting(rec, err.Error())
 		}
 	}
-	err := p.start(machine, o)
+	waits := rec.StartBy > p.clock().Unix()
+	err := p.startNoting(machine, o, !waits)
 	unlock()
-	if err != nil && rec.StartBy > p.clock().Unix() && p.hostUseNow().Busy() {
+	if err != nil && waits && errors.Is(err, vmrt.ErrGPUInUse) {
 		// The host took the machine again in the moment before the start
 		// (the runtime refused a GPU in use): the rental waits on.
 		return p.backToWaiting(rec, err.Error())
@@ -405,7 +432,10 @@ func (p *Provisioner) startPending(ctx context.Context, rec *pendingRecord) erro
 // the host -- or, past its start_by (or without one), fails it.
 func (p *Provisioner) backToWaiting(rec *pendingRecord, why string) error {
 	now := p.clock().Unix()
-	if rec.StartBy <= now || (p.machine != nil && p.machine.Dirty()) {
+	p.mu.Lock()
+	dirty := p.machine != nil && p.machine.Dirty()
+	p.mu.Unlock()
+	if rec.StartBy <= now || dirty {
 		p.failPending(rec, control.PendingReasonStart, why)
 		return errors.New(why)
 	}
@@ -495,7 +525,7 @@ func (p *Provisioner) CancelPending(rentalID string) (bool, error) {
 		p.mu.Unlock()
 		if told {
 			p.tellHost("GPU marketplace: the rental was cancelled",
-				"The rental of this machine was cancelled. You can keep using the machine; it stays on the marketplace.")
+				"The rental of this machine was cancelled. You can keep using the machine.")
 		}
 		return true, nil
 	case control.PendingFailed:
@@ -596,6 +626,12 @@ func (p *Provisioner) Tick() {
 	now := p.clock()
 	p.mu.Lock()
 	status, settingUp, withdrawn, rec := p.status, p.settingUp, p.withdrawn, p.pending
+	var recState string
+	var recFailedAt int64
+	var recHold, recRunning bool
+	if rec != nil {
+		recState, recFailedAt, recHold, recRunning = rec.State, rec.FailedAt, rec.pairHold(), rec.running
+	}
 	p.mu.Unlock()
 	if withdrawn {
 		return
@@ -613,19 +649,21 @@ func (p *Provisioner) Tick() {
 	}
 	switch {
 	case rec == nil:
-	case rec.pairHold() && rec.State != control.PendingFailed:
+	case recHold && recState != control.PendingFailed:
 		// A pair half is driven by its hold; one taken up after a restart
 		// gets its hold back.
-		p.mu.Lock()
-		if p.pending == rec && !rec.running && !p.withdrawn {
-			p.launchHoldLocked(rec)
+		if !recRunning {
+			p.mu.Lock()
+			if p.pending == rec && !rec.running && !p.withdrawn {
+				p.launchHoldLocked(rec)
+			}
+			p.mu.Unlock()
 		}
-		p.mu.Unlock()
-	case rec.State == control.PendingWaiting && status == StatusDirty:
+	case recState == control.PendingWaiting && status == StatusDirty:
 		p.failPending(rec, control.PendingReasonStart, DirtyProblem)
-	case rec.State == control.PendingWaiting && looked:
+	case recState == control.PendingWaiting && looked:
 		p.drivePending(rec, use, now)
-	case rec.State == control.PendingFailed && now.Sub(time.Unix(rec.FailedAt, 0)) > FailedPendingKept:
+	case recState == control.PendingFailed && now.Sub(time.Unix(recFailedAt, 0)) > FailedPendingKept:
 		p.mu.Lock()
 		if p.pending == rec {
 			p.pending = nil
@@ -655,6 +693,15 @@ func (p *Provisioner) drivePending(rec *pendingRecord, use vmrt.HostUse, now tim
 		return
 	}
 	if !use.Busy() && !p.settingUp && !p.withdrawn {
+		p.mu.Unlock()
+		if p.desktopHold(rec) {
+			return
+		}
+		p.mu.Lock()
+		if p.pending != rec || rec.State != control.PendingWaiting || p.status != StatusWaiting || p.settingUp || p.withdrawn {
+			p.mu.Unlock()
+			return
+		}
 		if !p.capability.Ready {
 			// Something other than the host's use keeps it from hosting now.
 			why := strings.Join(p.capability.Reasons, "; ")
@@ -681,6 +728,17 @@ func (p *Provisioner) drivePending(rec *pendingRecord, use vmrt.HostUse, now tim
 func (p *Provisioner) gaveUp(rec *pendingRecord, pr Problems) {
 	use := vmrt.HostUse{Holders: rec.Holders, MemoryShortMB: rec.MemoryShortGB * 1024}
 	what := use.Describe()
+	if what == "" {
+		// Free by then, but not started in time (the other machine of a pair,
+		// a desktop warning, a test boot that ran late).
+		p.tellHost("GPU marketplace: the rental was cancelled",
+			"The rental of this machine was cancelled: it could not start by its deadline. You can keep using the machine.")
+		if pr != nil {
+			pr.Note(control.AreaRental, fmt.Sprintf("rental %s was cancelled: it did not start by its start deadline, %s",
+				rec.RentalID, time.Unix(rec.StartBy, 0).UTC().Format("2006-01-02 15:04 UTC")), "")
+		}
+		return
+	}
 	p.tellHost("GPU marketplace: the rental was cancelled",
 		"The rental of this machine was cancelled because the machine was still in use ("+what+") when the rental was due to start. "+
 			"The machine is paused on the marketplace; put it back on sale in Marketplace > List a GPU.")
@@ -697,7 +755,7 @@ func (p *Provisioner) gaveUp(rec *pendingRecord, pr Problems) {
 func (p *Provisioner) tellRented(rec *pendingRecord) {
 	now := p.clock()
 	p.mu.Lock()
-	if p.pending != rec || rec.State != control.PendingWaiting || rec.PeerWait {
+	if p.pending != rec || rec.State != control.PendingWaiting || rec.PeerWait || (len(rec.Holders) == 0 && rec.MemoryShortGB == 0) {
 		p.mu.Unlock()
 		return
 	}

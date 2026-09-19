@@ -82,14 +82,15 @@ func rented(status string) bool {
 }
 
 // busy says why the machine must not be changed under the agent now, or "".
-// A rental that waits for the host to free the machine does not hold an
-// update back: it is kept on disk and waits on under the new agent (which
-// runs its own full test boot before the rental starts); one that is
-// starting does.
+// A rental waiting for the host holds an update back too: a pair half meets
+// the other on the cable every minute, and an agent restarting under it could
+// leave the other half booting alone.
 func (a *Agent) busy() string {
 	switch {
 	case rented(a.Machine.Status()):
 		return "this machine is rented; update the agent when the rental ends"
+	case a.Machine.Status() == provisioner.StatusWaiting:
+		return "a rental is waiting for this machine to be free; update the agent when it has started, or has been cancelled"
 	case a.Machine.SettingUp():
 		return "the agent is setting this machine up (building its rental image or running its test rental); update it when that has finished"
 	case a.Machine.RentalPresent():

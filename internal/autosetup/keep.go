@@ -150,6 +150,11 @@ func (d *Daemon) keepTest(ctx context.Context, fresh *provisioner.Provisioner, n
 	d.show(fresh.Capability(), line)
 
 	out := d.Runner.testBoot(ctx, rt, plan.TestOptions)
+	if out.InUse != "" && needed && !plan.NoGPU && !gpuFailed {
+		// The host took the GPU back as the test came to it: without it, then.
+		plan.NoGPU = true
+		out = d.Runner.testBoot(ctx, rt, plan.TestOptions)
+	}
 	d.Prov.EndSetup()
 	after := d.Runner.Detect()
 	d.Prov.Adopt(after)
@@ -157,6 +162,9 @@ func (d *Daemon) keepTest(ctx context.Context, fresh *provisioner.Provisioner, n
 	case ctx.Err() != nil:
 		d.say("The test rental stopped with the agent")
 		return
+	case out.InUse != "":
+		// Nothing was recorded; the next look tries again.
+		d.say("The test rental did not run: %s", out.InUse)
 	case out.Passed && plan.NoGPU:
 		d.say("Test rental passed without the GPU, which is in use; the GPU's handover is tested when it is free, and always before a rental starts")
 	case out.Passed:

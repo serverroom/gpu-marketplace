@@ -24,10 +24,6 @@ import (
 // (waiting_for_peer) -- after its first rendezvous; before it, it answers as
 // starting, since two free halves meet within the minute.
 
-// untilRendezvous is how long from now to the next rendezvous slot; a
-// variable so tests need not wait for the minute.
-var untilRendezvous = func(now time.Time) time.Duration { return interconnect.UntilRendezvous(now) }
-
 // pairHold: a pair half that starts only together with its peer.
 func (r *pendingRecord) pairHold() bool { return r.Pair != nil && r.StartBy > 0 }
 
@@ -41,7 +37,7 @@ func (p *Provisioner) launchHoldLocked(rec *pendingRecord) {
 	ctx, cancel := context.WithCancel(base)
 	rec.cancel, rec.running = cancel, true
 	p.starts.Add(1)
-	go p.holdPair(ctx, rec)
+	go p.holdPair(ctx, cancel, rec)
 }
 
 // pauseFor waits d, or until ctx ends; false when ctx ended.
@@ -59,13 +55,13 @@ func pauseFor(ctx context.Context, d time.Duration) bool {
 
 // holdPair holds one pair half until both halves start, or it is given up,
 // cancelled or fails.
-func (p *Provisioner) holdPair(ctx context.Context, rec *pendingRecord) {
+func (p *Provisioner) holdPair(ctx context.Context, cancel context.CancelFunc, rec *pendingRecord) {
 	defer p.starts.Done()
 	defer func() {
 		p.mu.Lock()
 		rec.running = false
 		p.mu.Unlock()
-		rec.cancel()
+		cancel()
 	}()
 	for {
 		p.mu.Lock()
@@ -94,23 +90,32 @@ func (p *Provisioner) holdPair(ctx context.Context, rec *pendingRecord) {
 			pauseFor(ctx, HostUseInterval)
 			continue
 		}
+		if p.desktopHold(rec) {
+			// Someone is logged in to the desktop: warned, it closes later.
+			pauseFor(ctx, HostUseInterval)
+			continue
+		}
 		if !p.fullTestIsCurrent() {
 			if !p.heldTest(ctx, rec) {
 				return
 			}
 			continue
 		}
-		// Ready: meet the other half at the next slot.
-		if !pauseFor(ctx, untilRendezvous(time.Now())) {
+		// Ready: meet the other half at the next slot, by the clock both
+		// machines keep.
+		if !pauseFor(ctx, interconnect.UntilRendezvous(time.Now())) {
 			continue
 		}
+		slot := time.Now().Truncate(interconnect.RendezvousSlot)
 		if p.hostUseNow().Busy() {
 			continue
 		}
-		agreed, heard, unlock, err := p.meet(ctx, rec)
+		agreed, heard, unlock, err := p.meet(ctx, rec, slot)
 		if agreed {
-			p.bootHeld(rec, unlock)
-			return
+			if p.bootHeld(rec, unlock) {
+				return
+			}
+			continue // the host took the GPU back in the last moment
 		}
 		p.holdForPeer(rec, heard, err)
 	}
@@ -214,7 +219,7 @@ func (p *Provisioner) heldTest(ctx context.Context, rec *pendingRecord) bool {
 
 // meet holds the rental's ports up for one rendezvous window. When both
 // halves agreed, the frame lock is kept for the start and unlock gives it back.
-func (p *Provisioner) meet(ctx context.Context, rec *pendingRecord) (agreed, heard bool, unlock func(), err error) {
+func (p *Provisioner) meet(ctx context.Context, rec *pendingRecord, slot time.Time) (agreed, heard bool, unlock func(), err error) {
 	if !p.hasPairRuntime() {
 		return false, false, nil, errors.New("this agent cannot check the cable on this machine")
 	}
@@ -237,7 +242,7 @@ func (p *Provisioner) meet(ctx context.Context, rec *pendingRecord) (agreed, hea
 		unlock()
 		return false, false, nil, err
 	}
-	agreed, heard, err = interconnect.Rendezvous(ctx, p.host, p.openPacket, ports, rec.RentalID, interconnect.RendezvousWindow,
+	agreed, heard, err = interconnect.Rendezvous(ctx, p.host, p.openPacket, ports, rec.RentalID, slot, interconnect.RendezvousWindow,
 		interconnect.RendezvousCutoff, rep.OwnMACs(), interconnect.JournalPath(p.dataDir))
 	if !agreed || err != nil {
 		unlock()
@@ -247,8 +252,11 @@ func (p *Provisioner) meet(ctx context.Context, rec *pendingRecord) (agreed, hea
 }
 
 // bootHeld starts this half, now that both are ready, holding the frame lock
-// (unlock) until its VM has the card.
-func (p *Provisioner) bootHeld(rec *pendingRecord, unlock func()) {
+// (unlock) until its VM has the card. ended is false when the host took the
+// GPU back in the last moment: the half waits on (the other half's VM, up
+// already, waits for it in its cable check, and the marketplace judges the
+// pair).
+func (p *Provisioner) bootHeld(rec *pendingRecord, unlock func()) (ended bool) {
 	defer unlock()
 	p.mu.Lock()
 	if p.pending != rec || rec.cancelled {
@@ -257,11 +265,12 @@ func (p *Provisioner) bootHeld(rec *pendingRecord, unlock func()) {
 		if cancelled {
 			p.finishCancelled(rec)
 		}
-		return
+		return true
 	}
 	rec.State, rec.PeerWait, rec.booting = control.PendingStarting, false, true
 	p.status = StatusProvisioning
 	p.lastErr = ""
+	p.setHostUseLocked(vmrt.HostUse{}, p.clock().Unix())
 	_ = p.savePendingLocked(rec)
 	machine := p.machine
 	p.mu.Unlock()
@@ -269,22 +278,28 @@ func (p *Provisioner) bootHeld(rec *pendingRecord, unlock func()) {
 	o, err := p.pairOptions(*rec.Pair)
 	if err != nil {
 		p.failPending(rec, control.PendingReasonStart, err.Error())
-		return
+		return true
 	}
-	err = p.start(machine, o)
+	waits := rec.StartBy > p.clock().Unix()
+	err = p.startNoting(machine, o, !waits)
+	if err != nil && waits && errors.Is(err, vmrt.ErrGPUInUse) {
+		_ = p.backToWaiting(rec, err.Error())
+		return false
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.pending != rec {
-		return
+		return true
 	}
 	if err == nil {
 		p.pending = nil
 		p.removePendingLocked()
-		return
+		return true
 	}
 	rec.State, rec.Reason, rec.Detail, rec.FailedAt = control.PendingFailed, control.PendingReasonStart, err.Error(), p.clock().Unix()
 	rec.booting = false
 	_ = p.savePendingLocked(rec)
+	return true
 }
 
 // giveUp drops a waiting rental at its start_by: the machine was still in use

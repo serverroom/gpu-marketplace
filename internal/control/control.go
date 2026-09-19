@@ -142,6 +142,10 @@ type PendingRental struct {
 	// WaitingForPeer: a pair half whose machine is free, waiting for the
 	// other half's machine (Holders is then empty).
 	WaitingForPeer bool `json:"waiting_for_peer,omitempty"`
+	// DesktopClosesAt (unix): the machine is free but for its desktop, which
+	// a person is logged in to (a DGX Spark); they were warned, and the
+	// rental starts, closing the desktop, at this time (Holders is empty).
+	DesktopClosesAt int64 `json:"desktop_closes_at,omitempty"`
 }
 
 // SetupProgress is the automatic setup's last attempt in brief: the step
@@ -384,6 +388,9 @@ func writeWaiting(w http.ResponseWriter, p *PendingRental) {
 	body := map[string]interface{}{"status": StatusWaitingForHost, "holders": p.Holders, "start_by": p.StartBy}
 	if p.MemoryShortGB > 0 {
 		body["memory_short_gb"] = p.MemoryShortGB
+	}
+	if p.DesktopClosesAt > 0 {
+		body["desktop_closes_at"] = p.DesktopClosesAt
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)

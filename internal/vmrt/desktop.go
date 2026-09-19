@@ -1,7 +1,6 @@
 package vmrt
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -61,7 +60,7 @@ func (rt *Runtime) releaseDesktop(st *State, desktop []string, save func() error
 	unit := ActiveDisplayManager(rt.h)
 	if unit == "" {
 		// Nothing the agent may stop is drawing it: someone started it by hand.
-		return errors.New(DesktopOnGPUProblem(desktop))
+		return desktopInUse(desktop)
 	}
 	st.StoppedDisplayManager = unit
 	if err := save(); err != nil {
@@ -70,7 +69,7 @@ func (rt *Runtime) releaseDesktop(st *State, desktop []string, save func() error
 	}
 	if err := rt.h.Run("systemctl", "stop", unit); err != nil {
 		rt.restoreDesktop(st, save)
-		return errors.New(DesktopOnGPUProblem(desktop))
+		return desktopInUse(desktop)
 	}
 	for waited := time.Duration(0); ; waited += desktopPoll {
 		left := readGPUHolders(rt.h, rt.spec.GPUs).all()
@@ -79,8 +78,8 @@ func (rt *Runtime) releaseDesktop(st *State, desktop []string, save func() error
 		}
 		if waited >= DesktopReleaseTimeout {
 			rt.restoreDesktop(st, save)
-			return fmt.Errorf("the GPU is still in use on this machine by %s after its desktop was closed; "+
-				"the desktop is back. Stop them first", strings.Join(left, ", "))
+			return &inUseError{fmt.Sprintf("the GPU is still in use on this machine by %s after its desktop was closed; "+
+				"the desktop is back. Stop them first", strings.Join(left, ", "))}
 		}
 		rt.h.Sleep(desktopPoll)
 	}

@@ -3,6 +3,7 @@ package provisioner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -395,13 +396,100 @@ func TestAStartTheHostCutInOnWaitsOn(t *testing.T) {
 		r.busy("llama-server (pid 11500)") // started again while the test ran
 		return vmrt.SelfTestResult{Passed: true, GPUVerified: true}, ""
 	}
-	r.m.startErr = errorString("the GPU is in use on this machine by llama-server (pid 11500); stop them first")
+	r.m.startErr = fmt.Errorf("%w by llama-server (pid 11500); stop them first", vmrt.ErrGPUInUse)
 	r.p.Tick()
 	if got := r.p.PendingRental(); r.p.Status() != StatusWaiting || got == nil || got.State != control.PendingWaiting || r.p.LastError() != "" {
 		t.Errorf("status %s pending %+v error %q", r.p.Status(), got, r.p.LastError())
 	}
+	if n := r.noted(); strings.Contains(n, "did not start") {
+		t.Errorf("a rental that waits on was noted as not started: %s", n)
+	}
 }
 
-type errorString string
+// A test boot the host cut in on (the GPU taken back between the plan and the
+// handover) is no verdict: the rental waits on, nothing recorded.
+func TestATestTheHostCutInOnIsNoVerdict(t *testing.T) {
+	r := newWaitRig(t)
+	r.full = false
+	r.busy("llama-server (pid 11435)")
+	_, _ = r.p.ProvisionBy("R1", renterKey(t), startBy)
+	r.busy()
+	r.p.preRentalTest = func(context.Context) (vmrt.SelfTestResult, string) {
+		return vmrt.SelfTestResult{}, "the GPU is in use on this machine by llama-server (pid 11500); stop them first"
+	}
+	r.p.Tick()
+	if got := r.p.PendingRental(); r.p.Status() != StatusWaiting || got == nil || got.State != control.PendingWaiting {
+		t.Errorf("status %s pending %+v", r.p.Status(), got)
+	}
+}
 
-func (e errorString) Error() string { return string(e) }
+// sparkRig is waitRig on a DGX Spark with ana logged in to its desktop.
+func sparkRig(t *testing.T) (*waitRig, *[]string) {
+	r := newWaitRig(t)
+	logins := &[]string{"ana"}
+	r.p.desktopLogins = func() []string { r.mu.Lock(); defer r.mu.Unlock(); return append([]string(nil), *logins...) }
+	return r, logins
+}
+
+// On a Spark someone is logged in to, a rental that is due (the host's
+// programs gone) warns on the screen and closes the desktop 15 minutes later
+// -- after the full test it owes, which comes after the warning too.
+func TestASparksDesktopIsWarnedFifteenMinutesBeforeARental(t *testing.T) {
+	r, _ := sparkRig(t)
+	r.full = false
+	r.busy("llama-server (pid 11435)")
+	_, _ = r.p.ProvisionBy("R1", renterKey(t), startBy)
+	r.busy()
+	r.p.Tick()
+	told := r.messages()
+	if len(told) != 2 || told[1] != DesktopWarningTitle+"\n"+"This machine's rental starts in 15 minutes: the desktop will close then; save your work" {
+		t.Fatalf("told %q", told)
+	}
+	got := r.p.PendingRental()
+	if r.p.Status() != StatusWaiting || got == nil || got.DesktopClosesAt != r.now.Add(15*time.Minute).Unix() || len(got.Holders) != 0 || r.tests+r.m.started != 0 {
+		t.Fatalf("status %s pending %+v tests %d started %d", r.p.Status(), got, r.tests, r.m.started)
+	}
+	r.at(r.now.Add(10 * time.Minute))
+	r.p.Tick()
+	if r.tests+r.m.started != 0 || len(r.messages()) != 2 {
+		t.Fatalf("started (or warned again) before the 15 minutes were up: tests %d started %d told %d", r.tests, r.m.started, len(r.messages()))
+	}
+	r.at(r.now.Add(5 * time.Minute))
+	r.p.Tick()
+	if r.tests != 1 || r.m.started != 1 || r.p.Status() != StatusRented {
+		t.Errorf("after 15 minutes: tests %d started %d status %s", r.tests, r.m.started, r.p.Status())
+	}
+}
+
+// A rental that arrives on a free Spark someone is logged in to waits for the
+// warning too (202, nothing for the host to stop); one whose person logs out
+// meanwhile starts at once; with nobody logged in, or without a start_by, it
+// starts at once as before.
+func TestADesktopWarningForARentalOnAFreeSpark(t *testing.T) {
+	r, logins := sparkRig(t)
+	pending, err := r.p.ProvisionBy("R1", renterKey(t), startBy)
+	if err != nil || pending == nil || pending.State != control.PendingWaiting || len(pending.Holders) != 0 ||
+		pending.DesktopClosesAt != r.now.Add(15*time.Minute).Unix() {
+		t.Fatalf("ProvisionBy = %+v %v", pending, err)
+	}
+	if told := r.messages(); len(told) != 1 || !strings.HasPrefix(told[0], DesktopWarningTitle) {
+		t.Errorf("told %q (the 'stop your programs' notice has nothing to ask)", told)
+	}
+	r.mu.Lock()
+	*logins = nil // ana logged out
+	r.mu.Unlock()
+	r.p.Tick()
+	if r.p.Status() != StatusRented {
+		t.Errorf("after the logout: %s", r.p.Status())
+	}
+
+	r2, _ := sparkRig(t)
+	if pending, err := r2.p.ProvisionBy("R2", renterKey(t), 0); err != nil || pending != nil || r2.p.Status() != StatusRented {
+		t.Errorf("without start_by: %+v %v %s", pending, err, r2.p.Status())
+	}
+	r3, logins3 := sparkRig(t)
+	*logins3 = nil
+	if pending, err := r3.p.ProvisionBy("R3", renterKey(t), startBy); err != nil || pending != nil || r3.p.Status() != StatusRented || len(r3.messages()) != 0 {
+		t.Errorf("the login screen only: %+v %v %s %q", pending, err, r3.p.Status(), r3.messages())
+	}
+}

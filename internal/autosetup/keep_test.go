@@ -200,3 +200,26 @@ func TestSetupOffIsAProblemWhileItHasWork(t *testing.T) {
 		t.Errorf("resolved = %q", probs.resolved)
 	}
 }
+
+// A test the host cut in on (the GPU taken as the test came to it) is run
+// again without the GPU, as if the host had been faster; nothing is recorded
+// for the first try.
+func TestATestTheHostCutInOnRunsWithoutTheGPU(t *testing.T) {
+	h := machine(t)
+	noTestBoot(h)
+	r := newRig(t, h)
+	fake := r.d.Runner.TestBoot
+	tries := 0
+	r.d.Runner.TestBoot = func(ctx context.Context, rt *vmrt.Runtime, o vmrt.TestOptions) vmrt.SelfTestResult {
+		tries++
+		if !o.NoGPU {
+			return vmrt.SelfTestResult{InUse: "the GPU is in use on this machine by llama-server (pid 11500); stop them first"}
+		}
+		return fake(ctx, rt, o)
+	}
+	r.run()
+	c := r.d.Prov.Capability()
+	if tries != 2 || !c.Ready || c.SelfTest == nil || c.SelfTest.GPUVerified {
+		t.Errorf("tries %d ready %v %v selftest %+v", tries, c.Ready, c.Reasons, c.SelfTest)
+	}
+}

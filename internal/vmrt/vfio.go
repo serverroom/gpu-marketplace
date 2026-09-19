@@ -232,6 +232,10 @@ var NVIDIAServices = []NVIDIAService{
 var desktopPrefixes = []string{
 	"Xorg", "Xwayland", "gnome-shell", "gnome-session", "gnome-remote-de", "mutter", "gdm", "sddm",
 	"lightdm", "kwin", "plasmashell", "xfwm4", "xfce4-session", "cinnamon", "mate-session", "budgie-wm",
+	// The desktop's own background services: GNOME's settings daemons and
+	// the portal every sandboxed app talks through. Nobody started them;
+	// they come and go with the desktop.
+	"gsd-", "xdg-desktop-portal",
 }
 
 // commLen is how much of a process name /proc/<pid>/comm keeps.
@@ -342,9 +346,9 @@ func isAgentChild(h Host, pid string) bool {
 
 // gpuHolders are the host processes with a GPU open (gpuNodes), as
 // "name (pid N)", other than NVIDIA's own services (the runtime stops those
-// itself): the machine's desktop (its display server and shell by name, and
-// everything running in a graphical login -- session.go), short-lived tools,
-// and everything else.
+// itself): the machine's desktop infrastructure (its display server, shell and
+// login screen -- session.go), short-lived tools, and everything else -- the
+// host's own programs, in a graphical login or not.
 type gpuHolders struct {
 	desktop, transient, other []string
 }
@@ -443,8 +447,8 @@ func readGPUHolders(h Host, gpus []string) gpuHolders {
 			continue
 		}
 		seen[who] = true
-		// Short-lived tools before the session: an nvidia-smi typed in a
-		// terminal on the desktop is waited for, not taken for the desktop.
+		// Short-lived tools before the session: an nvidia-smi the login
+		// screen's user runs is waited for, not taken for the desktop.
 		switch {
 		case IsDesktopProcess(name):
 			g.desktop = append(g.desktop, who)
