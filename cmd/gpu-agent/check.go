@@ -467,7 +467,7 @@ func runPrepare(args []string) {
 		return
 	}
 	if detectProvisioner().IsContainer() {
-		runContainerPrepare()
+		runContainerPrepare(*deps)
 		return
 	}
 	if err := provisioner.CheckBakeDriver(*driver); err != nil {
@@ -497,19 +497,32 @@ func runPrepare(args []string) {
 	}
 }
 
-// runContainerPrepare builds the container rental image on a machine that hosts
-// as a container (its GPU cannot be passed through to a microVM).
-func runContainerPrepare() {
-	release, err := vmrt.AcquireBusy(vmrt.OSHost{}, config.DataDir(), os.Getpid(), "building the container rental image")
+// runContainerPrepare sets up a machine that hosts as a container (its GPU
+// cannot be passed through to a microVM): with --install-deps it installs
+// podman and the NVIDIA Container Toolkit, then it configures the host (CDI
+// spec + user-namespace ranges) and builds the container rental image.
+func runContainerPrepare(deps bool) {
+	h := vmrt.OSHost{}
+	logf := func(format string, a ...interface{}) { fmt.Printf(format+"\n", a...) }
+	release, err := vmrt.AcquireBusy(h, config.DataDir(), os.Getpid(), "preparing container hosting")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "runtime prepare: %v; 'gpu-agent setup --status' shows where it is\n", err)
 		os.Exit(1)
 	}
-	err = vmrt.PrepareContainerImage(vmrt.OSHost{}, config.DataDir(), func(format string, a ...interface{}) { fmt.Printf(format+"\n", a...) })
-	release()
-	if err != nil {
+	defer release()
+	if deps {
+		if err := vmrt.InstallContainerPackages(h, logf); err != nil {
+			fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if err := vmrt.EnsureContainerHost(h, logf); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("The container rental image is built. Next: sudo gpu-agent check --boot")
+	if err := vmrt.PrepareContainerImage(h, config.DataDir(), logf); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("The machine is set up for container hosting. Next: sudo gpu-agent check --boot")
 }
