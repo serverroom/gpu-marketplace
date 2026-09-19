@@ -148,6 +148,9 @@ func (r *Runner) Run(ctx context.Context, a Attempt) (out Attempt) {
 }
 
 func (r *Runner) step(ctx context.Context, s Step, a Attempt) error {
+	if r.Detect().IsContainer() {
+		return r.containerStep(ctx, s, a)
+	}
 	switch s {
 	case StepDeps:
 		install := r.InstallDeps
@@ -235,6 +238,60 @@ func (r *Runner) step(ctx context.Context, s Step, a Attempt) error {
 		default:
 			r.log("Test boot passed.")
 		}
+		return nil
+	}
+	return fmt.Errorf("unknown setup step %q", s)
+}
+
+// containerStep runs a setup step on a machine that hosts as a container: the
+// container stack instead of QEMU, the container image instead of the golden
+// disk, and the container self-test instead of the microVM test boot.
+func (r *Runner) containerStep(ctx context.Context, s Step, a Attempt) error {
+	switch s {
+	case StepDeps:
+		if r.InstallDeps != nil {
+			if err := r.InstallDeps(ctx); err != nil {
+				return err
+			}
+		} else if err := vmrt.InstallContainerPackages(r.Host, r.Log); err != nil {
+			return err
+		}
+		return vmrt.EnsureContainerHost(r.Host, r.Log)
+
+	case StepImage:
+		// EnsureContainerHost is idempotent; run it here too so a machine that
+		// only needed the image also gets a fresh, normalized CDI spec.
+		if err := vmrt.EnsureContainerHost(r.Host, r.Log); err != nil {
+			return err
+		}
+		return vmrt.PrepareContainerImage(r.Host, r.DataDir, r.Log)
+
+	case StepTestBoot:
+		p := r.Detect()
+		var blocking []string
+		for _, f := range p.Findings() {
+			if f.Kind != provisioner.ReasonTestBoot {
+				blocking = append(blocking, f.Text)
+			}
+		}
+		if len(blocking) > 0 {
+			return fmt.Errorf("this machine cannot run its test boot yet: %s", strings.Join(blocking, "; "))
+		}
+		crt := p.ContainerRuntime()
+		if crt == nil {
+			return errors.New("the container runtime could not be read")
+		}
+		if crt.Present() {
+			return errors.New("a rental (or the leftover of one) is on this machine")
+		}
+		res := crt.SelfTestContext(ctx, r.Version)
+		if res.Stopped {
+			return errors.New("the test boot was stopped before it finished")
+		}
+		if !res.Passed {
+			return fmt.Errorf("the container test boot failed: %s", strings.Join(res.Problems, "; "))
+		}
+		r.log("Container test boot passed.")
 		return nil
 	}
 	return fmt.Errorf("unknown setup step %q", s)

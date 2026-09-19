@@ -77,8 +77,8 @@ func (d *Daemon) KeepOnce(ctx context.Context, justStarted bool) {
 		return
 	}
 	fresh := d.Runner.Detect()
-	rt := fresh.Runtime()
-	if rt == nil || rt.Present() {
+	spec, ok := fresh.RuntimeSpec()
+	if !ok || fresh.RentalPresent() {
 		return
 	}
 	c := fresh.Capability()
@@ -93,7 +93,7 @@ func (d *Daemon) KeepOnce(ctx context.Context, justStarted bool) {
 		return
 	}
 	if onlyTestBoot(plan) {
-		a := d.Runner.Begin(plan, rt.Spec().GPUs, ByAgent)
+		a := d.Runner.Begin(plan, spec.GPUs, ByAgent)
 		last, err := Load(d.Runner.Host, d.Runner.DataDir)
 		if due, at := Due(last, a.Key, d.Runner.now(), false); err == nil && !due && at.IsZero() {
 			d.keepTest(ctx, fresh, true, justStarted)
@@ -107,6 +107,10 @@ func (d *Daemon) KeepOnce(ctx context.Context, justStarted bool) {
 // keepTest runs one test boot on fresh's machine: needed says the machine is
 // not ready without it (else it is the running version's full retest).
 func (d *Daemon) keepTest(ctx context.Context, fresh *provisioner.Provisioner, needed, justStarted bool) {
+	if fresh.IsContainer() {
+		d.keepContainerTest(ctx, fresh)
+		return
+	}
 	h := d.Runner.Host
 	rt := fresh.Runtime()
 	spec := rt.Spec()
@@ -177,6 +181,46 @@ func (d *Daemon) keepTest(ctx context.Context, fresh *provisioner.Provisioner, n
 	}
 	// A failed test is on the report as the reason the machine is not ready
 	// (the agent syncs the hosting checks' findings with every report).
+	d.report(after.Capability())
+}
+
+// keepContainerTest runs one container test boot: the container test always
+// runs (it shares the GPU rather than taking it, so it never waits for the host).
+func (d *Daemon) keepContainerTest(ctx context.Context, fresh *provisioner.Provisioner) {
+	crt := fresh.ContainerRuntime()
+	if crt == nil || crt.Present() {
+		return
+	}
+	release, err := vmrt.AcquireBusy(d.Runner.Host, d.Runner.DataDir, d.PID, "running a test rental")
+	if err != nil {
+		return
+	}
+	defer release()
+	if !d.Prov.BeginSetup() {
+		return
+	}
+	defer d.Prov.EndSetup()
+	d.Prov.Adopt(fresh)
+	line := "Checking this machine with a test rental container (started " + clock(d.Runner.now().Unix()) + "). Nothing to do; this takes about a minute."
+	d.say("%s", line)
+	d.show(fresh.Capability(), line)
+
+	res := crt.SelfTestContext(ctx, d.Runner.Version)
+	d.Prov.EndSetup()
+	after := d.Runner.Detect()
+	d.Prov.Adopt(after)
+	switch {
+	case ctx.Err() != nil:
+		d.say("The test rental stopped with the agent")
+		return
+	case res.Passed:
+		d.say("Test rental passed: this machine is ready to host container rentals")
+		if d.Errors != nil {
+			d.Errors.Resolve(control.AreaTestBoot, "")
+		}
+	default:
+		d.warn("Test rental failed: %s", strings.Join(res.Problems, "; "))
+	}
 	d.report(after.Capability())
 }
 

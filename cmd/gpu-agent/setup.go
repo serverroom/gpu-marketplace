@@ -123,8 +123,8 @@ func runSetup(svc service.Service, args []string) {
 		fmt.Println("This machine is ready to host a rental; there is nothing to set up.")
 		return
 	}
-	rt := p.Runtime()
-	if rt == nil || rt.Present() {
+	spec, ok := p.RuntimeSpec()
+	if !ok || p.RentalPresent() {
 		exitf("a rental (or the leftover of one) is on this machine; the setup does not run beside it")
 	}
 	plan := autosetup.PlanFor(p.Findings(), autosetup.AptGet(h))
@@ -144,7 +144,7 @@ func runSetup(svc service.Service, args []string) {
 	for i, s := range plan.Steps {
 		fmt.Printf("  %d. %s (about %s)\n", i+1, s.Doing(), s.Takes())
 	}
-	if rt.Spec().DesktopOnDemand {
+	if spec.DesktopOnDemand {
 		fmt.Println("The test rental takes the GPU: this machine's desktop closes during it (anything open on its screen closes")
 		fmt.Println("with it) and comes back after it.")
 	}
@@ -163,7 +163,7 @@ func runSetup(svc service.Service, args []string) {
 			fmt.Printf("\n== Step %d of %d: %s ==\n", a.Step, len(a.Steps), a.CurrentStep().Doing())
 		},
 	}
-	a := runner.Begin(plan, rt.Spec().GPUs, autosetup.ByCommand)
+	a := runner.Begin(plan, spec.GPUs, autosetup.ByCommand)
 	line := a.DriverLine()
 	fmt.Printf("%s%s.\n", strings.ToUpper(line[:1]), line[1:])
 	a = runner.Run(ctx, a)

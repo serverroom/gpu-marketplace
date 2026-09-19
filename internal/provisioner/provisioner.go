@@ -426,6 +426,22 @@ func (p *Provisioner) IsContainer() bool {
 	return p.capability.Kind == KindContainer
 }
 
+// RuntimeSpec is the spec of whichever runtime backs this machine -- the
+// microVM runtime or the container runtime -- and whether one exists. It lets
+// the automatic setup read the machine's GPUs and desktop state without caring
+// which runtime hosts it.
+func (p *Provisioner) RuntimeSpec() (vmrt.Spec, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.runtime != nil {
+		return p.runtime.Spec(), true
+	}
+	if crt, ok := p.machine.(*vmrt.ContainerRuntime); ok {
+		return crt.Spec(), true
+	}
+	return vmrt.Spec{}, false
+}
+
 // machineView is what Adopt can swap, read together under p.mu.
 type machineView struct {
 	runtime  *vmrt.Runtime

@@ -102,13 +102,17 @@ func ensureContainersSubID(h Host, log func(format string, args ...interface{}))
 // podman, and the NVIDIA Container Toolkit (adding its repo). Ubuntu/Debian
 // only; on anything else the preflight tells the operator what to install.
 func InstallContainerPackages(h Host, log func(format string, args ...interface{})) error {
+	pkgs := []string{"podman", "cryptsetup", "nftables", "e2fsprogs", "iproute2", "util-linux", "curl", "gnupg"}
 	if log != nil {
-		log("installing podman")
+		log("installing the container runtime and tools (%s)", strings.Join(pkgs, ", "))
 	}
-	if err := h.Run("apt-get", "install", "-y", "-q", "podman"); err != nil {
+	install := func() error {
+		return h.Run("apt-get", append([]string{"install", "-y", "-q"}, pkgs...)...)
+	}
+	if err := install(); err != nil {
 		_ = h.Run("apt-get", "update", "-q")
-		if err := h.Run("apt-get", "install", "-y", "-q", "podman"); err != nil {
-			return fmt.Errorf("install podman: %w", err)
+		if err := install(); err != nil {
+			return fmt.Errorf("install container packages: %w", err)
 		}
 	}
 	if _, err := h.LookPath("nvidia-ctk"); err != nil {

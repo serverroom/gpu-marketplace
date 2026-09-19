@@ -173,8 +173,8 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 		return // a rental or its leftover (never beside one), or removed from the marketplace
 	}
 	fresh := d.Runner.Detect()
-	rt := fresh.Runtime()
-	if rt == nil || rt.Present() {
+	spec, ok := fresh.RuntimeSpec()
+	if !ok || fresh.RentalPresent() {
 		return
 	}
 	if fresh.Capability().Ready {
@@ -193,7 +193,7 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 		return
 	}
 
-	a := d.Runner.Begin(plan, rt.Spec().GPUs, ByAgent)
+	a := d.Runner.Begin(plan, spec.GPUs, ByAgent)
 	last, err := Load(d.Runner.Host, d.Runner.DataDir)
 	if err != nil {
 		d.warn("read the last automatic setup (%v); starting a new one", err)
@@ -228,7 +228,7 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 	defer d.Prov.EndSetup()
 	d.Prov.Adopt(fresh)
 	base := fresh.Capability()
-	desktopOnDemand := rt.Spec().DesktopOnDemand
+	desktopOnDemand := spec.DesktopOnDemand
 
 	d.say("Automatic setup: %d step(s) to make this machine ready; %s", len(plan.Steps), a.DriverLine())
 	runner := d.Runner
