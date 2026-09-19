@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/serverroom/gpu-marketplace/internal/pcidev"
 )
 
 // collectAMD queries rocm-smi for AMD GPU info.
@@ -11,7 +13,7 @@ func collectAMD() ([]GPUInfo, error) {
 	// Try rocm-smi --showproductname --showmeminfo vram --showtemp --showuse --csv
 	out, err := exec.Command("rocm-smi",
 		"--showproductname", "--showmeminfo", "vram",
-		"--showtemp", "--showuse", "--csv",
+		"--showtemp", "--showuse", "--showbus", "--csv",
 	).Output()
 	if err != nil {
 		return nil, err
@@ -55,6 +57,9 @@ func collectAMD() ([]GPUInfo, error) {
 			case strings.Contains(key, "gpu use"):
 				u, _ := strconv.ParseFloat(strings.TrimSuffix(val, "%"), 64)
 				gpu.UtilizationPct = u
+			case strings.Contains(key, "bus"):
+				// Which of them is the processor's own (withIntegrated).
+				gpu.bdf = pcidev.NormalizeBDF(val)
 			}
 		}
 

@@ -37,6 +37,11 @@ type GPUInfo struct {
 	// UnifiedMemory: this GPU has no memory of its own and uses the machine's
 	// memory pool, so VRAMTotalGB is that pool (shared with the CPU), not extra.
 	UnifiedMemory bool `json:"unified_memory,omitempty"`
+	// Integrated: the processor's own GPU, which rentals never take (listed so
+	// the marketplace can say it is not included). Absent before v0.2.3.
+	Integrated bool `json:"integrated,omitempty"`
+	// bdf is the GPU's PCI address, where the source says it.
+	bdf string
 }
 
 // DiskInfo holds disk details.
@@ -112,15 +117,22 @@ func Collect() (*SystemStats, error) {
 
 // collectGPUs tries all GPU detection methods.
 func collectGPUs() []GPUInfo {
-	// Try NVIDIA first
+	// Try NVIDIA first. On Linux the processor's own GPU is listed too,
+	// marked integrated (gpu_integrated.go).
 	gpus, err := collectNVIDIA()
 	if err == nil && len(gpus) > 0 {
+		if runtime.GOOS == "linux" {
+			return withIntegrated(gpus, pcidev.OS{})
+		}
 		return gpus
 	}
 
 	// Try AMD
 	gpus, err = collectAMD()
 	if err == nil && len(gpus) > 0 {
+		if runtime.GOOS == "linux" {
+			return withIntegrated(gpus, pcidev.OS{})
+		}
 		return gpus
 	}
 
@@ -135,8 +147,9 @@ func collectGPUs() []GPUInfo {
 	// Any other GPU on Linux, straight from the PCI bus
 	if runtime.GOOS == "linux" {
 		if gpus := gpusFromPCI(pcidev.OS{}); len(gpus) > 0 {
-			return gpus
+			return withIntegrated(gpus, pcidev.OS{})
 		}
+		return withIntegrated([]GPUInfo{}, pcidev.OS{})
 	}
 
 	return []GPUInfo{}

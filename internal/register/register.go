@@ -493,10 +493,13 @@ func chooseHub(hubs []config.Hub) (*config.Hub, error) {
 	return &sel.Hub, nil
 }
 
+// gpuModels are the GPUs the machine rents: never the processor's own.
 func gpuModels(st *stats.SystemStats) []string {
 	models := make([]string, 0, len(st.GPUs))
 	for _, g := range st.GPUs {
-		models = append(models, g.Model)
+		if !g.Integrated {
+			models = append(models, g.Model)
+		}
 	}
 	return models
 }
