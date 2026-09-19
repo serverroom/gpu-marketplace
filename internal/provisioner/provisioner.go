@@ -401,11 +401,29 @@ func (p *Provisioner) Adopt(q *Provisioner) (adopted bool) {
 	return true
 }
 
-// Runtime is the microVM runtime behind this provisioner (nil in tests).
+// Runtime is the microVM runtime behind this provisioner (nil in tests, and on
+// a machine that hosts as a container).
 func (p *Provisioner) Runtime() *vmrt.Runtime {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.runtime
+}
+
+// ContainerRuntime is the container runtime behind this provisioner, or nil
+// when this machine hosts as a microVM.
+func (p *Provisioner) ContainerRuntime() *vmrt.ContainerRuntime {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	crt, _ := p.machine.(*vmrt.ContainerRuntime)
+	return crt
+}
+
+// IsContainer reports whether this machine hosts rentals as a hardened
+// container rather than a microVM.
+func (p *Provisioner) IsContainer() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.capability.Kind == KindContainer
 }
 
 // machineView is what Adopt can swap, read together under p.mu.

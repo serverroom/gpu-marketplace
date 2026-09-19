@@ -211,6 +211,10 @@ func runSelfTest(svc service.Service, yes bool) {
 		os.Exit(1)
 	}
 	p := detectProvisioner()
+	if p.IsContainer() {
+		runContainerSelfTest(svc, yes, p)
+		return
+	}
 	rt := p.Runtime()
 	if rt.Present() {
 		fmt.Fprintln(os.Stderr, "a rental (or the leftover of one) is on this machine; a test boot cannot run now")
@@ -315,6 +319,73 @@ func runSelfTest(svc service.Service, yes bool) {
 	os.Exit(2)
 }
 
+// runContainerSelfTest runs a container test boot: a hardened rental container
+// with the GPU shared over CDI, behind the fence, on the encrypted volume; it
+// reports what it saw, is torn down and wiped, and the verdict is recorded.
+func runContainerSelfTest(svc service.Service, yes bool, p *provisioner.Provisioner) {
+	crt := p.ContainerRuntime()
+	if crt == nil {
+		fmt.Fprintln(os.Stderr, "this machine does not host as a container")
+		os.Exit(1)
+	}
+	if crt.Present() {
+		fmt.Fprintln(os.Stderr, "a rental (or the leftover of one) is on this machine; a test boot cannot run now")
+		os.Exit(1)
+	}
+	var blocking []string
+	for _, f := range p.Findings() {
+		if f.Kind != provisioner.ReasonTestBoot {
+			blocking = append(blocking, f.Text)
+		}
+	}
+	if len(blocking) > 0 {
+		fmt.Println("This machine cannot run a test boot yet:")
+		for _, r := range blocking {
+			fmt.Printf("  - %s\n", r)
+		}
+		os.Exit(2)
+	}
+	fmt.Println("This starts a test rental as a hardened container for a minute:")
+	fmt.Println("  - the GPU is shared into the container over CDI (the host keeps the driver)")
+	fmt.Println("  - it runs behind the fence, on an encrypted disk, and reports whether it reaches")
+	fmt.Println("    the internet and that it CANNOT reach this machine or its network")
+	fmt.Println("  - then it is destroyed and its disk key discarded")
+	if !yes && !confirm("Run the test boot? [y/N]: ") {
+		fmt.Println("Nothing was changed.")
+		return
+	}
+	release, err := vmrt.AcquireBusy(vmrt.OSHost{}, config.DataDir(), os.Getpid(), "running a test boot")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v; 'gpu-agent setup --status' shows where it is\n", err)
+		os.Exit(1)
+	}
+	fmt.Println()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Println("Starting ... (the first run pulls and builds the image; Ctrl-C stops the test cleanly)")
+	res := crt.SelfTestContext(ctx, version)
+	release()
+	if res.Passed {
+		fmt.Printf("PASSED: the container ran, saw the GPU, reached the internet, and could not reach %s.\n", strings.Join(res.Blocked, ", "))
+		if _, err := svc.Status(); err == nil {
+			if err := service.Control(svc, "restart"); err == nil {
+				fmt.Println("The agent service was restarted so it reports this machine as ready.")
+			}
+		}
+		return
+	}
+	if res.Stopped {
+		fmt.Println("STOPPED: the test was stopped before it finished and its container was removed cleanly.")
+		os.Exit(130)
+	}
+	fmt.Println("FAILED:")
+	for _, problem := range res.Problems {
+		fmt.Printf("  - %s\n", problem)
+	}
+	noteCommand(control.AreaTestBoot, "the container test boot run by hand ('gpu-agent check --boot') failed: "+strings.Join(res.Problems, "; "), "")
+	os.Exit(2)
+}
+
 // runHeadless switches this machine to start without a desktop and closes the
 // running one, after saying exactly what happens and how to undo it. The
 // desktop closes last: it may be the session this command was typed in.
@@ -395,6 +466,10 @@ func runPrepare(args []string) {
 		runHeadless(*yes)
 		return
 	}
+	if detectProvisioner().IsContainer() {
+		runContainerPrepare()
+		return
+	}
 	if err := provisioner.CheckBakeDriver(*driver); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime prepare: %v\n", err)
 		os.Exit(1)
@@ -420,4 +495,21 @@ func runPrepare(args []string) {
 		fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runContainerPrepare builds the container rental image on a machine that hosts
+// as a container (its GPU cannot be passed through to a microVM).
+func runContainerPrepare() {
+	release, err := vmrt.AcquireBusy(vmrt.OSHost{}, config.DataDir(), os.Getpid(), "building the container rental image")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime prepare: %v; 'gpu-agent setup --status' shows where it is\n", err)
+		os.Exit(1)
+	}
+	err = vmrt.PrepareContainerImage(vmrt.OSHost{}, config.DataDir(), func(format string, a ...interface{}) { fmt.Printf(format+"\n", a...) })
+	release()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("The container rental image is built. Next: sudo gpu-agent check --boot")
 }

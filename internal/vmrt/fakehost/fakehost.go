@@ -531,6 +531,13 @@ func (h *Host) SetFail(prefix string, err error) {
 	h.Fail[prefix] = err
 }
 
+// SetOutput sets what Output answers for commands with this prefix.
+func (h *Host) SetOutput(prefix, out string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Outputs[prefix] = out
+}
+
 // LastField is the last word of a command, which is usually its target.
 func LastField(cmd string) string {
 	f := strings.Fields(cmd)

@@ -2,6 +2,7 @@ package provisioner
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -66,10 +67,19 @@ func vfioImpossible(h vmrt.Host, bdf string) bool {
 
 // containerFallback reports whether this machine's rentable GPUs should be
 // hosted in container mode: it has some, they are all NVIDIA, and none can be
-// passed through over VFIO.
+// passed through over VFIO. GPU_AGENT_FORCE_CONTAINER=1 forces it on any NVIDIA
+// machine, for testing container mode on VFIO-capable hardware (SID 2457).
 func containerFallback(h vmrt.Host, bdfs []string) bool {
 	if len(bdfs) == 0 {
 		return false
+	}
+	for _, bdf := range bdfs {
+		if pciField(h, bdf, "vendor") != "10de" {
+			return false
+		}
+	}
+	if os.Getenv("GPU_AGENT_FORCE_CONTAINER") == "1" {
+		return true
 	}
 	for _, bdf := range bdfs {
 		if !vfioImpossible(h, bdf) {
