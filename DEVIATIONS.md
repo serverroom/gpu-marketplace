@@ -413,19 +413,35 @@ bullet above.
 
 # v0.2.3: the host keeps using the machine until it is rented (CONTRACT-hostuse.md A and D)
 
-Built on origin/main f5eeda5, which is already tagged **v0.2.2** (the any-GPU release
-above), so this is the next release, v0.2.3; texts and comments say v0.2.3.
+Built on origin/main f5eeda5, which is already tagged and released as **v0.2.2** (the
+any-GPU release above), so this is the next release, v0.2.3 (the owner confirmed). It is
+added to v0.2.2, never replacing it; what it changes of v0.2.2's rules is said here.
+
+**Superseded in v0.2.2's section:** "Busy holders stay a rental-start refusal" (and "Anything
+else holding a card is judged at rental start") -- a card the host's programs hold is still
+never left out, but a rental that finds it held now waits for the host up to its start_by
+(A2 below) instead of failing; only a rental without a start_by is still refused (409).
+**Superseded in the first part (item 16):** a program in a graphical login is no longer the
+desktop (owner's decision, item 1 below).
 
 ## Host use (A1)
 
-1. **What counts as the host's use:** a process holding a rented GPU that is neither the
-   desktop (by name, or -- item 16 of the first part -- anything in a graphical login),
-   nor one of NVIDIA's services, nor a short-lived tool or a child of a gpu-agent; and, on
-   any machine, less `MemAvailable` than the rental's VM gets (`GuestMemoryMB`). Page
-   cache counts as free, as the kernel counts it; ZFS's ARC does not, so a ZFS host may
-   read as short of memory. A program started from a terminal inside a DGX Spark's
-   desktop session counts as the desktop and closes with it when a rental starts, as in
-   v0.2.0 -- **an owner question** if that is not what is wanted.
+1. **What counts as the host's use (owner's decision):** a process holding a rented GPU
+   (v0.2.2's per-GPU nodes: NVIDIA's `/dev/nvidia*`, other makes' DRM nodes and `/dev/kfd`,
+   every GPU's VFIO group node; systemd and systemd-logind never) that is not the
+   desktop's infrastructure, not one of NVIDIA's services, not a short-lived tool or a
+   child of a gpu-agent -- **in a graphical login or not**: a browser's GPU process or a
+   llama-server typed in a desktop terminal is host use, and gets the 24-hour window. The
+   desktop is only its infrastructure: the `desktopPrefixes` names (display servers,
+   shells, compositors, display managers; `gsd-*` and `xdg-desktop-portal*` added as the
+   desktop's own services), the login screen's session (class greeter) and its user's
+   units, and what the display manager started outside every login. On a workstation
+   that is not a Spark this also narrows which GPU is left out as "drawing a desktop" to
+   one the infrastructure holds (a GPU only a browser uses is now host use, not left out).
+   And, on any machine, less `MemAvailable` than the rental's VM gets (`GuestMemoryMB`):
+   page cache counts as free, as the kernel counts it; ZFS's ARC does not, so a ZFS host
+   may read as short of memory. Only the GPUs rentals get count (v0.2.2's detection:
+   integrated GPUs, left-out cards and the BMC's display never do).
 2. `host_busy.since` is the agent's own clock: it starts again when the agent restarts.
    `holders` is always a list (`[]` when only memory is short).
 3. **/provision without `start_by` on a machine in use is refused (409, naming the
@@ -459,15 +475,24 @@ above), so this is the next release, v0.2.3; texts and comments say v0.2.3.
    not reach everyone, that is noted for the marketplace. A free pair half's machine is
    not told anything (there is nothing to do on it).
 8. **A host who takes the GPU back in the moment before the start** (the runtime refuses
-   a GPU in use) does not lose the rental: it waits on until its start_by.
+   a GPU in use: `vmrt.ErrGPUInUse`) does not lose the rental: it waits on until its
+   start_by, and no "did not start" problem is noted for it. **A test boot the host cut in
+   on** (the GPU taken between the plan and the handover, which comes after the disk is
+   made) is no verdict: nothing is recorded (`InUse`), the pre-rental test goes back to
+   waiting, and the setup and Keep run the test again without the GPU (a needed test) or
+   later (a retest). **A failed test by an agent up to v0.2.2 whose VM never got the GPU**
+   (refused as in use, or a desktop on it) is no GPU verdict either: it blocks until a test
+   passes, and a test without the GPU may pass it -- those are the machines this release
+   puts back on sale.
 9. **A direct start on a free machine whose running version owes the full test runs that
    test first, inside `provisioning`** -- up to 5-15 minutes more before `rented`
    (ServCast's boot deadline is 30 minutes). A failure there is the same GPU failure
    (a `failed` pending record) as for a waiting rental. A rental without start_by whose
    test an agent restart cut short is dropped (did not start), not resumed.
-10. **Updates are not held back by a waiting rental** (it is on disk and waits on under
-    the new agent, which owes its own full test); one that is starting holds them back.
-    **Removing the machine is refused (409) while a rental waits** for it.
+10. **Updates wait while a rental waits for the machine** (as while one runs): a pair
+    half meets the other on the cable every minute, and a restart under it could leave
+    the other half booting alone. A waiting rental still survives a restart (crash,
+    reboot). **Removing the machine is refused (409) while a rental waits** for it.
 
 ## Test boots (A3, D2)
 
@@ -494,9 +519,20 @@ above), so this is the next release, v0.2.3; texts and comments say v0.2.3.
     hands to the setup's own Run. It runs under BeginSetup, like the setup: **the machine
     is shown not ready, with a progress line, for the test's 5-15 minutes**. It does not
     run with the automatic setup off (the full test before a rental still does).
-15. **DGX Spark:** the agent's own tests (setup, Keep) count a person logged in to the
-    desktop as use -- they run without the GPU, or wait -- and close only the login
-    screen. `check --boot` (a person) and the test before a rental may close the desktop.
+15. **DGX Spark (owner's decision):** the agent's own tests (setup, Keep) with a person
+    logged in to the desktop run without the GPU and leave the full GPU test for the
+    rental's start; with nobody logged in (the login screen only) the full test closes and
+    restores the display manager as before. `check --boot` (a person) may close the
+    desktop. **Before a rental closes a desktop someone is logged in to**, they are warned
+    on the screen (desktop notification and wall): "This machine's rental starts in 15
+    minutes: the desktop will close then; save your work", and the rental waits 15
+    minutes (status `waiting_for_host`, `pending.holders: []`,
+    `pending.desktop_closes_at`; also in the 202 when the rental arrives on such a
+    machine) -- then the full test it owes, then the start, which stops the display
+    manager and brings the desktop back after the rental as before. A person who logs out
+    meanwhile lets it start at once; with the login screen only, no warning. The warning
+    is sent once per rental. A rental without a start_by cannot wait, and starts at once
+    as before. A pair half warns before it meets its peer on the cable.
 16. `check --boot` runs without the GPU when the host's programs hold it (and says so
     before asking), and in a smaller VM when memory is short. The pair test (`check
     --boot --pair`) still needs the GPU free and is recorded per version, unchanged.
@@ -505,16 +541,21 @@ above), so this is the next release, v0.2.3; texts and comments say v0.2.3.
 
 17. A /pair/provision **with start_by** never starts its half alone. Each half is held by
     a goroutine: while its host uses it, it waits as a single rental does (202, the host
-    told); once free (and its full test done, when owed) it meets the other half on the
-    cable at the start of every minute: 20-second windows of `GPUAGENT-START1` frames
-    (the rental id's first 8 characters, the port's MAC, "heard you", a sequence number,
-    HMAC-SHA256 keyed with the full rental id). A half starts when the other said, at
-    least 5 seconds before the window ended, that it heard this one; both then start
-    within the same minute, holding the frame lock from the rendezvous to the start. The
-    two clocks must agree within seconds (NTP), as the peer announcements already need. A
-    half that heard the other's "heard you" in the last instant before the cutoff, while
-    the other did not hear its own, would start alone: frames every 250 ms over 15
-    seconds make that need seconds of loss at exactly that moment.
+    told); once free (and warned, and its full test done, when owed) it meets the other
+    half on the cable at the start of every minute: 20-second windows of `GPUAGENT-START1`
+    frames (the rental id's first 8 characters, the port's MAC, "heard you", the slot's
+    start in unix ms, a sequence number, HMAC-SHA256 keyed with the full rental id). A half
+    starts when the other said, for the same slot and at least 5 seconds before the slot's
+    window ends on the clock, that it heard this one; both then start within the same
+    minute, holding the frame lock from the rendezvous to the start. The window and cutoff
+    are the slot's on the clock, not counted from when a half's ports came up (a review
+    found a half that opened late could agree after the other stopped counting); frames of
+    another slot are ignored. A half that has heard the other keeps answering to the end
+    of the window even when its agent stops, and keeps what it agreed. The two clocks must
+    agree within seconds (NTP). What remains: a half that heard "heard you" just before the
+    cutoff while the other lost every frame after it would start alone; and a host who
+    takes one half's GPU in the last minute makes that half wait on while the other half's
+    VM runs (it fails its cable check, and the marketplace judges the pair).
 18. **A free half answers 200 `provisioning`** (two free halves meet within the minute and
     boot), and after a rendezvous that did not agree it shows `waiting_for_host` with
     `pending.waiting_for_peer: true` and `holders: []` (ServCast's panel shows such a
@@ -528,6 +569,17 @@ above), so this is the next release, v0.2.3; texts and comments say v0.2.3.
     /provision (a machine in use then accepts and fails in the background, as before):
     ServCast must send start_by only to agents that report v0.2.3 or later.
 
+## The processor's own GPU in the specs (coordinator addition)
+
+22. `specs.gpus` (stats) now lists the processor's own GPU too (v0.2.2's
+    `pcidev.Integrated`), marked `"integrated": true` and `"unified_memory": true`, named
+    by libdrm's `/usr/share/libdrm/amdgpu.ids` for its device and revision where present
+    ("AMD Radeon 8060S Graphics" for 1002:1586 rev c1), else by the PCI ID database
+    ("AMD Radeon Graphics / Radeon 8050S / Radeon 8060S": 1586 is both). One rocm-smi
+    lists (it lists an APU; the query now adds `--showbus`) is marked, not listed twice; a
+    rentable card keeps its entry. Registration's GPU model list leaves it out, and
+    `capability.gpus`, `capability.excluded` and `gpu_count` are v0.2.2's, unchanged.
+
 ## Every error reaches the marketplace (D1)
 
 21. Added to the problems the capability report carries: the relay settings unreadable
@@ -538,6 +590,42 @@ above), so this is the next release, v0.2.3; texts and comments say v0.2.3.
     first notification that could not reach everyone (rental, event), and a waiting
     rental that could not be read back after a restart (rental, event). A failed Keep
     test is the hosting checks' test-boot finding, synced with every report.
+
+## From the independent review (fixed)
+
+23. The in-use handling of item 8 (a refusal is never a GPU verdict), the rendezvous of
+    item 17, updates held back by a waiting rental (item 10), data races (a record's fields
+    read outside the lock in Tick and backToWaiting; a hold's cancel read after unlock),
+    `gpu-agent stop` waiting what is left of its 75 s for a test boot's teardown (was 30 s),
+    a desktop on a rented GPU of a machine that is not a Spark counted as host use (it
+    does not close for a rental or a test), `host_busy` cleared when a rental starts, an
+    earlier rental's failed record dropped when a new one starts, and the host's messages
+    for a cancellation ("you can keep using the machine") and a deadline missed while free.
+    Left as they are: a rental that arrives during Keep's 5-15 minute retest is refused as
+    "setting itself up" (the capability says not ready then, as during any setup); a free
+    pair half turns IPv6 off and on on its unconfigured ConnectX ports once a minute while
+    it waits (as the cable checks do); a machine whose only test ran without the GPU has
+    no `capability.gpus` until a full test (the specs still name its GPUs).
+
+## Integration with v0.2.2, checked
+
+- Host use reads v0.2.2's holders per GPU (`readGPUHolders`/`nodesOf`), only for the GPUs
+  rentals get (`rep.BDFs`, from `pcidev`: integrated GPUs, the BMC's display, left-out cards
+  never count); systemd and systemd-logind are never holders. Its tests pass unchanged.
+- The full test uses v0.2.2's verdict unchanged (`Evaluate`: each passed GPU seen by
+  vendor:device with every standard memory BAR mapped; no guest driver is a note); the test
+  without the GPU gives `Evaluate` no host GPUs, so no GPU verdict is made or recorded as a
+  pass of the GPU (`gpu_verified` false, `last_full_test` kept).
+- `capability.gpus` comes from the last test that took the GPUs (`VerifiedGPUs`), so a test
+  without the GPU does not empty it; `capability.excluded`, `gpu_count`, `kind` and
+  preflight's left-out rules are untouched (the desktop rule narrowed as item 1 says).
+- `GoldenInfo.vendors` and `GoldenProblem` are untouched; the test's image fingerprint reads
+  only the image's base, driver and build time (a rebuild for a new make is a new build).
+- The teardown verifier (from the drivers the rental recorded) is not run after a test
+  without the GPU (nothing was taken); `HostGPUDriver` counts a GPU on vfio-pci by the driver
+  its rental recorded, an in-tree driver without a version file by name, a GPU with no host
+  driver as "none" (still rented, as v0.2.2 decided).
+- The pair test and its per-version record are unchanged.
 
 ## Tests
 

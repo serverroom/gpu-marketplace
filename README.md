@@ -182,7 +182,7 @@ exactly as "Update agent" does (below): from the release address it builds itsel
 checked against `checksums.txt`, with the automatic rollback. After an update the machine
 stays on the market on its last passing test boot, and the new version runs its own when
 the GPU is free (and before a rental starts). A rental waiting for you to free the machine
-does not hold an update back: it is kept on disk and waits on under the new version.
+holds an update back, as a running one does.
 
 - `sudo gpu-agent update --auto off` pauses the automatic updates; `--auto on` turns
   them back on. `sudo gpu-agent status` says which. An update the marketplace
@@ -248,9 +248,11 @@ A DGX Spark draws its desktop on its only GPU, the GB10. On a machine the agent
 confirms as a DGX Spark (Linux on arm64, DMI vendor NVIDIA, product "DGX Spark", a GB10
 GPU), the desktop is not a reason to refuse a rental: **the desktop closes while the
 Spark is rented or running its test rental, and comes back after.** Nothing to do: the
-desktop counts as everything running in a graphical login — the display server and shell,
-and the browsers and other apps open on it (the agent asks systemd and logind where each
-program using the GPU runs). The agent stops the display manager (`display-manager.service`,
+desktop counts as its own programs only — the display server, the shell, the display
+manager and its login screen (the agent asks systemd and logind where each program using
+the GPU runs); since v0.2.3 the browsers and other programs you open on it are your own use,
+which a rental waits for ([below](#using-your-machine-while-it-is-listed)). Someone logged in
+is warned 15 minutes before the desktop closes. The agent stops the display manager (`display-manager.service`,
 or `gdm3`), which ends those logins, waits up to 30 seconds for every program to let go of
 the GPU, and starts the display manager again once the GPU is back with its driver — also
 after an agent crash or a reboot in the middle of a rental. If something outside the
@@ -262,7 +264,7 @@ manager is started again and the rental does not start, naming what holds it. Th
 
 **Save open work on a listed Spark:** its desktop, with everything open on it, closes
 when a rental starts (and for the full test rental right before it), and anything unsaved
-is lost; while a rental waits for the machine you are told so. Since v0.2.3 the agent's own
+is lost; you are told first, and given 15 minutes. Since v0.2.3 the agent's own
 test rentals leave a desktop someone is logged in to alone (they run without the GPU
 then) and close only the login screen; a test you run by hand (`check --boot`) closes the
 desktop as before. The control panel says so while a test runs. A Spark made headless on purpose
@@ -280,11 +282,14 @@ Hosting:      ready — this machine can host a rental
 In use:       In use by you: llama-server; the marketplace still offers this machine, and you are told when it is rented.
 ```
 
-What counts as your use: a program holding a GPU that rentals get — not the desktop (a
-DGX Spark's closes when a rental starts; on any other machine a GPU with a desktop is left
-out of rentals), not NVIDIA's own services, not a short-lived `nvidia-smi` — and, on any
-machine (one without a GPU too), less free memory than a rental's VM needs. The agent only
-looks; it never stops, kills or signals a program of yours.
+What counts as your use: any program you started that holds a GPU rentals get — in your
+desktop session or not: a browser's GPU process, a `llama-server` typed in a terminal, a
+container — but not the desktop itself (its display server, shell, display manager and
+login screen: a DGX Spark's closes when a rental starts; on any other machine a GPU the
+desktop draws on is left out of rentals), not NVIDIA's own services, not a short-lived
+`nvidia-smi` — and, on any machine (one without a GPU too), less free memory than a
+rental's VM needs. The agent only looks; it never stops, kills or signals a program of
+yours.
 
 **When the machine is rented while you use it**, the rental waits for you for up to 24
 hours from the moment it was approved. You are told at once — a message on every terminal
@@ -296,11 +301,15 @@ This machine has been rented. Please stop your programs that use it (llama-serve
 ```
 
 On a DGX Spark it adds: "The desktop closes when the rental starts; save your work."
-`sudo gpu-agent status` shows the same line while the rental waits. The agent looks every
+`sudo gpu-agent status` shows the same line while the rental waits. On a DGX Spark someone
+is logged in to, once nothing of yours holds the GPU any more (or when the rental arrives
+with nothing of yours on it), the screen says "This machine's rental starts in 15 minutes:
+the desktop will close then; save your work", and the desktop closes 15 minutes later for
+the rental (and comes back after it). With nobody logged in, the rental starts at once. The agent looks every
 15 seconds; as soon as your programs have stopped the rental starts. If they are still
 running at the deadline, the rental is cancelled (the renter is refunded in full), you are
 told, and the machine is paused on the marketplace until you put it back on sale in
-Marketplace > List a GPU. A waiting rental survives an agent restart or update. A linked
+Marketplace > List a GPU. A waiting rental survives an agent restart. A linked
 pair waits for both machines: when one is free and the other is not, the free one waits
 too (both start together, or neither — the two agents agree on the cable when both are
 free, within the same minute, so the two machines' clocks must be right).
@@ -319,6 +328,9 @@ login screen. If the full test right before a rental fails, the rental is cancel
 machine is paused and stays off the market until a full test passes — tried again when
 the GPU is free, 6 hours later or at the agent's next start, or by hand with
 `sudo gpu-agent check --boot`.
+
+The machine's specs list the processor's own GPU too (marked `integrated`), so the
+marketplace can say it is not included; rentals never take it.
 
 The capability the agent reports carries `host_busy` (what you are using, and since when),
 `retest_pending` (the full test is still owed) and `selftest` (the last test: passed,
