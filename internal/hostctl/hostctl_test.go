@@ -241,10 +241,25 @@ func TestWithdrawIsRefusedWhileRented(t *testing.T) {
 	if a.m.Withdrawn() || len(a.marked) != 0 || a.stops != 0 {
 		t.Error("a rented machine stopped hosting")
 	}
+	// A rental waiting for the host to free the machine holds it too.
+	a.m.status = provisioner.StatusWaiting
+	if err := a.Withdraw(); codeOf(err) != http.StatusConflict || !strings.Contains(err.Error(), "waits for it to be free") {
+		t.Errorf("Withdraw while a rental waits = %v", err)
+	}
 	// A dirty leftover is not a rental: the host may still remove it.
 	a.m.status = provisioner.StatusDirty
 	if err := a.Withdraw(); err != nil {
 		t.Errorf("Withdraw of a quarantined machine = %v", err)
+	}
+}
+
+// A rental that waits for the host does not hold an update back: it is kept
+// on disk and waits on under the new agent.
+func TestAWaitingRentalDoesNotHoldAnUpdateBack(t *testing.T) {
+	a := newAgent(t)
+	a.m.status = provisioner.StatusWaiting
+	if why := a.busy(); why != "" {
+		t.Errorf("busy = %q", why)
 	}
 }
 

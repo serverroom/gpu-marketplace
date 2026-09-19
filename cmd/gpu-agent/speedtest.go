@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/speedtest"
@@ -27,6 +28,9 @@ type speedtestJob struct {
 	say, warn  func(format string, args ...interface{})
 	retryAfter time.Duration // before the daemon's one retry
 	poll       time.Duration // how often a running test looks for a rental
+	// problem records a measurement the listing asked for that failed, for
+	// the marketplace's problem list; nil: nowhere.
+	problem func(message, detail string)
 }
 
 // busyError: the machine was not free, so nothing was measured.
@@ -45,6 +49,11 @@ func (a *gpuAgent) speedtestJob() speedtestJob {
 		warn:       a.warn,
 		retryAfter: 10 * time.Minute,
 		poll:       time.Second,
+		problem: func(message, detail string) {
+			if a.ops != nil {
+				a.ops.errs.Note(control.AreaAgent, message, detail)
+			}
+		},
 	}
 }
 
@@ -111,6 +120,9 @@ func (j speedtestJob) initial(ctx context.Context, resp *register.CapabilityResp
 			return
 		case attempt >= 2:
 			j.warn("Speed test failed again: %v; it runs on the next agent start", err)
+			if j.problem != nil {
+				j.problem("the network speed test the listing asked for failed twice; it runs again at the agent's next start", err.Error())
+			}
 			return
 		}
 		j.warn("Speed test failed: %v; retrying once in %s", err, j.retryAfter)

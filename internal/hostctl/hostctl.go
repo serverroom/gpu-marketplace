@@ -82,6 +82,10 @@ func rented(status string) bool {
 }
 
 // busy says why the machine must not be changed under the agent now, or "".
+// A rental that waits for the host to free the machine does not hold an
+// update back: it is kept on disk and waits on under the new agent (which
+// runs its own full test boot before the rental starts); one that is
+// starting does.
 func (a *Agent) busy() string {
 	switch {
 	case rented(a.Machine.Status()):
@@ -126,8 +130,11 @@ func (a *Agent) Withdraw() error { return a.withdraw("control panel") }
 func (a *Agent) Gone() { _ = a.withdraw("capability report") }
 
 func (a *Agent) withdraw(by string) error {
-	if rented(a.Machine.Status()) {
+	switch status := a.Machine.Status(); {
+	case rented(status):
 		return conflict("this machine is rented; it can be removed when the rental ends")
+	case status == provisioner.StatusWaiting:
+		return conflict("this machine has been rented and the rental waits for it to be free; it can be removed when that rental has ended or been cancelled")
 	}
 	a.Machine.Withdraw(a.WithdrawnMessage)
 	var err error

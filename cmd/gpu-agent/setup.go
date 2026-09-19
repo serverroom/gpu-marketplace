@@ -20,6 +20,15 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
+// setupDaemon is the daemon's automatic setup, made once: its Run and its
+// Keep (the retests) share it, so they never run at once.
+func (a *gpuAgent) setupDaemon() *autosetup.Daemon {
+	if a.setup == nil {
+		a.setup = a.autoSetup()
+	}
+	return a.setup
+}
+
 // autoSetup is the daemon's automatic setup, over this agent's provisioner.
 func (a *gpuAgent) autoSetup() *autosetup.Daemon {
 	var errs autosetup.Problems

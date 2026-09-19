@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/kardianos/service"
 
@@ -60,8 +61,14 @@ func printCapability(c control.Capability) {
 			fmt.Printf("                - %s\n", e)
 		}
 	}
+	if c.SelfTest != nil {
+		fmt.Printf("Test boot:    %s\n", testBootLine(c))
+	}
 	if c.Ready {
 		fmt.Println("Hosting:      ready — this machine can host a rental")
+		if c.HostBusy != nil {
+			fmt.Printf("In use:       %s\n", hostBusyLine(c.HostBusy))
+		}
 	} else {
 		fmt.Println("Hosting:      not ready — the marketplace will not offer this machine to renters:")
 		for _, r := range c.Reasons {
@@ -75,6 +82,58 @@ func printCapability(c control.Capability) {
 		} else {
 			fmt.Println("Linked pair:  not ready — 'sudo gpu-agent check --pair' says what is missing")
 		}
+	}
+}
+
+// hostBusyLine is what `status` says while the host uses what a rental would
+// take.
+func hostBusyLine(hb *control.HostBusy) string {
+	use := vmrt.HostUse{Holders: hb.Holders, MemoryShortMB: hb.MemoryShortGB * 1024}
+	return "In use by you: " + use.Describe() + "; the marketplace still offers this machine, and you are told when it is rented."
+}
+
+// testBootLine is the last test boot in one line.
+func testBootLine(c control.Capability) string {
+	st := c.SelfTest
+	when := time.Unix(st.At, 0).UTC().Format("2006-01-02 15:04 UTC")
+	noGPU := c.GPUCount != nil && *c.GPUCount == 0
+	switch {
+	case !st.Passed:
+		return fmt.Sprintf("failed %s with agent %s ('sudo gpu-agent check --boot' shows why)", when, st.AgentVersion)
+	case !st.GPUVerified:
+		return fmt.Sprintf("passed %s with agent %s, without the GPU, which was in use; the GPU's handover is tested when the GPU is free, "+
+			"and always before a rental starts", when, st.AgentVersion)
+	case c.RetestPending:
+		return fmt.Sprintf("passed %s with agent %s; agent %s tests again when the GPU is free, and always before a rental starts",
+			when, st.AgentVersion, c.AgentVersion)
+	case noGPU:
+		return fmt.Sprintf("passed %s with agent %s", when, st.AgentVersion)
+	}
+	return fmt.Sprintf("passed %s with agent %s, the GPU handed over", when, st.AgentVersion)
+}
+
+// printPending says, for `status` and `check`, what a rental waiting for this
+// machine asks of the host -- the same words the host was sent.
+func printPending(p *provisioner.Provisioner) {
+	pr, err := provisioner.LoadPending(vmrt.OSHost{}, config.DataDir())
+	if err != nil || pr == nil {
+		return
+	}
+	spark := false
+	if rt := p.Runtime(); rt != nil {
+		spark = rt.Spec().DesktopOnDemand
+	}
+	switch pr.State {
+	case control.PendingWaiting:
+		fmt.Printf("Rented:       %s\n", provisioner.RentedNotice(pr, spark, time.Local))
+	case control.PendingStarting:
+		fmt.Printf("Rented:       the rental %s is starting (first a test rental, when this agent version has not run one with the GPU)\n", pr.RentalID)
+	case control.PendingFailed:
+		line := fmt.Sprintf("the rental %s did not start: %s", pr.RentalID, pr.Reason)
+		if pr.Detail != "" {
+			line += " (" + pr.Detail + ")"
+		}
+		fmt.Printf("Last rental:  %s\n", line)
 	}
 }
 
@@ -108,8 +167,10 @@ func runCheck(svc service.Service, args []string) {
 		fmt.Println(register.WithdrawnMessage)
 		os.Exit(2)
 	}
-	c := detectProvisioner().Capability()
+	p := detectProvisioner()
+	c := p.Capability()
 	printCapability(c)
+	printPending(p)
 	printSetup()
 
 	fmt.Println()
@@ -170,18 +231,34 @@ func runSelfTest(svc service.Service, yes bool) {
 	}
 
 	gpus := rt.Spec().GPUs
+	// Nothing of the host's is stopped: a GPU its programs hold is left out of
+	// the test, and a machine whose memory is in use gets a smaller test VM.
+	plan := vmrt.PlanTest(vmrt.OSHost{}, rt.Spec(), true)
+	if plan.Wait != "" {
+		fmt.Printf("A test boot cannot run now: %s.\n", plan.Wait)
+		os.Exit(2)
+	}
 	fmt.Println("This boots a test rental for a few minutes:")
-	if len(gpus) > 0 {
-		fmt.Printf("  - the GPU (%s) is taken from this machine and given to a microVM; anything using it must be stopped\n", strings.Join(gpus, ", "))
+	switch {
+	case len(gpus) > 0 && plan.NoGPU:
+		fmt.Printf("  - the GPU is in use on this machine (%s), so the test runs WITHOUT it: nothing of yours is stopped\n", strings.Join(plan.InUse, ", "))
+		fmt.Println("  - a microVM is booted as a rental gets it, but without the GPU; it reports whether it reaches the internet, and that it CANNOT reach this machine or its network")
+		fmt.Println("  - then it is destroyed and its disk key discarded")
+		fmt.Println("  - a pass lets the machine be rented; the GPU's handover is tested when the GPU is free, and always before a rental starts")
+	case len(gpus) > 0:
+		fmt.Printf("  - the GPU (%s) is taken from this machine and given to a microVM\n", strings.Join(gpus, ", "))
 		if rt.Spec().DesktopOnDemand {
 			fmt.Println("  - this machine's desktop closes for the test (anything open on its screen closes with it) and comes back after it")
 		}
 		fmt.Println("  - the VM reports which GPUs it sees (any make passes once it is there), whether it reaches the internet, and that it CANNOT reach this machine or its network")
 		fmt.Println("  - then it is destroyed, its disk key discarded, and the GPU given back and checked")
-	} else {
+	default:
 		fmt.Println("  - a microVM is booted with a share of this machine's CPUs, memory and disk, as a rental gets them")
 		fmt.Println("  - the VM reports whether it reaches the internet, and that it CANNOT reach this machine or its network")
 		fmt.Println("  - then it is destroyed and its disk key discarded")
+	}
+	if plan.MemoryMB > 0 {
+		fmt.Printf("  - the test VM gets %.1f GB of memory, less than a rental's, because this machine's memory is in use\n", float64(plan.MemoryMB)/1024)
 	}
 	if !yes && !confirm("Run the test boot? [y/N]: ") {
 		fmt.Println("Nothing was changed.")
@@ -198,13 +275,17 @@ func runSelfTest(svc service.Service, yes bool) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fmt.Println("Booting ... (the first boot can take several minutes; Ctrl-C stops the test cleanly)")
-	res := rt.SelfTestContext(ctx, version)
+	res := rt.SelfTestWith(ctx, version, plan.TestOptions)
 	release()
 	if res.Passed {
-		if len(gpus) > 0 {
+		switch {
+		case res.WithoutGPU:
+			fmt.Printf("PASSED without the GPU: the VM booted, reached the internet, and could not reach %s.\n", strings.Join(res.Blocked, ", "))
+			fmt.Println("  The machine can be rented on this pass; the GPU's handover is tested when the GPU is free, and always before a rental starts.")
+		case len(gpus) > 0:
 			fmt.Printf("PASSED: the VM saw %s, reached the internet, and could not reach %s.\n",
 				strings.Join(res.GuestGPUs, "; "), strings.Join(res.Blocked, ", "))
-		} else {
+		default:
 			fmt.Printf("PASSED: the VM booted, reached the internet, and could not reach %s.\n", strings.Join(res.Blocked, ", "))
 		}
 		for _, note := range res.Notes {

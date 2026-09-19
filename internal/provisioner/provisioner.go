@@ -8,6 +8,7 @@
 package provisioner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -155,9 +156,26 @@ type Provisioner struct {
 	// verify, for the marketplace's problem list; nil: nowhere.
 	problems Problems
 
-	// The host's own use of what a rental would take (hostuse.go).
+	// The host's own use, and a rental that waits for it (pending.go).
 	hostUse   vmrt.HostUse
 	busySince int64
+	pending   *pendingRecord
+	// readHostUse looks at the host's use now; nil: vmrt.ReadHostUse on the
+	// runtime's spec (nothing, on a provisioner built by hand).
+	readHostUse func() vmrt.HostUse
+	// notify tells the people on the machine; nil: vmrt.NotifyHost.
+	notify func(title, body string) (reached, problems []string)
+	// preRentalTest runs the full test boot right before a rental; busy
+	// says why it cannot run now. nil: the runtime's.
+	preRentalTest func(ctx context.Context) (res vmrt.SelfTestResult, busy string)
+	// fullTestCurrent says whether the running agent has passed a full test
+	// boot on this machine as it is; nil: selftest.json against the machine.
+	fullTestCurrent func() bool
+	// loc is the machine's time zone for what the host reads; nil: time.Local.
+	loc *time.Location
+	// baseCtx ends when the agent stops (Watch); a pre-rental test runs in it.
+	baseCtx context.Context
+	starts  sync.WaitGroup
 }
 
 // Problems is where rental failures go (agenterrors.Log).
@@ -220,6 +238,12 @@ func (p *Provisioner) Withdraw(reason string) {
 	p.withdrawn = true
 	p.capability.Ready = false
 	p.capability.Reasons = []string{reason}
+	// A rental still waiting for the host cannot start on a withdrawn machine.
+	if rec := p.pending; rec != nil && rec.State == control.PendingWaiting {
+		p.pending = nil
+		p.removePendingLocked()
+		p.status = StatusFree
+	}
 }
 
 // Withdrawn reports whether Withdraw was called.
@@ -389,48 +413,76 @@ func (p *Provisioner) view() machineView {
 
 // Provision checks the request and starts the rental in the background:
 // fence, network, encrypted disk, GPUs, boot, and the renter's SSH forward.
-// /status says rented once the guest answers, or carries the error.
+// /status says rented once the guest answers, or carries the error. It is
+// ProvisionBy for a rental that cannot wait for the host.
 func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
+	_, err := p.ProvisionBy(rentalID, renterPubkey, 0)
+	return err
+}
+
+// ProvisionBy is POST /provision. On a machine the host is not using, the
+// rental starts in the background, as Provision always did -- after a full
+// test boot when the running agent has not passed one. On a machine the host
+// is using (its programs hold the GPU, or the memory is short), the rental
+// waits for the host, up to startBy (unix; 0: it may not wait, and is
+// refused), and the answer is the pending rental: the host is told on the
+// machine, and the rental starts as soon as the machine is free.
+func (p *Provisioner) ProvisionBy(rentalID, renterPubkey string, startBy int64) (*control.PendingRental, error) {
 	c := p.Capability()
 	p.mu.Lock()
 	vendor := p.vendor
 	p.mu.Unlock()
 	if !vendor.CanHost() {
-		return fmt.Errorf("%w (vendor %s)", ErrVendorCannotIsolate, vendor)
+		return nil, fmt.Errorf("%w (vendor %s)", ErrVendorCannotIsolate, vendor)
 	}
 	if !c.Ready {
-		return fmt.Errorf("%w: %s", ErrNotReady, strings.Join(c.Reasons, "; "))
+		return nil, fmt.Errorf("%w: %s", ErrNotReady, strings.Join(c.Reasons, "; "))
 	}
 	if !control.ValidRentalID(rentalID) {
-		return fmt.Errorf("invalid rental id %q", rentalID)
+		return nil, fmt.Errorf("invalid rental id %q", rentalID)
 	}
 	if vmrt.IsSetupID(rentalID) {
-		return fmt.Errorf("rental id %q is one this agent keeps for its own test boots", rentalID)
+		return nil, fmt.Errorf("rental id %q is one this agent keeps for its own test boots", rentalID)
 	}
 	if _, err := vmrt.NormalizePubkey(renterPubkey); err != nil {
-		return fmt.Errorf("renter key: %w", err)
+		return nil, fmt.Errorf("renter key: %w", err)
 	}
+	needTest := !p.fullTestIsCurrent()
+	use := p.hostUseNow()
 	p.mu.Lock()
+	if view, err := p.pendingConflictLocked(rentalID); view != nil || err != nil {
+		p.mu.Unlock()
+		return view, err
+	}
 	if !p.capability.Ready || p.settingUp || p.withdrawn {
 		p.mu.Unlock()
-		return fmt.Errorf("%w: it is setting itself up", ErrNotReady)
+		return nil, fmt.Errorf("%w: it is setting itself up", ErrNotReady)
 	}
 	if p.status != StatusFree {
 		status := p.status
 		p.mu.Unlock()
-		return fmt.Errorf("this machine is %s, not free", status)
+		return nil, fmt.Errorf("this machine is %s, not free", status)
+	}
+	req := &pendingRecord{RentalID: rentalID, RenterPubkey: renterPubkey, StartBy: startBy}
+	if use.Busy() {
+		return p.waitLocked(req, use) // unlocks
 	}
 	p.status = StatusProvisioning
 	p.lastErr = ""
 	machine := p.machine
+	if needTest {
+		// The running agent has not handed this GPU to a VM yet: a full test
+		// boot first. The record shows the rental on /status while it runs.
+		return nil, p.launchLocked(req) // unlocks
+	}
 	p.mu.Unlock()
 
 	o := vmrt.StartOptions{ID: rentalID, Pubkey: renterPubkey}
 	if !p.async {
-		return p.start(machine, o)
+		return nil, p.start(machine, o)
 	}
 	go p.start(machine, o)
-	return nil
+	return nil, nil
 }
 
 func (p *Provisioner) start(machine Machine, o vmrt.StartOptions) error {
@@ -485,6 +537,12 @@ func (p *Provisioner) Teardown(rentalID string) error {
 		p.mu.Unlock()
 		return fmt.Errorf("no rental is on this machine: it is setting itself up")
 	}
+	if p.status == StatusWaiting {
+		// Another rental waits for the host (CancelPending handles its own
+		// id): nothing of this one is on the machine.
+		p.mu.Unlock()
+		return nil
+	}
 	p.status = StatusWiping
 	fwd := p.forward
 	p.forward = nil
@@ -525,6 +583,8 @@ func (p *Provisioner) Resume() {
 	if p.resume() {
 		p.afterRental()
 	}
+	// A rental that was waiting for the host waits on, across the restart.
+	p.resumePending()
 }
 
 // resume is Resume; freed says a rental (or setup VM) it found was torn down

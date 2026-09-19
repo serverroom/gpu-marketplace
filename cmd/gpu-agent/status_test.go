@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 )
 
@@ -74,5 +75,31 @@ func TestServiceStateVisibility(t *testing.T) {
 		if got := serviceStateVisible(tt.goos, tt.euid); got != tt.want {
 			t.Errorf("serviceStateVisible(%q, %d) = %v, want %v", tt.goos, tt.euid, got, tt.want)
 		}
+	}
+}
+
+// What `gpu-agent status` says about the host's own use and the last test
+// boot, in the owner's words.
+func TestStatusLinesForTheHostsUse(t *testing.T) {
+	hb := &control.HostBusy{Holders: []string{"llama-server (pid 11435)", "llama-server (pid 11436)"}}
+	if got := hostBusyLine(hb); got != "In use by you: llama-server; the marketplace still offers this machine, and you are told when it is rented." {
+		t.Errorf("host busy = %q", got)
+	}
+	hb.MemoryShortGB = 12
+	if got := hostBusyLine(hb); !strings.HasPrefix(got, "In use by you: llama-server, and 12 GB of the memory a rental needs;") {
+		t.Errorf("host busy with memory = %q", got)
+	}
+
+	c := control.Capability{AgentVersion: "v0.2.3", SelfTest: &control.SelfTestSummary{Passed: true, At: 1789700000, AgentVersion: "v0.2.3"}, RetestPending: true}
+	if got := testBootLine(c); !strings.Contains(got, "without the GPU, which was in use; the GPU's handover is tested when the GPU is free, and always before a rental starts") {
+		t.Errorf("a pass without the GPU = %q", got)
+	}
+	c.SelfTest.GPUVerified, c.SelfTest.AgentVersion = true, "v0.2.2"
+	if got := testBootLine(c); got != "passed 2026-09-18 02:53 UTC with agent v0.2.2; agent v0.2.3 tests again when the GPU is free, and always before a rental starts" {
+		t.Errorf("an older version's pass = %q", got)
+	}
+	c.RetestPending = false
+	if got := testBootLine(c); got != "passed 2026-09-18 02:53 UTC with agent v0.2.2, the GPU handed over" {
+		t.Errorf("a full pass = %q", got)
 	}
 }

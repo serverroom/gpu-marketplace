@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/kardianos/service"
@@ -37,8 +38,9 @@ type gpuAgent struct {
 	bgDone       chan struct{}      // closed when that work has returned
 	controlSrv   *control.Server
 	prov         *provisioner.Provisioner
-	host         *hostctl.Agent // update and withdraw, for the control channel
-	ops          *opsState      // problems and reports (ops.go)
+	host         *hostctl.Agent    // update and withdraw, for the control channel
+	ops          *opsState         // problems and reports (ops.go)
+	setup        *autosetup.Daemon // the automatic setup and its retests (setup.go)
 	logger       service.Logger
 }
 
@@ -65,6 +67,8 @@ func (a *gpuAgent) Start(s service.Service) error {
 	switch {
 	case err != nil:
 		a.warn("load tunnel config: %v", err)
+		a.ops.errs.Raise(control.AreaTunnel, "the agent could not read its relay settings, so rentals cannot reach this machine; "+
+			"run 'sudo gpu-agent select-location' to write them again, then restart the agent", err.Error())
 	case tcfg != nil:
 		ctx, cancel := context.WithCancel(context.Background())
 		a.tunnelCancel = cancel
@@ -108,12 +112,29 @@ func (a *gpuAgent) Start(s service.Service) error {
 		} else {
 			a.ops.errs.Resolve(control.AreaAgent, "")
 		}
+		a.setup = a.autoSetup()
 		bg, cancel := context.WithCancel(context.Background())
 		a.bgCancel = cancel
 		a.bgDone = make(chan struct{})
+		// Stop waits for the work that may have a VM up: the setup, its
+		// retests, and a rental waiting for the host (its test boot).
+		var work sync.WaitGroup
+		work.Add(3)
 		go func() {
-			defer close(a.bgDone)
+			defer work.Done()
 			a.reportCapability(bg, a.prov.Capability())
+		}()
+		go func() {
+			defer work.Done()
+			a.prov.Watch(bg)
+		}()
+		go func() {
+			defer work.Done()
+			a.setupDaemon().Keep(bg)
+		}()
+		go func() {
+			work.Wait()
+			close(a.bgDone)
 		}()
 		go a.announcePeers(bg)
 		go a.reportLoop(bg)
@@ -196,7 +217,7 @@ func (a *gpuAgent) reportCapability(ctx context.Context, c control.Capability) {
 		if err == nil {
 			a.say("Hosting capability reported to the marketplace (ready=%v)", c.Ready)
 			a.speedtestJob().initial(ctx, resp)
-			a.autoSetup().Run(ctx)
+			a.setupDaemon().Run(ctx)
 			return
 		}
 		var ee *register.EndpointError
@@ -235,8 +256,9 @@ func (a *gpuAgent) Stop(s service.Service) error {
 	}
 	if a.prov != nil {
 		// A cable check or peer announcement in progress puts its ports back
-		// before the agent exits.
+		// before the agent exits, and a test boot before a rental its VM.
 		a.prov.WaitFrames(30 * time.Second)
+		a.prov.WaitStarts(30 * time.Second)
 	}
 	if a.controlSrv != nil {
 		a.controlSrv.Stop()
@@ -418,7 +440,9 @@ func runStatus(svc service.Service) {
 		fmt.Println(register.WithdrawnMessage)
 		return
 	}
-	printCapability(detectProvisioner().Capability())
+	p := detectProvisioner()
+	printCapability(p.Capability())
+	printPending(p)
 	printSetup()
 	if u := updateSummary(); u != "" {
 		fmt.Printf("Update:       %s\n", u)
