@@ -16,6 +16,9 @@ type NetState struct {
 	// IptablesChain is the iptables chain the forward-accept rules went into
 	// (DOCKER-USER or FORWARD), or "" when none were needed.
 	IptablesChain string `json:"iptables_chain"`
+	// VethHost is the host-side veth a container rental put on the bridge (a
+	// microVM uses a tap instead); "" for a microVM. Removed at teardown.
+	VethHost string `json:"veth_host,omitempty"`
 }
 
 var forwardRules = [][]string{
@@ -30,23 +33,11 @@ var forwardRules = [][]string{
 // accepts cannot open anything the fence closes: an nftables drop is final no
 // matter which table accepted the packet first.
 func SetupNetwork(h Host) (NetState, error) {
-	var st NetState
+	st, err := setupBridge(h)
+	if err != nil {
+		return st, err
+	}
 	_ = h.Run("ip", "link", "del", Tap)
-	_ = h.Run("ip", "link", "del", netguard.Bridge)
-
-	if err := h.Run("ip", "link", "add", netguard.Bridge, "type", "bridge"); err != nil {
-		return st, fmt.Errorf("create bridge: %w", err)
-	}
-	st.Bridge = true
-	steps := [][]string{
-		{"addr", "add", fmt.Sprintf("%s/%d", HostIP, PrefixLen), "dev", netguard.Bridge},
-		{"link", "set", netguard.Bridge, "up"},
-	}
-	for _, s := range steps {
-		if err := h.Run("ip", s...); err != nil {
-			return st, fmt.Errorf("configure bridge: %w", err)
-		}
-	}
 	if err := h.Run("ip", "tuntap", "add", "dev", Tap, "mode", "tap"); err != nil {
 		return st, fmt.Errorf("create tap: %w", err)
 	}
@@ -54,6 +45,29 @@ func SetupNetwork(h Host) (NetState, error) {
 	for _, s := range [][]string{{"link", "set", Tap, "master", netguard.Bridge}, {"link", "set", Tap, "up"}} {
 		if err := h.Run("ip", s...); err != nil {
 			return st, fmt.Errorf("attach tap: %w", err)
+		}
+	}
+	return st, nil
+}
+
+// setupBridge builds the rental's /30 bridge with the host's end on it, IP
+// forwarding (remembering what it was) and the Docker/firewall forward-accepts
+// -- everything SetupNetwork does except the VM's tap. A container attaches to
+// this same bridge over a veth instead (attachVeth), so the fence covers both
+// the same way.
+func setupBridge(h Host) (NetState, error) {
+	var st NetState
+	_ = h.Run("ip", "link", "del", netguard.Bridge)
+	if err := h.Run("ip", "link", "add", netguard.Bridge, "type", "bridge"); err != nil {
+		return st, fmt.Errorf("create bridge: %w", err)
+	}
+	st.Bridge = true
+	for _, s := range [][]string{
+		{"addr", "add", fmt.Sprintf("%s/%d", HostIP, PrefixLen), "dev", netguard.Bridge},
+		{"link", "set", netguard.Bridge, "up"},
+	} {
+		if err := h.Run("ip", s...); err != nil {
+			return st, fmt.Errorf("configure bridge: %w", err)
 		}
 	}
 
@@ -96,6 +110,9 @@ func TeardownNetwork(h Host, st NetState) {
 	}
 	if st.PreviousForward != "" && st.PreviousForward != "1" {
 		_ = h.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte(st.PreviousForward), 0644)
+	}
+	if st.VethHost != "" {
+		_ = h.Run("ip", "link", "del", st.VethHost)
 	}
 	if st.TapDev {
 		_ = h.Run("ip", "link", "del", Tap)

@@ -24,6 +24,23 @@ type DiskState struct {
 // disk is ciphertext nobody can read -- which is what makes the wipe a wipe.
 // The base image is then written through the mapping.
 func CreateDisk(h Host, dir, id string, sizeGB int, golden string) (DiskState, error) {
+	ds, err := openEncrypted(h, dir, id, sizeGB)
+	if err != nil {
+		return ds, err
+	}
+	if err := h.Run("qemu-img", "convert", "-n", "-O", "raw", golden, ds.Mapper); err != nil {
+		return ds, fmt.Errorf("write base image: %w", err)
+	}
+	return ds, nil
+}
+
+// openEncrypted makes the encrypted block device a rental writes to: a sparse
+// file, a loop device over it, and a dm-crypt mapping with a random key that
+// exists only in memory for one cryptsetup call and in the kernel for the life
+// of the mapping. Closing the mapping at teardown destroys the only copy, which
+// is what makes the wipe a wipe. Shared by CreateDisk (which then writes the
+// golden image through it) and createEncryptedVolume (which formats it).
+func openEncrypted(h Host, dir, id string, sizeGB int) (DiskState, error) {
 	ds := DiskState{File: filepath.Join(dir, "disk.img")}
 	if err := h.Run("truncate", "-s", mib(sizeGB), ds.File); err != nil {
 		return ds, fmt.Errorf("allocate disk: %w", err)
@@ -52,11 +69,29 @@ func CreateDisk(h Host, dir, id string, sizeGB int, golden string) (DiskState, e
 		return ds, fmt.Errorf("encrypt disk: %w", err)
 	}
 	ds.Mapper = "/dev/mapper/" + name
-
-	if err := h.Run("qemu-img", "convert", "-n", "-O", "raw", golden, ds.Mapper); err != nil {
-		return ds, fmt.Errorf("write base image: %w", err)
-	}
 	return ds, nil
+}
+
+// createEncryptedVolume makes a rental's writable space for container mode: the
+// same dm-crypt device, formatted ext4 and mounted under the rental directory.
+// Returns the disk pieces (for DestroyDisk) and the mount point. The caller
+// unmounts it before DestroyDisk at teardown.
+func createEncryptedVolume(h Host, dir, id string, sizeGB int) (DiskState, string, error) {
+	ds, err := openEncrypted(h, dir, id, sizeGB)
+	if err != nil {
+		return ds, "", err
+	}
+	if err := h.Run("mkfs.ext4", "-q", "-m", "0", ds.Mapper); err != nil {
+		return ds, "", fmt.Errorf("format volume: %w", err)
+	}
+	mount := filepath.Join(dir, "vol")
+	if err := h.MkdirAll(mount, 0700); err != nil {
+		return ds, "", fmt.Errorf("volume mount point: %w", err)
+	}
+	if err := h.Run("mount", ds.Mapper, mount); err != nil {
+		return ds, "", fmt.Errorf("mount volume: %w", err)
+	}
+	return ds, mount, nil
 }
 
 // DestroyDisk closes the mapping (the key is gone), detaches the loop device

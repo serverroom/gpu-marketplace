@@ -18,6 +18,12 @@ type State struct {
 	Net      NetState      `json:"net"`
 	Disk     DiskState     `json:"disk"`
 	Devices  []BoundDevice `json:"devices"`
+	// Mode is how the rental runs: "" (a microVM, the default and every rental
+	// up to now) or ModeContainer (a hardened podman container, for a GPU that
+	// cannot be passed through). ContainerID and VolumeMount are set only then.
+	Mode        string `json:"mode,omitempty"`
+	ContainerID string `json:"container_id,omitempty"`
+	VolumeMount string `json:"volume_mount,omitempty"`
 	// StoppedPersistenced is what agents up to v0.1.8 recorded; still read so a
 	// rental they started is torn down properly.
 	StoppedPersistenced bool `json:"stopped_persistenced,omitempty"`
@@ -54,6 +60,10 @@ func (st *State) ServicesToRestart() []string {
 	}
 	return units
 }
+
+// ModeContainer marks a rental that runs as a hardened container rather than a
+// microVM (State.Mode).
+const ModeContainer = "container"
 
 // StatePath is where the rental state lives.
 func StatePath(dataDir string) string { return filepath.Join(dataDir, "rental.json") }
