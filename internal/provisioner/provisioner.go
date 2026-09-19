@@ -60,6 +60,11 @@ const (
 	// VendorNone is a Linux machine without a GPU: it hosts too, renting its
 	// CPUs, memory and disk (CONTRACT-v2 s1).
 	VendorNone GPUVendor = "none"
+	// VendorContainerNV is an NVIDIA GPU that cannot be passed through over VFIO
+	// (a DGX Spark's GB10 before the signed nvgrace carries its id). It cannot be
+	// isolated for a microVM, but it CAN host: the GPU is shared into a hardened
+	// container over CDI (KindContainer).
+	VendorContainerNV GPUVendor = "container-nv"
 )
 
 // ErrVendorCannotIsolate is returned when the host's GPUs cannot be passed
@@ -76,8 +81,11 @@ func (v GPUVendor) CanIsolate() bool {
 }
 
 // CanHost reports whether a machine with these GPUs -- or none -- can host a
-// rental: its GPUs can be isolated, or it has none to isolate.
-func (v GPUVendor) CanHost() bool { return v.CanIsolate() || v == VendorNone }
+// rental: its GPUs can be isolated for a microVM, it has none to isolate, or it
+// can share an NVIDIA GPU into a hardened container.
+func (v GPUVendor) CanHost() bool {
+	return v.CanIsolate() || v == VendorNone || v == VendorContainerNV
+}
 
 // Machine is the rental runtime. *vmrt.Runtime is the real one.
 type Machine interface {

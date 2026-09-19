@@ -28,6 +28,10 @@ import (
 const (
 	KindQEMUVFIO = "qemu-vfio"
 	KindQEMU     = "qemu"
+	// KindContainer is a hardened rootful-podman container, the fallback for an
+	// NVIDIA GPU that cannot be passed through over VFIO (a DGX Spark's GB10,
+	// until the signed nvgrace-gpu-vfio-pci carries its id). See container.go.
+	KindContainer = "container-nv"
 )
 
 // ReasonKind says who can fix a reason this machine is not ready: the agent's
@@ -288,6 +292,14 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	spec.Unified = rep.Unified
 	spec.Firmware = rep.Firmware
 	spec.DesktopOnDemand = rep.DesktopOnDemand
+
+	// A machine whose NVIDIA GPU cannot be passed through over VFIO at all -- a
+	// DGX Spark's GB10 before the signed nvgrace carries its id -- hosts the GPU
+	// in a hardened container instead of a microVM (container.go). Every
+	// VFIO-capable machine stays on the microVM path below.
+	if goos == "linux" && rep.Vendor == VendorPCI && containerFallback(h, rep.BDFs) {
+		return detectContainer(h, goos, arch, dataDir, version, spec, rep)
+	}
 
 	// The pair checks never change whether this machine can host a single
 	// rental; they only say whether it can also be half of a linked pair.

@@ -185,6 +185,11 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume string, o StartOptions)
 	if n := rt.spec.GuestCPUs(); n > 0 {
 		args = append(args, "--cpus", fmt.Sprintf("%d", n))
 	}
+	// A self-test container also runs the probe once at boot (it prints the
+	// GPUAGENT-SELFTEST markers to its logs); a rental gets no probe env.
+	if len(o.Probes) > 0 {
+		args = append(args, "-e", "GPUAGENT_PROBE="+strings.Join(o.Probes, " "))
+	}
 	// The GPU(s), shared over CDI. Absent on a self-test that runs without the
 	// GPU, and on a machine renting CPU only.
 	if !o.NoGPU {
