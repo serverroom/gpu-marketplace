@@ -129,7 +129,9 @@ takes them in the background:
    otherwise (`580-server`). A machine without an NVIDIA GPU gets no driver. Every
    image also carries the RDMA tools a linked pair needs. About 20-30 minutes.
 3. **Runs a test rental** with the GPU passed through (on a machine that has one),
-   exactly as `sudo gpu-agent check --boot` does. About 5-15 minutes.
+   exactly as `sudo gpu-agent check --boot` does. About 5-15 minutes. It never stops
+   anything of yours: while your own programs use the GPU it runs without the GPU
+   (see [Using your machine while it is listed](#using-your-machine-while-it-is-listed)).
 
 Only the steps a machine still needs run; a machine that already has its image only
 runs the test. While it works, the control panel shows one line in place of the
@@ -153,13 +155,14 @@ the IOMMU off, a GPU sharing its IOMMU group, too little memory or disk, a deskt
 the GPU of a machine that is not a DGX Spark, a system without apt — those stay in
 `gpu-agent check` for you to fix.
 
-**Upgrading to v0.2.0.** The test rental is recorded for the agent version that ran
-it, so after v0.2.0 is installed every machine runs its test rental once more — by
-itself, through the automatic setup (or with `sudo gpu-agent check --boot` when the
-setup is off). Until it passes, the machine is not offered to renters. On a DGX
-Spark the desktop closes for those minutes: save open work first. A pair's own
-test (`check --boot --pair`) is recorded per version too, and is run again on both
-machines.
+**After an update (v0.2.3 and later)** the machine keeps being offered on its last
+passing test rental, as long as its GPUs, their driver on the host and the rental
+image are the ones that test ran with. The new version runs its own full test by
+itself when the GPU is free, and always right before a rental starts (see
+[Using your machine while it is listed](#using-your-machine-while-it-is-listed)).
+Up to v0.2.2 the test rental was recorded per agent version, so every update took the
+machine off the market until its test passed again. A pair's own test (`check --boot
+--pair`) is still recorded per version, and is run again on both machines.
 
 **Turning it off:** `sudo gpu-agent setup --off` (it writes `off` to
 `/etc/gpu-agent/auto-setup`); `--on` turns it back on. With it off, the machine waits
@@ -176,8 +179,10 @@ seconds carries the same offer. When a newer release is named, the agent install
 **only when the machine is idle** — not rented, no leftover of a rental, no setup, test
 boot or pair test running — and otherwise waits for the next offer. It installs it
 exactly as "Update agent" does (below): from the release address it builds itself,
-checked against `checksums.txt`, with the automatic rollback. After an update the test
-boot runs again by itself, as after any new version.
+checked against `checksums.txt`, with the automatic rollback. After an update the machine
+stays on the market on its last passing test boot, and the new version runs its own when
+the GPU is free (and before a rental starts). A rental waiting for you to free the machine
+does not hold an update back: it is kept on disk and waits on under the new version.
 
 - `sudo gpu-agent update --auto off` pauses the automatic updates; `--auto on` turns
   them back on. `sudo gpu-agent status` says which. An update the marketplace
@@ -192,7 +197,9 @@ boot runs again by itself, as after any new version.
 stopped, or stops, this machine being listed: a hosting check that fails, an automatic
 setup step or test boot that failed, an update that failed or was rolled back, a relay
 connection that has been failing for over five minutes, reports that could not be sent,
-a rental that did not start or whose cleanup did not verify — in
+a rental that did not start or whose cleanup did not verify, a rental cancelled because
+the machine was still in use or its GPU could not be handed to it, the automatic setup
+switched off while it has work to do, a speed test the listing asked for that failed — in
 `/var/lib/gpu-agent/errors.json`, and sends them with every capability report (a new one
 at once, at most once a minute). Each says when, what, and whether it still stops the
 machine. `sudo gpu-agent status` lists the ones still open under "Problems".
@@ -247,16 +254,75 @@ program using the GPU runs). The agent stops the display manager (`display-manag
 or `gdm3`), which ends those logins, waits up to 30 seconds for every program to let go of
 the GPU, and starts the display manager again once the GPU is back with its driver — also
 after an agent crash or a reboot in the middle of a rental. If something outside the
-desktop holds the GPU (a container's job), the rental is refused before the desktop is
-touched; if something still holds it after the desktop closed, the display manager is
-started again and the rental is refused, naming what holds it. The same goes for a
-[pair rental](#linked-pairs-two-dgx-sparks-rented-as-one) and the pair test.
+desktop holds the GPU (a container's job), the rental waits for it to stop (since v0.2.3;
+see [Using your machine while it is listed](#using-your-machine-while-it-is-listed)) before
+the desktop is touched; if something still holds it after the desktop closed, the display
+manager is started again and the rental does not start, naming what holds it. The same goes for a
+[pair rental](#linked-pairs-two-dgx-sparks-rented-as-one); the pair test is refused.
 
 **Save open work on a listed Spark:** its desktop, with everything open on it, closes
-during its test rentals and its rentals, and anything unsaved is lost. The control panel
-says so while a test runs. A Spark made headless on purpose
+when a rental starts (and for the full test rental right before it), and anything unsaved
+is lost; while a rental waits for the machine you are told so. Since v0.2.3 the agent's own
+test rentals leave a desktop someone is logged in to alone (they run without the GPU
+then) and close only the login screen; a test you run by hand (`check --boot`) closes the
+desktop as before. The control panel says so while a test runs. A Spark made headless on purpose
 (`runtime prepare --headless`) is left headless. The capability the agent reports carries
 the raw DMI strings (`identity`) so the match can be checked.
+
+## Using your machine while it is listed
+
+From v0.2.3 you keep using your machine until it is rented. Your own programs on the GPU
+(`llama-server`, a training job, a container) and the memory they take do not take the
+machine off the market: it stays offered, and `sudo gpu-agent status` says so:
+
+```
+Hosting:      ready — this machine can host a rental
+In use:       In use by you: llama-server; the marketplace still offers this machine, and you are told when it is rented.
+```
+
+What counts as your use: a program holding a GPU that rentals get — not the desktop (a
+DGX Spark's closes when a rental starts; on any other machine a GPU with a desktop is left
+out of rentals), not NVIDIA's own services, not a short-lived `nvidia-smi` — and, on any
+machine (one without a GPU too), less free memory than a rental's VM needs. The agent only
+looks; it never stops, kills or signals a program of yours.
+
+**When the machine is rented while you use it**, the rental waits for you for up to 24
+hours from the moment it was approved. You are told at once — a message on every terminal
+(`wall`) and a desktop notification to everyone logged in to a desktop — again every 2
+hours, and once more an hour before the deadline:
+
+```
+This machine has been rented. Please stop your programs that use it (llama-server) by 2026-09-19 15:00 EEST (12:00 UTC); the rental starts as soon as they have stopped. If they are still running then, the rental is cancelled and the machine is paused.
+```
+
+On a DGX Spark it adds: "The desktop closes when the rental starts; save your work."
+`sudo gpu-agent status` shows the same line while the rental waits. The agent looks every
+15 seconds; as soon as your programs have stopped the rental starts. If they are still
+running at the deadline, the rental is cancelled (the renter is refunded in full), you are
+told, and the machine is paused on the marketplace until you put it back on sale in
+Marketplace > List a GPU. A waiting rental survives an agent restart or update. A linked
+pair waits for both machines: when one is free and the other is not, the free one waits
+too (both start together, or neither — the two agents agree on the cable when both are
+free, within the same minute, so the two machines' clocks must be right).
+
+**Test rentals never interrupt you.** The test rental a machine needs (after linking, a
+GPU change, a new rental image or a driver update) runs at once even while you use the
+machine: with your programs on the GPU, it runs without the GPU — the VM, its network
+fence, the internet, your blocked LAN, the encrypted disk, the SSH port and a clean
+teardown are all tested — and the machine is offered on that pass; with little memory free
+it runs in a smaller VM. The GPU's handover is then tested by a full test rental when the
+GPU is free (the agent looks every 5 minutes), and always right before a rental starts
+while this agent version has not passed one. On a DGX Spark the agent's own tests leave a
+desktop someone is logged in to alone (they run without the GPU then), and close only the
+login screen. If the full test right before a rental fails, the rental is cancelled with
+"its GPU could not be handed to the rental" (the renter is refunded in full), and the
+machine is paused and stays off the market until a full test passes — tried again when
+the GPU is free, 6 hours later or at the agent's next start, or by hand with
+`sudo gpu-agent check --boot`.
+
+The capability the agent reports carries `host_busy` (what you are using, and since when),
+`retest_pending` (the full test is still owed) and `selftest` (the last test: passed,
+whether it took the GPU, when, with which agent). The control panel shows them.
 
 ## Troubleshooting
 
@@ -290,11 +356,11 @@ Every one of these must hold, and `check` lists every one that does not:
 - **On a machine with a GPU: the IOMMU enabled** (VT-d / AMD-Vi, or the SMMU on Arm), in firmware and on the kernel command line — without it no GPU can be handed to a microVM. A machine without a GPU does not need it.
 - **Its GPUs, if it has any, can be of any make.** The agent finds them on the PCI bus itself — every display-class device, plus NVIDIA and AMD accelerator-class devices such as the Instinct MI300 family — so NVIDIA, AMD, Intel and others all count, and the host needs no GPU driver or vendor tool: the rental's VM is where a GPU has to work, and the test boot proves it gets there (an NVIDIA GPU without a host driver is rented as the GPU it is, never as a machine without one). The server's own management display (a BMC's ASPEED or Matrox chip, an old ATI ES1000, or any other VGA chip with less than a 256 MB memory window), a VM's virtual display and SR-IOV virtual functions are not GPUs. The processor's own GPU (an Intel iGPU, an AMD APU's) draws the machine's screen and is never rented; a machine with only that one hosts like a machine without a GPU ([below](#hosting-a-machine-without-a-gpu)). A card is **left out** of rentals, and named by `gpu-agent check`, when it draws a desktop that does not close for rentals, when it is already bound to `vfio-pci` for a VM of the host's own, when it is the boot display (the console) and another card can be rented, or when its IOMMU group holds a device that is not part of a graphics card; the machine is refused only when it has cards and none can be rented. Discrete GPUs report their own memory where their driver says; `nvidia-smi` on the host, where installed, adds names. **Unified-memory GPUs are supported too:** the NVIDIA GB10 in a DGX Spark (and the other GB10 boxes) has no separate GPU memory — `nvidia-smi` shows `[N/A]` — because the machine's memory is one pool used by both the CPU and the GPU. The agent knows this: it reports that pool as the GPU's memory, marks it unified so it is not counted twice, and a rental gets the pool as both its system and its GPU memory. **Apple Silicon** cannot host: it has no way to pass its GPU through to a microVM.
 - **The rental runtime installed and its base image built** — QEMU, UEFI firmware (OVMF/AAVMF), `cloud-image-utils`, `cryptsetup` and `nftables`, and Ubuntu 26.04's official cloud image, verified against Canonical's published checksums, with what its GPUs need baked in — the NVIDIA driver matching this machine's (the default branch when the host has no NVIDIA driver, none on a machine without an NVIDIA GPU), and the firmware AMD's and Intel's in-kernel drivers load — and the RDMA tools. A GPU of another make added later asks for a rebuild. The agent does this by itself after linking; by hand, `sudo gpu-agent runtime prepare --install-deps`.
-- **No rented GPU in use on the host** while a rental starts — each GPU is handed to the microVM whole, so anything using it (a container, a training job) must be stopped first. The agent refuses and names what holds it. NVIDIA's own background services (`nvidia-persistenced`, `nvidia-powerd`, DCGM) are not a problem: the agent stops the running ones for the rental and starts them again afterwards. Short-lived tools (`nvidia-smi`, `dcgmi`, a bug report) are given up to 5 seconds to finish, and the agent pauses its own GPU queries while it takes the GPU.
+- **No rented GPU in use on the host** while a rental starts — each GPU is handed to the microVM whole, so anything using it (a container, a training job) must be stopped first. Your use does not keep the machine off the market: a rental that arrives while your programs hold the GPU waits for you, up to 24 hours, and the agent tells you ([below](#using-your-machine-while-it-is-listed)). The agent never stops a program of yours. NVIDIA's own background services (`nvidia-persistenced`, `nvidia-powerd`, DCGM) are not a problem: the agent stops the running ones for the rental and starts them again afterwards. Short-lived tools (`nvidia-smi`, `dcgmi`, a bug report) are given up to 5 seconds to finish, and the agent pauses its own GPU queries while it takes the GPU.
 - **No desktop on the GPU** — except on a DGX Spark, whose desktop closes while it is rented and comes back after ([above](#dgx-spark-the-desktop-comes-and-goes-with-a-rental)). Any other machine that shows a desktop on a GPU (a workstation) holds that GPU for as long as the desktop runs, so the GPU is left out (and a machine with no other card cannot host) until it runs without one. `sudo gpu-agent runtime prepare --headless` makes it start without a desktop from now on and closes the running one (anything open on its screen closes too, so run it over SSH or be ready to log in again on the text screen); `sudo gpu-agent remove` restores the desktop from the next start. `gpu-agent check` names the desktop processes while this is needed.
 - **Enough CPUs, memory and disk** — a rental gets at least 2 vCPUs and 2 GB of memory after what the machine keeps for itself: it keeps a tenth of its memory, never under 4 GB (on a machine of less than 8 GB, half), so a machine needs at least 4 GB. The rentals' disks need 20 GB free beyond 20 GB the machine keeps (40 GB free under `/var/lib/gpu-agent`, or wherever `setup --data-dir` put them), on fixed storage: a rental's disk never goes on an SD card or other removable media. When the machine's own disk is too small, `gpu-agent check` names the biggest disk that has room and the command that puts the rentals there.
 - **A Linux kernel with what the runtime needs** — KVM (`/dev/kvm`), TUN/TAP, bridges, nf_tables, dm-crypt and loop devices. Stock Ubuntu and Debian kernels have them all; `gpu-agent check` names each one a vendor kernel lacks ([ARM boards](#arm-boards-rk3588)).
-- **A passing test boot on this machine.** The automatic setup runs it; `sudo gpu-agent check --boot` runs it by hand: a real rental for a few minutes with a key nobody holds: the VM reports the GPUs it sees (on a machine that has any), that it reaches the internet, and that your machine, its address and its gateway are unreachable; it is then torn down and the GPU checked. A GPU passes when the VM sees it by its PCI vendor and device ID with every memory window (BAR) mapped; whether a driver took it inside the VM is reported, not required. What the VM saw — model, and memory where the driver says — is reported to the marketplace. The result is recorded and must be for the agent version you are running.
+- **A passing test boot on this machine.** The automatic setup runs it; `sudo gpu-agent check --boot` runs it by hand: a real rental for a few minutes with a key nobody holds: the VM reports the GPUs it sees (on a machine that has any), that it reaches the internet, and that your machine, its address and its gateway are unreachable; it is then torn down and the GPU checked. A GPU passes when the VM sees it by its PCI vendor and device ID with every memory window (BAR) mapped; whether a driver took it inside the VM is reported, not required. What the VM saw — model, and memory where the driver says — is reported to the marketplace. The result is recorded with the GPUs, their driver on the host and the rental image it ran with, and a pass keeps counting across agent versions until one of those changes. A test run while your programs use the GPU passes without the GPU; the GPU's handover is then tested before a rental starts. A failed test keeps the machine off the market until one passes.
 
 ## Hosting a machine without a GPU
 
@@ -442,10 +508,11 @@ firewall rules and creating an encrypted disk all need it. Concretely:
 
 - **Network: outbound only.** One SSH connection to the relay you picked (port 2222). Its key on the relay is `restrict`ed to two reverse forwards — no shell, no command, nothing else. Nothing is opened on your router.
 - **Listens on loopback only.** `127.0.0.1:9101` is the control channel; `127.0.0.1:9100` is the legacy stats endpoint (only when `config.yaml` exists). Nothing on your LAN can reach either.
-- **The control channel does eight things:** provision, teardown, status, health, update (to a newer release of this agent, from GitHub, verified — see above), withdrawn (stop hosting), and for [linked pairs](#linked-pairs-two-dgx-sparks-rented-as-one) the cable check and a pair rental's start. Every call but health needs the bearer token minted for this machine at register. There is no command execution, no file access, no shell, and no way for anyone at the marketplace to log in to your machine — nobody asks for, or gets, an account on it.
+- **The control channel does eight things:** provision (which may wait for you to free the machine), teardown (which cancels a rental still waiting), status, health, update (to a newer release of this agent, from GitHub, verified — see above), withdrawn (stop hosting), and for [linked pairs](#linked-pairs-two-dgx-sparks-rented-as-one) the cable check and a pair rental's start. Every call but health needs the bearer token minted for this machine at register. There is no command execution, no file access, no shell, and no way for anyone at the marketplace to log in to your machine — nobody asks for, or gets, an account on it.
 - **Hosting checks are local.** `check` reads `/dev/kvm`, `/sys/kernel/iommu_groups`, the PCI devices, which processes have a GPU open (`/proc/*/fd`), `nvidia-smi` where it is installed, DMI and your `PATH`, and reports the result. It changes nothing.
-- **ConnectX ports** (a DGX Spark's, or any NVIDIA/Mellanox card's) are only ever brought up briefly, with no address and IPv6 off, for the announcements and checks described under linked pairs, and put back as they were.
-- **Files:** the binary (`/usr/local/bin/gpu-agent`), `/etc/gpu-agent` (the agent's SSH key, control token, registration and tunnel config, all `0600`, and `auto-setup` if you turned the automatic setup off), `/var/lib/gpu-agent` (the rental base image, the test-boot and pair-test results, the last setup attempt, the agents heard on the ConnectX ports and, while rented, the encrypted rental disk), and the service unit. The installer adds no users, kernel modules or drivers and installs only the OpenSSH client if it is missing. After linking, the automatic setup (or `gpu-agent runtime prepare --install-deps`) additionally installs QEMU, UEFI firmware, `cloud-image-utils`, `cryptsetup-bin`, `nftables`, `iproute2` and `kmod` with apt — nothing else; `sudo gpu-agent setup --off` before linking keeps it from doing so. While a rental runs, the agent also creates the `gpurent0` bridge, one nftables table, and (only if Docker or a firewall has set iptables' FORWARD policy to DROP) two accept rules for that bridge; all of them are removed when the rental ends.
+- **ConnectX ports** (a DGX Spark's, or any NVIDIA/Mellanox card's) are only ever brought up briefly, with no address and IPv6 off, for the announcements and checks described under linked pairs — and, while a pair rental waits for its machines, for 20 seconds at the start of each minute once this machine is free, to agree with the other machine on the start — and put back as they were.
+- **Telling you on the machine:** while a rental waits for you, the agent runs `wall` and, for each person logged in to a desktop, `notify-send` as that person (`runuser`, their own session bus). Nothing else touches your sessions or your programs.
+- **Files:** the binary (`/usr/local/bin/gpu-agent`), `/etc/gpu-agent` (the agent's SSH key, control token, registration and tunnel config, all `0600`, and `auto-setup` if you turned the automatic setup off), `/var/lib/gpu-agent` (the rental base image, the test-boot and pair-test results, the last setup attempt, the agents heard on the ConnectX ports, a rental waiting for you to free the machine (`pending.json`, with a pair rental's inter-machine key until it starts) and, while rented, the encrypted rental disk), and the service unit. The installer adds no users, kernel modules or drivers and installs only the OpenSSH client if it is missing. After linking, the automatic setup (or `gpu-agent runtime prepare --install-deps`) additionally installs QEMU, UEFI firmware, `cloud-image-utils`, `cryptsetup-bin`, `nftables`, `iproute2` and `kmod` with apt — nothing else; `sudo gpu-agent setup --off` before linking keeps it from doing so. While a rental runs, the agent also creates the `gpurent0` bridge, one nftables table, and (only if Docker or a firewall has set iptables' FORWARD policy to DROP) two accept rules for that bridge; all of them are removed when the rental ends.
 
 ## What a tenant can reach
 
@@ -569,8 +636,8 @@ GOOS=linux GOARCH=amd64 go build -o gpu-agent-linux-amd64 ./cmd/gpu-agent/
 # Cross-compile for macOS ARM
 GOOS=darwin GOARCH=arm64 go build -o gpu-agent-darwin-arm64 ./cmd/gpu-agent/
 
-# Releases stamp the version (the automatic setup and the test boot are per version)
-go build -ldflags "-s -w -X main.version=v0.2.0" -o gpu-agent ./cmd/gpu-agent/
+# Releases stamp the version (the automatic setup, and the full test boot a version owes, are per version)
+go build -ldflags "-s -w -X main.version=v0.2.3" -o gpu-agent ./cmd/gpu-agent/
 ```
 
 ## License

@@ -410,3 +410,145 @@ bullet above.
   `nvidia-smi`/`rocm-smi` only where installed; an NVIDIA GPU with no memory
   figure is checked by what holds it, like a GB10.
 - Not verified on AMD or Intel hardware.
+
+# v0.2.3: the host keeps using the machine until it is rented (CONTRACT-hostuse.md A and D)
+
+Built on origin/main f5eeda5, which is already tagged **v0.2.2** (the any-GPU release
+above), so this is the next release, v0.2.3; texts and comments say v0.2.3.
+
+## Host use (A1)
+
+1. **What counts as the host's use:** a process holding a rented GPU that is neither the
+   desktop (by name, or -- item 16 of the first part -- anything in a graphical login),
+   nor one of NVIDIA's services, nor a short-lived tool or a child of a gpu-agent; and, on
+   any machine, less `MemAvailable` than the rental's VM gets (`GuestMemoryMB`). Page
+   cache counts as free, as the kernel counts it; ZFS's ARC does not, so a ZFS host may
+   read as short of memory. A program started from a terminal inside a DGX Spark's
+   desktop session counts as the desktop and closes with it when a rental starts, as in
+   v0.2.0 -- **an owner question** if that is not what is wanted.
+2. `host_busy.since` is the agent's own clock: it starts again when the agent restarts.
+   `holders` is always a list (`[]` when only memory is short).
+3. **/provision without `start_by` on a machine in use is refused (409, naming the
+   programs)**; before, it was accepted and failed in the background with the GPU in
+   use. `start_by` at or before now: 409; `start_by` <= 0: 400. The same rental asked
+   again while it waits gets the same 202; another rental: 409.
+
+## Waiting rentals (A2)
+
+4. **/status `pending`** is `{rental_id, since, start_by, holders, state, reason?,
+   detail?, memory_short_gb?, waiting_for_peer?}` with `state` `waiting` or `failed`. While
+   a rental starts after the host freed the machine (its full test first) /status says
+   `provisioning` and shows no `pending` (the record's internal state is `starting`). A
+   failed record stays until its /teardown, a new rental, or 48 hours. Reasons: `its GPU
+   could not be handed to the rental` (the full test right before the rental failed; the
+   top-level `error` starts with the same words) and `the rental could not start on this
+   machine` (anything else: the start itself, a machine that stopped being ready).
+   /status always carries `host_busy` (null when free) and `retest_pending`.
+5. **At start_by** the rental is dropped (no failed record, as the contract says), the
+   host told why, and a problem noted for the marketplace.
+6. **/teardown of a waiting or failed rental** answers `{"status":"cancelled"}`; during
+   its full test the test is stopped cleanly and the rental cancelled; once its VM is
+   booting it is torn down as any start (retry shortly).
+7. **Notifications:** `wall` reads the text on stdin; `notify-send -u critical` runs as
+   each person logged in to a desktop (logind sessions of type x11/wayland/mir and class
+   user -- not the login screen, not ttys) through `runuser` and
+   `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus`; each is bounded by `timeout
+   20`, so a stuck terminal or bus cannot hold the agent. A reminder is sent every 2
+   hours and once more when an hour or less is left (the title then says so); the times
+   are kept in pending.json, so a restart keeps the rhythm. If the first message could
+   not reach everyone, that is noted for the marketplace. A free pair half's machine is
+   not told anything (there is nothing to do on it).
+8. **A host who takes the GPU back in the moment before the start** (the runtime refuses
+   a GPU in use) does not lose the rental: it waits on until its start_by.
+9. **A direct start on a free machine whose running version owes the full test runs that
+   test first, inside `provisioning`** -- up to 5-15 minutes more before `rented`
+   (ServCast's boot deadline is 30 minutes). A failure there is the same GPU failure
+   (a `failed` pending record) as for a waiting rental. A rental without start_by whose
+   test an agent restart cut short is dropped (did not start), not resumed.
+10. **Updates are not held back by a waiting rental** (it is on disk and waits on under
+    the new agent, which owes its own full test); one that is starting holds them back.
+    **Removing the machine is refused (409) while a rental waits** for it.
+
+## Test boots (A3, D2)
+
+11. **Validity across versions.** selftest.json records `host_driver` (each rented GPU's
+    host driver with `/sys/module/<driver>/version`, e.g. `nvidia 580.95.05`) and
+    `base_image` (the golden image's base, driver and build time). A pass holds while the
+    GPUs, the host driver and the image are the same, whatever agent ran it; this is
+    stricter than before within one version too (an image rebuilt by hand now asks for a
+    new test, which Keep runs). **A record from before v0.2.3** (no `base_image`) holds
+    for its own version and, for a later one, while the image was built before the test
+    (`created_at` <= `at`); its host driver is unknown and not compared.
+12. **`last_full_test`** in selftest.json keeps the last test that took the GPUs across
+    tests without them. A failed full test for the same GPUs, driver and image keeps the
+    machine off the market even after a pass without the GPU; only a full test lifts it
+    (run when the GPU is free, 6 hours after the failure or at the agent's next start).
+    `gpu_verified` is true for every passing test on a machine without a GPU.
+13. **The test VM is sized down** to the free memory less 1 GB (in 256 MB steps, never
+    under 2 GB); with less, no test runs and it waits. The full test before a rental
+    runs with the machine free (enough memory by definition).
+14. **Keep** (autosetup/keep.go) looks every 5 minutes (first a minute after the agent
+    starts): a test the setup will not run again (its key passed) and the running
+    version's full retest, only when that interrupts nothing (no host program on the
+    GPU, enough memory, on a Spark nobody logged in to the desktop). Everything else it
+    hands to the setup's own Run. It runs under BeginSetup, like the setup: **the machine
+    is shown not ready, with a progress line, for the test's 5-15 minutes**. It does not
+    run with the automatic setup off (the full test before a rental still does).
+15. **DGX Spark:** the agent's own tests (setup, Keep) count a person logged in to the
+    desktop as use -- they run without the GPU, or wait -- and close only the login
+    screen. `check --boot` (a person) and the test before a rental may close the desktop.
+16. `check --boot` runs without the GPU when the host's programs hold it (and says so
+    before asking), and in a smaller VM when memory is short. The pair test (`check
+    --boot --pair`) still needs the GPU free and is recorded per version, unchanged.
+
+## Linked pairs wait together (coordinator addition)
+
+17. A /pair/provision **with start_by** never starts its half alone. Each half is held by
+    a goroutine: while its host uses it, it waits as a single rental does (202, the host
+    told); once free (and its full test done, when owed) it meets the other half on the
+    cable at the start of every minute: 20-second windows of `GPUAGENT-START1` frames
+    (the rental id's first 8 characters, the port's MAC, "heard you", a sequence number,
+    HMAC-SHA256 keyed with the full rental id). A half starts when the other said, at
+    least 5 seconds before the window ended, that it heard this one; both then start
+    within the same minute, holding the frame lock from the rendezvous to the start. The
+    two clocks must agree within seconds (NTP), as the peer announcements already need. A
+    half that heard the other's "heard you" in the last instant before the cutoff, while
+    the other did not hear its own, would start alone: frames every 250 ms over 15
+    seconds make that need seconds of loss at exactly that moment.
+18. **A free half answers 200 `provisioning`** (two free halves meet within the minute and
+    boot), and after a rendezvous that did not agree it shows `waiting_for_host` with
+    `pending.waiting_for_peer: true` and `holders: []` (ServCast's panel shows such a
+    machine as "held by its own programs" today -- it could say "waiting for the other
+    machine"). At start_by each half gives up by itself.
+19. **pending.json keeps a pair request with its intra-pair key** (0600, root; deleted
+    when the half starts or is dropped): the half must start as asked after a restart.
+    v0.2.0 kept the key out of rental.json; this is the one place it is on disk.
+20. A /pair/provision **without** start_by starts as before. **Agents before v0.2.3
+    refuse `start_by` in /pair/provision** (strict decoding: 400) and ignore it in
+    /provision (a machine in use then accepts and fails in the background, as before):
+    ServCast must send start_by only to agents that report v0.2.3 or later.
+
+## Every error reaches the marketplace (D1)
+
+21. Added to the problems the capability report carries: the relay settings unreadable
+    at start (tunnel, active), the automatic setup switched off while it has work to do
+    (setup, active until it is on or has nothing to do), a speed test the listing asked
+    for that failed twice (agent, event), a rental cancelled at its deadline or because
+    its GPU could not be handed to it, or that could not start (rental, event), the
+    first notification that could not reach everyone (rental, event), and a waiting
+    rental that could not be read back after a restart (rental, event). A failed Keep
+    test is the hosting checks' test-boot finding, synced with every report.
+
+## Tests
+
+vmrt (host use, test planning, notifications, a test without the GPU, a failed full test
+outweighing a pass without it, legacy records), interconnect (the rendezvous both ways,
+one way, another rental's frames, forged frames), provisioner (host-busy capability for a
+GPU holder and for memory on a machine without a GPU; 202 + pending.json + notification;
+refusals; start when freed with and without the owed full test; failed pre-rental test;
+reminders and give-up; teardown cancels; restart; a start the host cut in on; the two
+halves of a pair on one wire: waiting together, starting together, giving up together,
+cancelled), control (202 body, /status shapes, teardown cancel, pair start_by), autosetup
+(first test without the GPU, retest when free, failed GPU test retried only with the GPU
+after 6 h, Keep running a test the setup will not, setup off as a problem), hostctl,
+status lines. Not run on hardware.
