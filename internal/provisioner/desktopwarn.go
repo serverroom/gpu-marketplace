@@ -32,8 +32,8 @@ func (p *Provisioner) loggedInDesktop() []string {
 	if p.desktopLogins != nil {
 		return p.desktopLogins()
 	}
-	rt := p.Runtime()
-	if p.host == nil || rt == nil || !rt.Spec().DesktopOnDemand {
+	spec, ok := p.RuntimeSpec()
+	if p.host == nil || !ok || !spec.DesktopOnDemand {
 		return nil
 	}
 	var users []string

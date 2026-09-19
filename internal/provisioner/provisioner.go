@@ -433,6 +433,11 @@ func (p *Provisioner) IsContainer() bool {
 func (p *Provisioner) RuntimeSpec() (vmrt.Spec, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.runtimeSpecLocked()
+}
+
+// runtimeSpecLocked is RuntimeSpec with p.mu held.
+func (p *Provisioner) runtimeSpecLocked() (vmrt.Spec, bool) {
 	if p.runtime != nil {
 		return p.runtime.Spec(), true
 	}

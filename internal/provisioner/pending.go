@@ -164,11 +164,11 @@ func (p *Provisioner) hostUseNow() vmrt.HostUse {
 	if p.readHostUse != nil {
 		return p.readHostUse()
 	}
-	rt := p.Runtime()
-	if p.host == nil || rt == nil {
+	spec, ok := p.RuntimeSpec()
+	if p.host == nil || !ok {
 		return vmrt.HostUse{}
 	}
-	return vmrt.ReadHostUse(p.host, rt.Spec())
+	return vmrt.ReadHostUse(p.host, spec)
 }
 
 // fullTestIsCurrent: the running agent has passed a full test boot on this
@@ -801,7 +801,8 @@ func (p *Provisioner) tellHost(title, body string) (problems []string) {
 }
 
 func (p *Provisioner) desktopOnDemandLocked() bool {
-	return p.runtime != nil && p.runtime.Spec().DesktopOnDemand
+	spec, ok := p.runtimeSpecLocked()
+	return ok && spec.DesktopOnDemand
 }
 
 // RentedNotice is what the people on a machine read while a rental waits for

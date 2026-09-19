@@ -119,6 +119,10 @@ func runPairSelfTest(svc service.Service, yes bool, minRDMA float64) {
 	}
 	p := detectProvisioner()
 	rt := p.Runtime()
+	if rt == nil {
+		fmt.Fprintln(os.Stderr, "this machine hosts rentals as containers (its GPU cannot be passed through to a VM yet), and a linked pair needs VMs; a pair test boot cannot run")
+		os.Exit(1)
+	}
 	if rt.Present() {
 		fmt.Fprintln(os.Stderr, "a rental (or the leftover of one) is on this machine; a pair test boot cannot run now")
 		os.Exit(1)

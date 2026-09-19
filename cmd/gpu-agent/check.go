@@ -120,8 +120,8 @@ func printPending(p *provisioner.Provisioner) {
 		return
 	}
 	spark := false
-	if rt := p.Runtime(); rt != nil {
-		spark = rt.Spec().DesktopOnDemand
+	if spec, ok := p.RuntimeSpec(); ok {
+		spark = spec.DesktopOnDemand
 	}
 	switch pr.State {
 	case control.PendingWaiting:

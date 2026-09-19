@@ -170,8 +170,7 @@ func runSpeedtest(args []string) {
 	}
 
 	p := detectProvisioner()
-	rt := p.Runtime()
-	rentalPresent := func() bool { return rt != nil && rt.Present() }
+	rentalPresent := p.RentalPresent
 	if rentalPresent() {
 		exitf("a rental (or the leftover of one) is on this machine; the speed test does not run while the machine is rented")
 	}

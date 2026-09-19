@@ -2,8 +2,10 @@ package provisioner
 
 import (
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt/fakehost"
 )
 
@@ -54,5 +56,38 @@ func TestVFIOImpossibleAndContainerFallback(t *testing.T) {
 	}
 	if containerFallback(h, []string{amd}) {
 		t.Error("the force override must not enable container mode for a non-NVIDIA GPU")
+	}
+}
+
+// A Spark in container mode is a Spark all the same: a rental waits for the
+// host's own programs on the GPU, and a logged-in desktop is warned before a
+// rental closes it -- though no microVM runtime backs the machine.
+func TestContainerSparkSeesHostUseAndItsDesktop(t *testing.T) {
+	h := fakehost.New()
+	bdf := "000f:01:00.0"
+	h.PCI(bdf, "nvidia", "0x030200", bdf)
+	h.PCIID(bdf, "10de", "2e12")
+	for _, pr := range []struct{ pid, comm string }{{"2558", "Xorg"}, {"11435", "llama-server"}} {
+		h.Links["/proc/"+pr.pid+"/fd/5"] = "/dev/nvidia0"
+		h.Files["/proc/"+pr.pid+"/comm"] = []byte(pr.comm + "\n")
+	}
+	h.Outputs["loginctl list-sessions --no-legend"] = "     3 1000 ana  seat0 tty2\n"
+	h.Outputs["loginctl show-session 3 -p Type"] = "Type=x11\nClass=user\nName=ana\nUser=1000\nState=active\n"
+	spec := vmrt.Spec{Arch: "arm64", DataDir: "/var/lib/gpu-agent", GPUs: []string{bdf},
+		TotalMemMB: 131072, CPUs: 20, DiskGB: 200, DesktopOnDemand: true}
+	p := New(vmrt.NewContainer(h, spec, nil, vmrt.ContainerImageRef, nil, nil), VendorContainerNV, []string{bdf}, true)
+	p.host = h
+
+	if p.Runtime() != nil {
+		t.Fatal("a container machine has no microVM runtime")
+	}
+	if u := p.hostUseNow(); !u.Busy() || strings.Join(u.Holders, ", ") != "llama-server (pid 11435)" {
+		t.Errorf("the host's own GPU program must hold a container rental back: %+v", u)
+	}
+	if got := p.loggedInDesktop(); strings.Join(got, ",") != "ana" {
+		t.Errorf("the logged-in desktop must be warned before a rental closes it: %v", got)
+	}
+	if !p.desktopOnDemandLocked() {
+		t.Error("the rented notice must carry the Spark's desktop line")
 	}
 }
