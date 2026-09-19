@@ -66,6 +66,82 @@ type Capability struct {
 	// is the processor's integrated GPU or the host's console, or it cannot be
 	// passed through on its own. Absent before v0.2.2.
 	Excluded []string `json:"excluded,omitempty"`
+	// HostBusy: the host itself is using what a rental would take -- its own
+	// programs hold the GPU, or the memory the rental's VM needs is in use.
+	// The machine stays ready and offered: a rental that arrives waits for
+	// the host to free it (up to its start_by). Absent while the host uses
+	// nothing a rental needs, and before v0.2.3.
+	HostBusy *HostBusy `json:"host_busy,omitempty"`
+	// RetestPending: the machine sells on a test boot from before -- another
+	// agent version's, or one run without the GPU while the host was using it
+	// -- and runs the full test when the GPU is free, and always before a
+	// rental starts. Absent (false) otherwise, and before v0.2.3.
+	RetestPending bool `json:"retest_pending,omitempty"`
+	// SelfTest is the last test boot in brief; absent before one ran, and
+	// before v0.2.3.
+	SelfTest *SelfTestSummary `json:"selftest,omitempty"`
+}
+
+// HostBusy is what the host is using of what a rental would take, and since
+// when (the agent's own clock; it starts again when the agent restarts).
+type HostBusy struct {
+	Since int64 `json:"since"`
+	// Holders are the host's programs holding the GPU, as
+	// "llama-server (pid 11435)"; [] when only memory is short.
+	Holders []string `json:"holders"`
+	// MemoryShortGB is how much more memory must be free for the rental's VM
+	// (0: none).
+	MemoryShortGB int `json:"memory_short_gb"`
+}
+
+// SelfTestSummary is the last test boot: whether it passed, whether it
+// took the GPU (a test run while the host was using the GPU passes without
+// it; on a machine without a GPU every passing test counts), when, and with
+// which agent version.
+type SelfTestSummary struct {
+	Passed       bool   `json:"passed"`
+	GPUVerified  bool   `json:"gpu_verified"`
+	At           int64  `json:"at"`
+	AgentVersion string `json:"agent_version"`
+}
+
+// Pending rental states, in PendingRental.State.
+const (
+	// PendingWaiting: the host's own use holds the machine; the rental starts
+	// as soon as it is free, or is given up at start_by.
+	PendingWaiting = "waiting"
+	// PendingStarting: the machine is free and the rental is starting (its
+	// full test boot first, when the running agent has not passed one).
+	PendingStarting = "starting"
+	// PendingFailed: the rental did not start; Reason says why. The record
+	// stays until the rental is torn down (POST /teardown) or replaced.
+	PendingFailed = "failed"
+)
+
+// Pending rental failure reasons, in PendingRental.Reason.
+const (
+	// PendingReasonGPU: the full test boot right before the rental failed.
+	PendingReasonGPU = "its GPU could not be handed to the rental"
+	// PendingReasonStart: the rental itself did not start.
+	PendingReasonStart = "the rental could not start on this machine"
+)
+
+// PendingRental is a rental accepted while the host was using the machine
+// (POST /provision answered 202), for /status's "pending".
+type PendingRental struct {
+	RentalID string `json:"rental_id"`
+	Since    int64  `json:"since"`
+	StartBy  int64  `json:"start_by"`
+	// Holders are what the host was using when last looked at, as in
+	// HostBusy.
+	Holders       []string `json:"holders"`
+	MemoryShortGB int      `json:"memory_short_gb,omitempty"`
+	State         string   `json:"state"`
+	Reason        string   `json:"reason,omitempty"`
+	Detail        string   `json:"detail,omitempty"`
+	// WaitingForPeer: a pair half whose machine is free, waiting for the
+	// other half's machine (Holders is then empty).
+	WaitingForPeer bool `json:"waiting_for_peer,omitempty"`
 }
 
 // SetupProgress is the automatic setup's last attempt in brief: the step
@@ -279,7 +355,44 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 type provisionReq struct {
 	RentalID     string `json:"rental_id"`
 	RenterPubkey string `json:"renter_pubkey"`
+	// StartBy (unix seconds) is how long the rental may wait for the host to
+	// free the machine; absent: it may not wait.
+	StartBy *int64 `json:"start_by,omitempty"`
 }
+
+// WaitingProvisioner is a Provisioner that lets the host keep using the
+// machine until it is rented (v0.2.3): a rental that arrives while the host
+// uses it waits, up to startBy, and the answer is the pending rental (nil
+// when it is starting at once).
+type WaitingProvisioner interface {
+	ProvisionBy(rentalID, renterPubkey string, startBy int64) (*PendingRental, error)
+}
+
+// PendingStatuser reports the pending rental for /status, or nil.
+type PendingStatuser interface {
+	PendingRental() *PendingRental
+}
+
+// PendingCanceller cancels a pending rental (POST /teardown for it): there
+// is nothing to wipe. cancelled is false when rentalID is not pending here.
+type PendingCanceller interface {
+	CancelPending(rentalID string) (cancelled bool, err error)
+}
+
+// writeWaiting answers 202 for a rental that waits for the host.
+func writeWaiting(w http.ResponseWriter, p *PendingRental) {
+	body := map[string]interface{}{"status": StatusWaitingForHost, "holders": p.Holders, "start_by": p.StartBy}
+	if p.MemoryShortGB > 0 {
+		body["memory_short_gb"] = p.MemoryShortGB
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(body)
+}
+
+// StatusWaitingForHost is /status's status (and the 202 answer's) while a
+// rental waits for the host to free the machine.
+const StatusWaitingForHost = "waiting_for_host"
 
 func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -300,6 +413,26 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ValidRentalID(req.RentalID) || strings.TrimSpace(req.RenterPubkey) == "" {
 		http.Error(w, "rental_id and renter_pubkey are required", http.StatusBadRequest)
+		return
+	}
+	if req.StartBy != nil && *req.StartBy <= 0 {
+		http.Error(w, "start_by must be a unix time", http.StatusBadRequest)
+		return
+	}
+	if wp, ok := s.prov.(WaitingProvisioner); ok {
+		var startBy int64
+		if req.StartBy != nil {
+			startBy = *req.StartBy
+		}
+		pending, err := wp.ProvisionBy(req.RentalID, req.RenterPubkey, startBy)
+		switch {
+		case err != nil:
+			writeError(w, err)
+		case pending != nil:
+			writeWaiting(w, pending)
+		default:
+			writeJSON(w, map[string]string{"status": "provisioning"})
+		}
 		return
 	}
 	if err := s.prov.Provision(req.RentalID, req.RenterPubkey); err != nil {
@@ -327,6 +460,19 @@ func (s *Server) handleTeardown(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rental_id is required", http.StatusBadRequest)
 		return
 	}
+	// A rental still waiting for the host has nothing to wipe: it is
+	// cancelled, and the host keeps the machine.
+	if pc, ok := s.prov.(PendingCanceller); ok {
+		cancelled, err := pc.CancelPending(req.RentalID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if cancelled {
+			writeJSON(w, map[string]string{"status": "cancelled"})
+			return
+		}
+	}
 	if err := s.prov.Teardown(req.RentalID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -346,6 +492,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// Linked pairs (CONTRACT.md s3.2): false from an agent that cannot say.
 		"interconnect_ready": c.Interconnect != nil && c.Interconnect.Ready,
 		"identity_confirmed": c.Identity != nil && c.Identity.ConfirmedDGXSpark,
+	}
+	// The host's use, as the capability says it (null while it uses nothing
+	// a rental needs), and whether the full test boot is still owed.
+	body["host_busy"] = c.HostBusy
+	body["retest_pending"] = c.RetestPending
+	if ps, ok := s.prov.(PendingStatuser); ok {
+		if pending := ps.PendingRental(); pending != nil {
+			body["pending"] = pending
+		}
 	}
 	if s.host != nil {
 		// The marketplace may say which release this machine should run on

@@ -87,6 +87,10 @@ type PairProvisionRequest struct {
 	Links        []PairLink `json:"links"`
 	MTU          int        `json:"mtu"`
 	IntraKey     *IntraKey  `json:"intra_key,omitempty"`
+	// StartBy (unix seconds) is how long this half may wait for the host to
+	// free the machine, as for /provision; absent: it may not wait. Refused
+	// as an unknown field by agents before v0.2.3.
+	StartBy *int64 `json:"start_by,omitempty"`
 }
 
 // GuestLinkStatus is what a pair rental's VM reported about its cables.
@@ -110,6 +114,12 @@ type LinkVerifier interface {
 // PairProvisioner starts one machine's half of a pair rental.
 type PairProvisioner interface {
 	PairProvision(req PairProvisionRequest) error
+}
+
+// WaitingPairProvisioner is a PairProvisioner whose half can wait for the
+// host to free the machine (v0.2.3), as WaitingProvisioner.
+type WaitingPairProvisioner interface {
+	PairProvisionBy(req PairProvisionRequest) (*PendingRental, error)
 }
 
 // PairStatuser reports the pair rental on the machine, or nil when none is.
@@ -246,6 +256,22 @@ func (s *Server) handlePairProvision(pp PairProvisioner) http.HandlerFunc {
 		var req PairProvisionRequest
 		if err := decodeStrict(r, &req); err != nil {
 			writeError(w, err)
+			return
+		}
+		if req.StartBy != nil && *req.StartBy <= 0 {
+			writeError(w, Invalid("start_by must be a unix time"))
+			return
+		}
+		if wp, ok := pp.(WaitingPairProvisioner); ok {
+			pending, err := wp.PairProvisionBy(req)
+			switch {
+			case err != nil:
+				writeError(w, err)
+			case pending != nil:
+				writeWaiting(w, pending)
+			default:
+				writeJSON(w, map[string]string{"status": "provisioning"})
+			}
 			return
 		}
 		if err := pp.PairProvision(req); err != nil {
