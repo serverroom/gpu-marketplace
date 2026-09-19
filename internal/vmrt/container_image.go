@@ -9,7 +9,7 @@ import (
 // ContainerImageRef is the base image a container rental runs -- the container
 // analog of the golden disk. Bumped when the entrypoint below changes, so a
 // stale image is rebuilt.
-const ContainerImageRef = "localhost/gpu-agent-rental:2"
+const ContainerImageRef = "localhost/gpu-agent-rental:5"
 
 // containerBaseImage is what the rental image is built from. The NVIDIA driver
 // and nvidia-smi come from the host at run time over CDI, so a plain Ubuntu
@@ -25,6 +25,9 @@ const containerBaseImage = "docker.io/library/ubuntu:24.04"
 // reliably instead of racing sshd for the container's stdout.
 const containerEntrypoint = `#!/bin/bash
 set -u
+# The encrypted volume is mounted (idmap) owned by container-root; make it the
+# renter's so they can write their own home.
+chown renter:renter /home/renter 2>/dev/null || true
 install -d -m 700 -o renter -g renter /home/renter/.ssh 2>/dev/null || true
 if [ -f /run/renter/authorized_keys ]; then
   install -m 600 -o renter -g renter /run/renter/authorized_keys /home/renter/.ssh/authorized_keys
@@ -49,8 +52,11 @@ func containerDockerfile() string {
 		"RUN apt-get update && apt-get install -y --no-install-recommends " +
 		"openssh-server ca-certificates iproute2 iputils-ping curl && " +
 		"rm -rf /var/lib/apt/lists/* && " +
-		"useradd -m -s /bin/bash renter && " +
-		"printf 'PermitRootLogin no\\nPasswordAuthentication no\\nAllowUsers renter\\nX11Forwarding no\\n' > /etc/ssh/sshd_config.d/gpu-agent.conf\n" +
+		// -p '*' unlocks the account (a bare useradd leaves the shadow field '!',
+		// which sshd refuses even for pubkey auth) without setting a usable
+		// password; login stays key-only.
+		"useradd -m -s /bin/bash -p '*' renter && " +
+		"printf 'PermitRootLogin no\\nPasswordAuthentication no\\nAllowUsers renter\\nX11Forwarding no\\nUsePAM no\\nLogLevel VERBOSE\\n' > /etc/ssh/sshd_config.d/gpu-agent.conf\n" +
 		"COPY gpuagent-entrypoint /usr/local/sbin/gpuagent-entrypoint\n" +
 		"RUN chmod 0755 /usr/local/sbin/gpuagent-entrypoint\n" +
 		"ENTRYPOINT [\"/usr/local/sbin/gpuagent-entrypoint\"]\n"

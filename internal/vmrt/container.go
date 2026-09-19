@@ -164,7 +164,11 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 func (rt *ContainerRuntime) runArgs(name, akFile, volume string, o StartOptions) []string {
 	args := []string{
 		"run", "--detach", "--name", name,
-		"--userns=auto",
+		// size=65536 maps the full 0..65535 id range into the user namespace.
+		// The default (1024) leaves sshd's privsep group (gid 65534, "nogroup")
+		// unmapped, so its pre-auth setgroups() fails with EINVAL and the
+		// connection resets. container-root is still an unprivileged host uid.
+		"--userns=auto:size=65536",
 		"--security-opt=no-new-privileges",
 		// Drop every capability, then add back only the minimal set sshd needs to
 		// run and set up the renter's account: bind its port, generate keys, own
