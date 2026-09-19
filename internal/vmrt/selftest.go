@@ -1,13 +1,7 @@
 package vmrt
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"net"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -169,8 +163,8 @@ func ParseSerial(log string) SerialReport {
 }
 
 // SelfTestResult is the outcome of one test boot, kept on disk. Preflight
-// reports a machine ready only while its latest result passed, for this agent
-// version and these GPUs.
+// reports a machine ready only while its latest result passed, for these GPUs,
+// this host driver and this base image (SelfTestProblem).
 type SelfTestResult struct {
 	Passed       bool     `json:"passed"`
 	AgentVersion string   `json:"agent_version"`
@@ -186,10 +180,146 @@ type SelfTestResult struct {
 	// no driver took inside the VM still reached the renter.
 	Notes []string `json:"notes,omitempty"`
 	At    int64    `json:"at"`
+	// GPUVerified: the test passed with every GPU a rental gets passed through
+	// to its VM (on a machine without a GPU, every passing test). A test run
+	// while the host's own programs held the GPU passes without it: the
+	// machine sells on it, and the GPU's handover is proven by a full test
+	// boot before a rental starts.
+	GPUVerified bool `json:"gpu_verified"`
+	// WithoutGPU: the test left the GPUs with the host, which was using them.
+	WithoutGPU bool `json:"without_gpu,omitempty"`
+	// HostDriver and BaseImage are what the test ran with: the host's driver
+	// for the GPUs (HostGPUDriver) and the rental base image's build. A
+	// passing test stays valid across agent versions while they and the GPUs
+	// are unchanged.
+	HostDriver string `json:"host_driver"`
+	BaseImage  string `json:"base_image"`
+	// TestMemoryMB is the test VM's memory when it was sized below a rental's
+	// because the host was using the machine's memory.
+	TestMemoryMB int `json:"test_memory_mb,omitempty"`
+	// LastFull is the last test that took the GPUs (on a machine without a
+	// GPU, the last test), kept across the tests run without them.
+	LastFull *TestVerdict `json:"last_full_test,omitempty"`
 	// Stopped: the test was stopped before it finished and its VM was torn
 	// down clean, so nothing was recorded -- the machine keeps the verdict of
 	// its last finished test boot. Never written to selftest.json.
 	Stopped bool `json:"-"`
+	// legacy: written before v0.2.3, which recorded no driver or image (as
+	// is any record without an image).
+	legacy bool
+}
+
+// TestVerdict is one full test boot in brief: what it passed or failed with.
+type TestVerdict struct {
+	Passed       bool       `json:"passed"`
+	AgentVersion string     `json:"agent_version"`
+	At           int64      `json:"at"`
+	HostGPUs     []string   `json:"host_gpus"`
+	HostDriver   string     `json:"host_driver"`
+	BaseImage    string     `json:"base_image"`
+	GPUs         []GuestGPU `json:"gpus,omitempty"`
+	Problems     []string   `json:"problems,omitempty"`
+	legacy       bool
+}
+
+// verdict is the result in brief.
+func (r SelfTestResult) verdict() *TestVerdict {
+	return &TestVerdict{Passed: r.Passed, AgentVersion: r.AgentVersion, At: r.At, HostGPUs: r.HostGPUs,
+		HostDriver: r.HostDriver, BaseImage: r.BaseImage, GPUs: r.GPUs, Problems: r.Problems, legacy: r.legacy}
+}
+
+// basis is what a verdict holds for.
+type basis struct {
+	version       string
+	at            int64
+	gpus          []string
+	driver, image string
+	legacy        bool
+}
+
+func (r SelfTestResult) basis() basis {
+	return basis{version: r.AgentVersion, at: r.At, gpus: r.HostGPUs, driver: r.HostDriver, image: r.BaseImage, legacy: r.legacy || r.BaseImage == ""}
+}
+
+func (v TestVerdict) basis() basis {
+	return basis{version: v.AgentVersion, at: v.At, gpus: v.HostGPUs, driver: v.HostDriver, image: v.BaseImage, legacy: v.legacy || v.BaseImage == ""}
+}
+
+// Fingerprint is the machine a test boot's verdict holds for: the agent
+// version running, the GPUs a rental gets, the host's driver for them and the
+// rental base image's build.
+type Fingerprint struct {
+	Version    string
+	GPUs       []string
+	HostDriver string
+	BaseImage  string
+	// ImageBuiltAt is when the base image was built (0: unknown).
+	ImageBuiltAt int64
+}
+
+// MachineFingerprint reads the fingerprint of this machine for spec's GPUs.
+func MachineFingerprint(h Host, spec Spec, version string) Fingerprint {
+	fp := Fingerprint{Version: version, GPUs: append([]string(nil), spec.GPUs...), HostDriver: HostGPUDriver(h, spec.DataDir, spec.GPUs)}
+	if info, err := LoadGoldenInfo(h, spec); err == nil {
+		fp.BaseImage = imageBuild(info)
+		fp.ImageBuiltAt = info.CreatedAt
+	}
+	return fp
+}
+
+// Fingerprint is MachineFingerprint for this runtime's GPUs.
+func (rt *Runtime) Fingerprint(version string) Fingerprint {
+	return MachineFingerprint(rt.h, rt.spec, version)
+}
+
+// imageBuild names one build of the base image.
+func imageBuild(info GoldenInfo) string {
+	drv := info.Driver
+	if drv == "" {
+		drv = "unrecorded"
+	}
+	built := "at an unrecorded time"
+	if info.CreatedAt > 0 {
+		built = time.Unix(info.CreatedAt, 0).UTC().Format("2006-01-02 15:04:05 UTC")
+	}
+	return fmt.Sprintf("%s with driver %s, built %s", info.Base, drv, built)
+}
+
+// HostGPUDriver is the host's driver for these GPUs, with its version where
+// the module says ("nvidia 580.95.05", "amdgpu"), each once; "none" for a GPU
+// without one. A GPU this agent's own rental has on vfio-pci counts with the
+// driver it came from. "" without GPUs.
+func HostGPUDriver(h Host, dataDir string, gpus []string) string {
+	if len(gpus) == 0 {
+		return ""
+	}
+	recorded := map[string]string{}
+	if st, err := LoadState(h, dataDir); err == nil && st != nil {
+		for _, d := range st.Devices {
+			recorded[d.BDF] = d.Driver
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, gpu := range gpus {
+		drv := driverOf(h, gpu)
+		if orig, ok := recorded[gpu]; ok && (drv == "vfio-pci" || drv == "") {
+			drv = orig
+		}
+		entry := "none"
+		if drv != "" {
+			entry = drv
+			if v, err := h.ReadFile("/sys/module/" + drv + "/version"); err == nil && strings.TrimSpace(string(v)) != "" {
+				entry += " " + strings.TrimSpace(string(v))
+			}
+		}
+		if !seen[entry] {
+			seen[entry] = true
+			out = append(out, entry)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
 }
 
 // matchGPUs pairs each GPU the host passed through with a display function the
@@ -290,152 +420,8 @@ func Evaluate(rep SerialReport, host []HostGPU, probes []string, sshOpened bool,
 		add("the teardown did not verify: %s", strings.Join(stop.Detail, "; "))
 	}
 	res.Passed = len(res.Problems) == 0
-	return res
-}
-
-// SelfTestPath is where the latest self-test result lives.
-func SelfTestPath(dataDir string) string { return filepath.Join(dataDir, "selftest.json") }
-
-// SaveSelfTest records a result.
-func SaveSelfTest(h Host, dataDir string, res SelfTestResult) error {
-	if err := h.MkdirAll(dataDir, 0700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(res, "", "  ")
-	if err != nil {
-		return err
-	}
-	return h.WriteFile(SelfTestPath(dataDir), data, 0600)
-}
-
-// LoadSelfTest returns the latest result, or nil when there is none.
-func LoadSelfTest(h Host, dataDir string) (*SelfTestResult, error) {
-	data, err := h.ReadFile(SelfTestPath(dataDir))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var res SelfTestResult
-	if err := json.Unmarshal(data, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-// SelfTestProblem is the reason a machine is not ready on account of its self-
-// test, or "" when a passing test for this version and these GPUs is on disk.
-// A machine without a GPU passes with a test that had none; a machine with
-// GPUs needs a test that passed them through (a test from before it had them
-// does not count).
-func SelfTestProblem(res *SelfTestResult, version string, gpus []string) string {
-	const run = "run 'sudo gpu-agent check --boot'"
-	switch {
-	case res == nil && len(gpus) == 0:
-		return "this machine has not yet booted a test rental; " + run
-	case res == nil:
-		return "this machine has not yet booted a test rental with its GPU passed through; " + run
-	case !res.Passed:
-		return fmt.Sprintf("its last test boot failed (%s); fix that and %s", strings.Join(res.Problems, "; "), run)
-	case res.AgentVersion != version:
-		return fmt.Sprintf("its passing test boot was with agent %s, not %s; %s", res.AgentVersion, version, run)
-	case len(res.HostGPUs) == 0 && len(gpus) > 0:
-		return "this machine has a GPU now, and its last test boot had none; " + run
-	case !sameSet(res.HostGPUs, gpus):
-		return "its GPUs have changed since its last test boot; " + run
-	}
-	return ""
-}
-
-func sameSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	x := append([]string(nil), a...)
-	y := append([]string(nil), b...)
-	sort.Strings(x)
-	sort.Strings(y)
-	for i := range x {
-		if x[i] != y[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// SelfTest boots a real rental VM with the GPUs passed through and a key nobody
-// holds, lets it report what it sees, tears it down, and records the verdict.
-// It exercises the whole path a renter's VM takes -- fence, network, encrypted
-// disk, VFIO, boot, teardown and GPU turnover -- which unit tests cannot.
-func (rt *Runtime) SelfTest(version string) SelfTestResult {
-	return rt.SelfTestContext(context.Background(), version)
-}
-
-// SelfTestContext is SelfTest that ctx can stop early: the test VM is torn down
-// exactly as at the end of a test, and the result records that it was stopped.
-func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTestResult {
-	now := time.Now().Unix()
-	// Read before the VM takes the GPUs: once on vfio-pci their host driver is
-	// gone, and the names are wanted in the verdict.
-	host := HostGPUs(rt.h, rt.spec.GPUs)
-	fail := func(problem string) SelfTestResult {
-		res := SelfTestResult{AgentVersion: version, HostGPUs: rt.spec.GPUs, At: now, Problems: []string{problem}}
-		_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
-		return res
-	}
-	if ctx.Err() != nil {
-		// Nothing ran, so there is nothing to record.
-		return SelfTestResult{AgentVersion: version, HostGPUs: rt.spec.GPUs, At: now, Stopped: true,
-			Problems: []string{"the test boot was stopped before it started"}}
-	}
-	// No GPU query of the agent's own runs while the GPU is being tested.
-	resume := stats.PauseGPUQueries()
-	defer resume()
-	pub, err := ThrowawayPubkey()
-	if err != nil {
-		return fail("could not make a test key: " + err.Error())
-	}
-	probes := DefaultProbes(rt.h)
-	id := fmt.Sprintf("%s%d", SelfTestPrefix, now)
-	if err := rt.Start(StartOptions{ID: id, Pubkey: pub, Probes: probes, NoWait: true}); err != nil {
-		problem := "the test VM did not start: " + err.Error()
-		if st, _ := LoadState(rt.h, rt.spec.DataDir); st != nil && st.Dirty {
-			problem += "; and its cleanup did not verify, so this machine refuses rentals until that is fixed"
-		}
-		return fail(problem)
-	}
-
-	r := NewRental(rt.spec.Storage(), id)
-	var rep SerialReport
-	sshOpened := false
-	for waited := time.Duration(0); waited < SelfTestTimeout && ctx.Err() == nil; waited += pollInterval {
-		if !sshOpened && rt.h.DialTCP(net.JoinHostPort(GuestIP, "22"), 3*time.Second) == nil {
-			sshOpened = true
-		}
-		if data, err := rt.h.ReadFile(r.SerialLog); err == nil {
-			rep = ParseSerial(string(data))
-		}
-		if (rep.End && sshOpened) || !rt.alive(r) {
-			break
-		}
-		rt.h.Sleep(pollInterval)
-	}
-
-	stopped := ctx.Err() != nil && !(rep.End && sshOpened)
-	stop := rt.Stop()
-	res := Evaluate(rep, host, probes, sshOpened, stop, version, now)
-	if stopped {
-		res.Passed = false
-		res.Problems = append([]string{"the test boot was stopped before it finished"}, res.Problems...)
-		if stop.Clean() {
-			// A test stopped half way proves nothing either way: the machine
-			// keeps the verdict of its last finished test boot. A teardown that
-			// did not verify clean is recorded, because that machine must not host.
-			res.Stopped = true
-			return res
-		}
-	}
-	_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
+	// Every GPU given was seen: SelfTestWith says otherwise for a test that
+	// was given none of the machine's.
+	res.GPUVerified = res.Passed
 	return res
 }

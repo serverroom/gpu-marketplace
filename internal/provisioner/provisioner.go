@@ -154,6 +154,10 @@ type Provisioner struct {
 	// problems records rentals that did not start and cleanups that did not
 	// verify, for the marketplace's problem list; nil: nowhere.
 	problems Problems
+
+	// The host's own use of what a rental would take (hostuse.go).
+	hostUse   vmrt.HostUse
+	busySince int64
 }
 
 // Problems is where rental failures go (agenterrors.Log).
@@ -332,6 +336,7 @@ func (p *Provisioner) Adopt(q *Provisioner) (adopted bool) {
 	machine, rt, vendor, bdfs, unified := q.machine, q.runtime, q.vendor, q.gpuBDFs, q.unified
 	c, findings := q.capability, q.findings
 	pairOpts, pair := q.pairOpts, q.pair
+	hostUse, midRental := q.hostUse, q.midRental
 	q.mu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -340,7 +345,19 @@ func (p *Provisioner) Adopt(q *Provisioner) (adopted bool) {
 	}
 	p.machine, p.runtime, p.vendor, p.gpuBDFs, p.unified = machine, rt, vendor, bdfs, unified
 	p.capability, p.findings = c, findings
-	p.midRental = q.midRental
+	p.midRental = midRental
+	// The host's use keeps the time it began.
+	p.hostUse = hostUse
+	if hb := p.capability.HostBusy; hb != nil {
+		copied := *hb
+		if p.busySince != 0 {
+			copied.Since = p.busySince
+		}
+		p.busySince = copied.Since
+		p.capability.HostBusy = &copied
+	} else {
+		p.busySince = 0
+	}
 	// The pair half follows the machine: the setup can change what it is
 	// checked against (the base image, above all).
 	if q.host != nil {

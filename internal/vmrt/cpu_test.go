@@ -61,7 +61,7 @@ func TestSelfTestWithoutAGPU(t *testing.T) {
 	if !res.Passed || len(res.HostGPUs) != 0 {
 		t.Fatalf("self-test = %+v", res)
 	}
-	if p := SelfTestProblem(&res, "v0.2.0-dev", nil); p != "" {
+	if p := SelfTestProblem(&res, Fingerprint{Version: "v0.2.0-dev"}); p != "" {
 		t.Errorf("the pass does not count for the machine without a GPU: %s", p)
 	}
 }

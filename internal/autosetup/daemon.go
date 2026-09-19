@@ -41,6 +41,12 @@ type Problems interface {
 	Resolve(area, message string)
 }
 
+// SetupOffProblem is the problem a machine reports while its automatic setup
+// is off and the setup is all that keeps it off the market.
+const SetupOffProblem = "Automatic setup is off on this machine, so the agent does not install the rental runtime, " +
+	"build the rental image or run the test rental by itself; 'sudo gpu-agent setup --on' turns it on, " +
+	"and 'sudo gpu-agent setup' runs the setup now"
+
 // AreaOf is the problem area a failed step belongs to: the test boot's own,
 // or the setup's (installing packages, building the image with its driver).
 func AreaOf(s Step) string {
@@ -148,7 +154,20 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 	}
 	if !Enabled(d.ConfigDir) {
 		d.say("Automatic setup is off (%s says off); 'sudo gpu-agent setup --on' turns it on", OptOutPath(d.ConfigDir))
+		// What keeps the machine off the market must reach the marketplace,
+		// not only this log.
+		if d.Errors != nil && d.Prov.Status() == provisioner.StatusFree && !d.Prov.Withdrawn() {
+			fresh := d.Runner.Detect()
+			if !fresh.Capability().Ready && PlanFor(fresh.Findings(), AptGet(d.Runner.Host)).Eligible() {
+				d.Errors.Raise(control.AreaSetup, SetupOffProblem, "")
+			} else {
+				d.Errors.Resolve(control.AreaSetup, SetupOffProblem)
+			}
+		}
 		return
+	}
+	if d.Errors != nil {
+		d.Errors.Resolve(control.AreaSetup, SetupOffProblem)
 	}
 	if d.Prov.Status() != provisioner.StatusFree || d.Prov.Withdrawn() {
 		return // a rental or its leftover (never beside one), or removed from the marketplace
@@ -182,6 +201,11 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 	}
 	if due, at := Due(last, a.Key, d.Runner.now(), justStarted); !due {
 		if at.IsZero() {
+			if onlyTestBoot(plan) {
+				// Keep runs it, when it interrupts nothing of the host's.
+				d.say("Automatic setup already passed for this agent version and driver; the test rental this machine needs runs when the machine allows it")
+				return
+			}
 			d.say("Automatic setup already passed for this agent version and driver; what is left needs a person")
 			return
 		}

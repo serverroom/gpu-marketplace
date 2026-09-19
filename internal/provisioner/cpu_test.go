@@ -107,7 +107,7 @@ func TestAMachineThatGainedAGPURebuilds(t *testing.T) {
 		t.Errorf("reasons = %s", got)
 	}
 	cpuPass := &vmrt.SelfTestResult{Passed: true, AgentVersion: version}
-	if p := vmrt.SelfTestProblem(cpuPass, version, []string{gpu}); !strings.Contains(p, "has a GPU now") {
+	if p := vmrt.SelfTestProblem(cpuPass, vmrt.Fingerprint{Version: version, GPUs: []string{gpu}}); !strings.Contains(p, "has a GPU now") {
 		t.Errorf("a test boot without the GPU counted: %q", p)
 	}
 }

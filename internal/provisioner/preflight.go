@@ -76,9 +76,18 @@ type HostReport struct {
 	// Excluded are GPUs on this machine that rentals leave out, and why. They
 	// are no reason to refuse the machine while another GPU can be rented.
 	Excluded []string
-	// GPUs are what the last passing test boot saw, once there is one for this
-	// version and these GPUs.
+	// GPUs are what the last test boot that took the GPUs saw, once the
+	// machine's test boot holds for these GPUs.
 	GPUs []vmrt.GuestGPU
+	// SelfTest is the last test boot's record (nil: none, or unreadable).
+	SelfTest *vmrt.SelfTestResult
+	// RetestPending: the machine is ready on an earlier test boot -- another
+	// agent version's, or one run without the GPU -- and the running version
+	// still owes the full one (run when the GPU is free, and before a rental).
+	RetestPending bool
+	// HostUse is what the host itself uses of what a rental would take; not
+	// read while a rental (or a test boot) is on the machine.
+	HostUse vmrt.HostUse
 }
 
 // Preflight checks, without changing anything, whether this machine can host a
@@ -221,21 +230,34 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	}
 
 	// A test boot proves what the checks above cannot: that this GPU really
-	// reaches a VM on this hardware. It only means anything once they pass.
+	// reaches a VM on this hardware. It only means anything once they pass. A
+	// pass holds across agent versions while the GPUs, their host driver and
+	// the base image are the ones it was run with; one run without the GPU,
+	// while the host was using it, counts too.
 	res, err := vmrt.LoadSelfTest(h, spec.DataDir)
-	current := err == nil && vmrt.SelfTestProblem(res, version, rep.BDFs) == ""
+	fp := vmrt.MachineFingerprint(h, spec, version)
+	current := err == nil && vmrt.SelfTestProblem(res, fp) == ""
 	if len(rep.Reasons) == 0 {
 		if err != nil {
 			addKind(ReasonTestBoot, "its last test boot could not be read (%v); run 'sudo gpu-agent check --boot'", err)
-		} else if problem := vmrt.SelfTestProblem(res, version, rep.BDFs); problem != "" {
+		} else if problem := vmrt.SelfTestProblem(res, fp); problem != "" {
 			addKind(ReasonTestBoot, "%s", problem)
 		}
 	}
+	if err == nil {
+		rep.SelfTest = res
+	}
 	if current && len(rep.BDFs) > 0 {
-		rep.GPUs = res.GPUs
-		for _, g := range res.GPUs {
+		rep.GPUs = vmrt.VerifiedGPUs(res, fp)
+		for _, g := range rep.GPUs {
 			rep.Unified = rep.Unified || g.Unified
 		}
+	}
+	rep.RetestPending = current && len(rep.Reasons) == 0 && !vmrt.FullTestCurrent(res, fp)
+	// What the host is using now: not while a rental or test boot is here,
+	// whose own VM holds the GPU and the memory.
+	if st, serr := vmrt.LoadState(h, spec.DataDir); serr == nil && st == nil {
+		rep.HostUse = vmrt.ReadHostUse(h, spec)
 	}
 	return rep
 }
@@ -332,7 +354,21 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 			Model: g.Model, PCIID: g.ID, MemoryMB: g.MemoryMB, Unified: g.Unified, Driver: g.Driver,
 		})
 	}
+	p.capability.SelfTest = selfTestSummary(rep.SelfTest)
+	p.capability.RetestPending = rep.RetestPending
+	if goos == "linux" && !midRental {
+		p.hostUse = rep.HostUse
+		p.setHostUseLocked(rep.HostUse, time.Now().Unix())
+	}
 	return p
+}
+
+// selfTestSummary is the capability's selftest, or nil.
+func selfTestSummary(res *vmrt.SelfTestResult) *control.SelfTestSummary {
+	if res == nil {
+		return nil
+	}
+	return &control.SelfTestSummary{Passed: res.Passed, GPUVerified: res.GPUVerified, At: res.At, AgentVersion: res.AgentVersion}
 }
 
 // HasNVIDIAGPU reports whether this machine has an NVIDIA GPU: one nvidia-smi

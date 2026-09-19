@@ -24,6 +24,8 @@ type Host struct {
 	// Calls holds "run <command>", "write <path>=<data>", "remove <path>" and
 	// "download <url>", in order.
 	Calls []string
+	// Inputs holds, for each RunInput, "<command>\n<stdin>", in order.
+	Inputs []string
 	// Outputs answers Output for the longest matching command prefix.
 	Outputs map[string]string
 	// Fail makes a command (by prefix) or a write ("write <path>") fail.
@@ -119,7 +121,24 @@ func (h *Host) Run(name string, args ...string) error {
 }
 
 func (h *Host) RunInput(stdin []byte, name string, args ...string) error {
+	h.mu.Lock()
+	h.Inputs = append(h.Inputs, text(name, args)+"\n"+string(stdin))
+	h.mu.Unlock()
 	return h.Run(name, args...)
+}
+
+// Input is the stdin of the first RunInput whose command starts with prefix,
+// or "".
+func (h *Host) Input(prefix string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, in := range h.Inputs {
+		cmd, stdin, _ := strings.Cut(in, "\n")
+		if strings.HasPrefix(cmd, prefix) {
+			return stdin
+		}
+	}
+	return ""
 }
 
 func (h *Host) Output(name string, args ...string) (string, error) {

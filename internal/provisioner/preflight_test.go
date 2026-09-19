@@ -335,10 +335,22 @@ func TestPreflightNamesWhatToRunNext(t *testing.T) {
 	}
 }
 
-func TestPreflightWantsATestBootForThisVersion(t *testing.T) {
+// A passing test boot sells across agent versions while the machine is the
+// one it was run on (a record from before v0.2.3 knows only its image's age);
+// the running version owes its own full test, which it runs when the GPU is
+// free and before a rental.
+func TestPreflightKeepsATestBootAcrossVersions(t *testing.T) {
 	h := goodHost(t, "00000000:01:00.0, NVIDIA L4, 24564\n")
-	if all := reasons(Preflight(h, "linux", spec(), "v0.1.8")); !strings.Contains(all, "check --boot") {
-		t.Errorf("a test boot from another version counted: %s", all)
+	rep := Preflight(h, "linux", spec(), "v0.1.8")
+	if len(rep.Reasons) != 0 || !rep.RetestPending || len(rep.GPUs) != 1 {
+		t.Errorf("a pass by v0.1.7 did not sell under v0.1.8: %s retest=%v gpus=%+v", reasons(rep), rep.RetestPending, rep.GPUs)
+	}
+	if rep := Preflight(h, "linux", spec(), version); len(rep.Reasons) != 0 || rep.RetestPending {
+		t.Errorf("the version's own pass: %s retest=%v", reasons(rep), rep.RetestPending)
+	}
+	rebuiltImage(h)
+	if all := reasons(Preflight(h, "linux", spec(), "v0.1.8")); !strings.Contains(all, "base image was rebuilt after its last test boot") {
+		t.Errorf("a test boot from before the image was rebuilt counted for another version: %s", all)
 	}
 	delete(h.Files, vmrt.SelfTestPath(dataDir))
 	if all := reasons(Preflight(h, "linux", spec(), version)); !strings.Contains(all, "has not yet booted a test rental") {
@@ -559,9 +571,20 @@ func TestPreflightKindsTheReasons(t *testing.T) {
 	}
 
 	h = goodHost(t, "00000000:01:00.0, NVIDIA L4, 24564\n")
+	rebuiltImage(h)
 	if k := kinds(Preflight(h, "linux", spec(), "v0.1.10")); k[ReasonTestBoot] != 1 || len(k) != 1 {
-		t.Errorf("an old test boot: kinds = %v", k)
+		t.Errorf("an old test boot on a rebuilt image: kinds = %v", k)
 	}
+}
+
+// rebuiltImage records the base image as built after the machine's test boot.
+func rebuiltImage(h *fakehost.Host) {
+	var info vmrt.GoldenInfo
+	_ = json.Unmarshal(h.Files[dataDir+"/golden.img.json"], &info)
+	info.CreatedAt = 1758200000
+	golden, _ := json.Marshal(info)
+	h.Files[dataDir+"/golden.img.json"] = golden
+	h.Files[filepath.Join(dataDir, "golden.img")+".json"] = golden
 }
 
 // A base image with another driver than the host's is rebuilt; one a person

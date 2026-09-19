@@ -153,20 +153,33 @@ func TestEvaluateMarksAGB10Unified(t *testing.T) {
 }
 
 func TestSelfTestProblem(t *testing.T) {
-	pass := &SelfTestResult{Passed: true, AgentVersion: "v0.1.7", HostGPUs: []string{testGPU}}
-	if p := SelfTestProblem(pass, "v0.1.7", []string{testGPU}); p != "" {
+	fp := Fingerprint{Version: "v0.1.7", GPUs: []string{testGPU}, HostDriver: "nvidia 580.95.05", BaseImage: "image A"}
+	pass := &SelfTestResult{Passed: true, AgentVersion: "v0.1.7", HostGPUs: []string{testGPU}, HostDriver: "nvidia 580.95.05", BaseImage: "image A"}
+	if p := SelfTestProblem(pass, fp); p != "" {
 		t.Errorf("a current pass reported %q", p)
+	}
+	// Another agent version's pass sells as long as the machine is the same.
+	older := *pass
+	older.AgentVersion = "v0.1.6"
+	if p := SelfTestProblem(&older, fp); p != "" {
+		t.Errorf("a pass by another agent version on the same machine reported %q", p)
+	}
+	with := func(f func(r *SelfTestResult)) *SelfTestResult {
+		r := *pass
+		f(&r)
+		return &r
 	}
 	for name, c := range map[string]struct {
 		res  *SelfTestResult
 		want string
 	}{
-		"never":   {nil, "has not yet booted"},
-		"failed":  {&SelfTestResult{Problems: []string{"no GPU"}, AgentVersion: "v0.1.7", HostGPUs: []string{testGPU}}, "failed (no GPU)"},
-		"old":     {&SelfTestResult{Passed: true, AgentVersion: "v0.1.6", HostGPUs: []string{testGPU}}, "agent v0.1.6"},
-		"new GPU": {&SelfTestResult{Passed: true, AgentVersion: "v0.1.7", HostGPUs: []string{"0000:41:00.0"}}, "GPUs have changed"},
+		"never":      {nil, "has not yet booted"},
+		"failed":     {with(func(r *SelfTestResult) { r.Passed, r.Problems = false, []string{"no GPU"} }), "failed (no GPU)"},
+		"new GPU":    {with(func(r *SelfTestResult) { r.HostGPUs = []string{"0000:41:00.0"} }), "GPUs have changed"},
+		"new driver": {with(func(r *SelfTestResult) { r.HostDriver = "nvidia 570.86.10" }), "driver has changed since its last test boot (nvidia 570.86.10 then, nvidia 580.95.05 now)"},
+		"new image":  {with(func(r *SelfTestResult) { r.BaseImage = "image B" }), "base image was rebuilt"},
 	} {
-		if p := SelfTestProblem(c.res, "v0.1.7", []string{testGPU}); !strings.Contains(p, c.want) {
+		if p := SelfTestProblem(c.res, fp); !strings.Contains(p, c.want) {
 			t.Errorf("%s: %q, want it to contain %q", name, p, c.want)
 		}
 	}

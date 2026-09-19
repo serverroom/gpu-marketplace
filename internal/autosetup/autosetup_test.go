@@ -77,6 +77,16 @@ func noImage(h *fakehost.Host) {
 
 func noTestBoot(h *fakehost.Host) { h.DeleteFile(vmrt.SelfTestPath(dataDir)) }
 
+// imageBuiltAt records when the base image was built.
+func imageBuiltAt(h *fakehost.Host, at int64) {
+	var info vmrt.GoldenInfo
+	data, _ := h.ReadFile(golden + ".json")
+	_ = json.Unmarshal(data, &info)
+	info.CreatedAt = at
+	data, _ = json.Marshal(info)
+	h.SetFile(golden+".json", data)
+}
+
 // rig is a daemon on a fake machine with fake steps that do on the fake what
 // the real ones do on a real machine, and a clock that moves only when the
 // daemon waits.
@@ -96,6 +106,10 @@ type rig struct {
 	during func(Step)
 	// onWait runs when the daemon waits; a test cancels there.
 	onWait func()
+	// tests are the options each test boot ran with; recordFailures makes a
+	// failed test boot record itself, as the real one does.
+	tests          []vmrt.TestOptions
+	recordFailures bool
 }
 
 func newRig(t *testing.T, h *fakehost.Host) *rig {
@@ -123,19 +137,31 @@ func newRig(t *testing.T, h *fakehost.Host) *rig {
 				image(h, "resolute-server-cloudimg-amd64.img", drv.Driver)
 				return nil
 			},
-			TestBoot: func(_ context.Context, rt *vmrt.Runtime) vmrt.SelfTestResult {
-				if err := r.did(StepTestBoot); err != nil {
-					return vmrt.SelfTestResult{Problems: []string{err.Error()}}
-				}
-				// The test boot records the GPUs the runtime passed through
-				// (none on a machine without a GPU).
+			TestBoot: func(_ context.Context, rt *vmrt.Runtime, o vmrt.TestOptions) vmrt.SelfTestResult {
+				r.mu.Lock()
+				r.tests = append(r.tests, o)
+				record := r.recordFailures
+				r.mu.Unlock()
+				// The test boot records what it ran with: the GPUs the runtime
+				// passed through (none on a machine without a GPU, or when the
+				// host was using them), the host's driver and the image.
 				gpus := rt.Spec().GPUs
-				res, _ := json.Marshal(vmrt.SelfTestResult{Passed: true, AgentVersion: version, HostGPUs: gpus})
-				h.SetFile(vmrt.SelfTestPath(dataDir), res)
-				if len(gpus) == 0 {
-					return vmrt.SelfTestResult{Passed: true}
+				fp := rt.Fingerprint(version)
+				res := vmrt.SelfTestResult{Passed: true, AgentVersion: version, HostGPUs: gpus, At: r.clock().Unix(),
+					HostDriver: fp.HostDriver, BaseImage: fp.BaseImage,
+					GPUVerified: !o.NoGPU || len(gpus) == 0, WithoutGPU: o.NoGPU && len(gpus) > 0}
+				if err := r.did(StepTestBoot); err != nil {
+					res.Passed, res.GPUVerified, res.Problems = false, false, []string{err.Error()}
+					if record {
+						_ = vmrt.SaveSelfTest(h, dataDir, res)
+					}
+					return res
 				}
-				return vmrt.SelfTestResult{Passed: true, GuestGPUs: []string{"NVIDIA CMP 170HX"}}
+				_ = vmrt.SaveSelfTest(h, dataDir, res)
+				if len(gpus) > 0 && !o.NoGPU {
+					res.GuestGPUs = []string{"NVIDIA CMP 170HX"}
+				}
+				return res
 			},
 		},
 		GOOS:      "linux",
@@ -279,13 +305,13 @@ func TestEveryFixableReasonIsSetUp(t *testing.T) {
 		breakIt func(h *fakehost.Host)
 		steps   string
 	}{
-		"tools missing":             {func(h *fakehost.Host) { noTools(h, true) }, "deps,test-boot"},
-		"no base image":             {noImage, "image,test-boot"},
-		"image from 24.04":          {func(h *fakehost.Host) { image(h, "noble-server-cloudimg-amd64.img", "580-server") }, "image,test-boot"},
-		"image with another driver": {func(h *fakehost.Host) { image(h, "resolute-server-cloudimg-amd64.img", "580-server-open") }, "image,test-boot"},
-		"never test-booted":         {noTestBoot, "test-boot"},
-		"test-booted by v0.1.9":     {func(h *fakehost.Host) { passed(h, "v0.1.9") }, "test-boot"},
-		"a fresh machine":           {func(h *fakehost.Host) { noTools(h, true); noImage(h); noTestBoot(h) }, "deps,image,test-boot"},
+		"tools missing":                     {func(h *fakehost.Host) { noTools(h, true) }, "deps,test-boot"},
+		"no base image":                     {noImage, "image,test-boot"},
+		"image from 24.04":                  {func(h *fakehost.Host) { image(h, "noble-server-cloudimg-amd64.img", "580-server") }, "image,test-boot"},
+		"image with another driver":         {func(h *fakehost.Host) { image(h, "resolute-server-cloudimg-amd64.img", "580-server-open") }, "image,test-boot"},
+		"never test-booted":                 {noTestBoot, "test-boot"},
+		"image rebuilt after the test boot": {func(h *fakehost.Host) { passed(h, "v0.1.9"); imageBuiltAt(h, 1758200000) }, "test-boot"},
+		"a fresh machine":                   {func(h *fakehost.Host) { noTools(h, true); noImage(h); noTestBoot(h) }, "deps,image,test-boot"},
 		// Since v0.2.2 the host needs no GPU driver: an NVIDIA GPU nvidia-smi
 		// cannot see is set up and rented like any other GPU.
 		"a GPU without its driver": {func(h *fakehost.Host) {
@@ -770,7 +796,7 @@ func TestASparkWithItsDesktopUpIsSetUp(t *testing.T) {
 	r := newRig(t, h)
 	detect := func() *provisioner.Provisioner { return provisioner.Detect(h, "linux", "arm64", dataDir, version) }
 	r.d.Runner.Detect, r.d.Runner.Arch, r.d.Prov = detect, "arm64", detect()
-	r.d.Runner.TestBoot = func(context.Context, *vmrt.Runtime) vmrt.SelfTestResult {
+	r.d.Runner.TestBoot = func(context.Context, *vmrt.Runtime, vmrt.TestOptions) vmrt.SelfTestResult {
 		res, _ := json.Marshal(vmrt.SelfTestResult{Passed: true, AgentVersion: version, HostGPUs: []string{spark}})
 		h.SetFile(vmrt.SelfTestPath(dataDir), res)
 		return vmrt.SelfTestResult{Passed: true}
@@ -814,10 +840,27 @@ func (f *fakeProblems) Raise(area, message, detail string) bool {
 	return true
 }
 
+// Resolve records the area, and the message when only that one is resolved.
 func (f *fakeProblems) Resolve(area, message string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if message != "" {
+		area += ": " + message
+	}
 	f.resolved = append(f.resolved, area)
+}
+
+// wholeAreas are the areas resolved whole.
+func (f *fakeProblems) wholeAreas() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, r := range f.resolved {
+		if !strings.Contains(r, ": ") {
+			out = append(out, r)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 // A failed attempt is a problem for the marketplace in its own area (the
@@ -833,7 +876,7 @@ func TestAFailedAttemptIsAProblemUntilOnePasses(t *testing.T) {
 	if len(probs.raised) != 1 || !strings.HasPrefix(probs.raised[0], "testboot: Automatic setup failed while running a test rental") {
 		t.Errorf("raised = %q", probs.raised)
 	}
-	if strings.Join(probs.resolved, ",") != "setup,testboot" {
+	if got := probs.wholeAreas(); got != "setup,testboot" {
 		t.Errorf("resolved = %q", probs.resolved)
 	}
 	if AreaOf(StepImage) != control.AreaSetup || AreaOf(StepDeps) != control.AreaSetup {

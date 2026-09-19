@@ -26,10 +26,21 @@ type Runner struct {
 	// OnStep runs as each step starts, once the record says so.
 	OnStep func(a Attempt)
 
-	// The steps. Nil ones are the real thing (tests replace them).
+	// The steps. Nil ones are the real thing (tests replace them). A test
+	// boot is given how it may run without interrupting the host (without
+	// the GPU while the host's programs hold it, in a smaller VM while the
+	// host uses the memory).
 	InstallDeps func(ctx context.Context) error
 	BuildImage  func(ctx context.Context, spec vmrt.Spec, drv vmrt.DriverChoice) error
-	TestBoot    func(ctx context.Context, rt *vmrt.Runtime) vmrt.SelfTestResult
+	TestBoot    func(ctx context.Context, rt *vmrt.Runtime, o vmrt.TestOptions) vmrt.SelfTestResult
+}
+
+// testBoot runs one test boot as o says.
+func (r *Runner) testBoot(ctx context.Context, rt *vmrt.Runtime, o vmrt.TestOptions) vmrt.SelfTestResult {
+	if r.TestBoot != nil {
+		return r.TestBoot(ctx, rt, o)
+	}
+	return rt.SelfTestWith(ctx, r.Version, o)
 }
 
 func (r *Runner) now() time.Time {
@@ -188,19 +199,30 @@ func (r *Runner) step(ctx context.Context, s Step, a Attempt) error {
 		if rt.Present() {
 			return errors.New("a rental (or the leftover of one) is on this machine")
 		}
-		boot := r.TestBoot
-		if boot == nil {
-			boot = func(ctx context.Context, rt *vmrt.Runtime) vmrt.SelfTestResult {
-				return rt.SelfTestContext(ctx, r.Version)
-			}
+		// The host keeps its programs and its desktop: a GPU they hold is
+		// left out of the test, and the machine's memory in use shrinks it.
+		plan := vmrt.PlanTest(r.Host, rt.Spec(), false)
+		if plan.Wait != "" {
+			return fmt.Errorf("the test boot cannot run now: %s", plan.Wait)
 		}
-		res := boot(ctx, rt)
+		if plan.NoGPU {
+			if last, err := vmrt.LoadSelfTest(r.Host, rt.Spec().DataDir); err == nil && vmrt.GPUTestFailed(last, rt.Fingerprint(r.Version)) {
+				return fmt.Errorf("the GPU could not be handed to the last full test rental, and only a test that takes the GPU "+
+					"can clear that; it runs when the GPU is free (in use now by %s)", strings.Join(plan.InUse, ", "))
+			}
+			r.log("The GPU is in use on this machine (%s): the test runs without it. The GPU's handover is tested "+
+				"when the GPU is free, and always before a rental starts.", strings.Join(plan.InUse, ", "))
+		}
+		res := r.testBoot(ctx, rt, plan.TestOptions)
 		if !res.Passed {
 			return fmt.Errorf("the test boot failed: %s", strings.Join(res.Problems, "; "))
 		}
-		if len(res.GuestGPUs) > 0 {
+		switch {
+		case plan.NoGPU:
+			r.log("Test boot passed without the GPU.")
+		case len(res.GuestGPUs) > 0:
 			r.log("Test boot passed: the VM saw %s.", strings.Join(res.GuestGPUs, "; "))
-		} else {
+		default:
 			r.log("Test boot passed.")
 		}
 		return nil

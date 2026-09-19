@@ -61,6 +61,12 @@ type StartOptions struct {
 	Pair *PairOptions
 	// PairTest makes a pair's self-test VM run the pair test too.
 	PairTest *PairTestPlan
+	// NoGPU leaves the machine's GPUs with the host: a test boot while the
+	// host's own programs use them proves everything but the GPU's handover.
+	NoGPU bool
+	// MemoryMB sizes the VM below what a rental gets (0: a rental's size): a
+	// test boot while the host uses much of the machine's memory.
+	MemoryMB int
 }
 
 // ErrRentalPresent is returned by Start while a rental (or a dirty leftover of
@@ -84,8 +90,12 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 			return fmt.Errorf("pair rental: %w", err)
 		}
 	}
+	if o.NoGPU && o.Pair != nil {
+		return errors.New("a pair rental cannot start without its GPU")
+	}
+	takesGPUs := len(rt.spec.GPUs) > 0 && !o.NoGPU
 	userData, err := BuildUserData(SeedOptions{ID: o.ID, Pubkey: o.Pubkey, Probes: o.Probes,
-		NoGPU: len(rt.spec.GPUs) == 0, Pair: o.Pair, PairTest: o.PairTest})
+		NoGPU: !takesGPUs, Pair: o.Pair, PairTest: o.PairTest})
 	if err != nil {
 		return err
 	}
@@ -98,6 +108,7 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	defer resume()
 
 	r := NewRental(rt.spec.Storage(), o.ID)
+	r.MemoryMB = o.MemoryMB
 	st := &State{RentalID: o.ID, Rental: r, StartedAt: time.Now().Unix(), Pair: o.Pair}
 	save := func() error { return SaveState(rt.h, rt.spec.DataDir, st) }
 	if err = save(); err != nil {
@@ -152,7 +163,7 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 			return err
 		}
 	}
-	if len(rt.spec.GPUs) > 0 {
+	if takesGPUs {
 		// Saved even when it fails: the teardown works from what is on disk,
 		// and must give back exactly what was taken -- functions already on
 		// vfio-pci, services stopped, a desktop closed.
