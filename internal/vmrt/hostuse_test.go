@@ -51,6 +51,34 @@ func TestReadHostUseNamesTheHostsPrograms(t *testing.T) {
 	}
 }
 
+// GNOME Shell's own gjs helpers (the desktop icons a DGX Spark's desktop runs
+// for as long as someone is logged in) are the desktop, not the host's use; a
+// gjs program the host runs from elsewhere is still theirs.
+func TestGNOMEShellScriptsAreTheDesktop(t *testing.T) {
+	h := newHost()
+	for _, p := range []struct{ pid, comm, cmdline string }{
+		{"2558", "Xorg", "/usr/lib/xorg/Xorg\x00vt2\x00"},
+		{"32887", "gjs-console", "gjs\x00/usr/share/gnome-shell/extensions/ding@rastersoft.com/app/ding.js\x00-P\x00/usr/share/gnome-shell/extensions/ding@rastersoft.com/app\x00"},
+		{"4100", "gjs-console", "gjs\x00/home/ana/gpu-toy.js\x00"},
+	} {
+		h.Links["/proc/"+p.pid+"/fd/5"] = "/dev/nvidia0"
+		h.Files["/proc/"+p.pid+"/comm"] = []byte(p.comm + "\n")
+		h.Files["/proc/"+p.pid+"/cmdline"] = []byte(p.cmdline)
+	}
+	spark := testSpec()
+	spark.DesktopOnDemand = true
+	if u := ReadHostUse(h, spark); strings.Join(u.Holders, ", ") != "gjs-console (pid 4100)" {
+		t.Errorf("only the host's own gjs program is host use on a Spark: %+v", u)
+	}
+	delete(h.Links, "/proc/4100/fd/5")
+	if u := ReadHostUse(h, spark); u.Busy() {
+		t.Errorf("a Spark with only its desktop and GNOME Shell's desktop icons is busy: %+v", u)
+	}
+	if u := ReadHostUse(h, testSpec()); strings.Join(u.Holders, ", ") != "Xorg (pid 2558), gjs-console (pid 32887)" {
+		t.Errorf("on a workstation the desktop icons are the desktop that does not close: %+v", u)
+	}
+}
+
 // Memory the rental's VM needs and the host is using counts too, on any
 // machine -- one without a GPU included; an unreadable figure counts as free.
 func TestReadHostUseCountsTheMemoryARentalNeeds(t *testing.T) {

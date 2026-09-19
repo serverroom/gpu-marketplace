@@ -249,7 +249,8 @@ confirms as a DGX Spark (Linux on arm64, DMI vendor NVIDIA, product "DGX Spark",
 GPU), the desktop is not a reason to refuse a rental: **the desktop closes while the
 Spark is rented or running its test rental, and comes back after.** Nothing to do: the
 desktop counts as its own programs only — the display server, the shell, the display
-manager and its login screen (the agent asks systemd and logind where each program using
+manager and its login screen, and (since v0.2.5) GNOME Shell's own helpers such as the
+desktop icons (the agent asks systemd and logind where each program using
 the GPU runs); since v0.2.3 the browsers and other programs you open on it are your own use,
 which a rental waits for ([below](#using-your-machine-while-it-is-listed)). Someone logged in
 is warned 15 minutes before the desktop closes. The agent stops the display manager (`display-manager.service`,

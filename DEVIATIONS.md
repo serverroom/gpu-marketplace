@@ -699,3 +699,19 @@ contained. That is the owner's accepted trade until the signed nvgrace carries t
   found by itself; `runtime prepare --install-deps` installed the stack, wrote CDI 0.6.0,
   built the image; `check --boot` passed (GB10 seen, internet, host/router/LAN blocked). The
   renter login was proven on 2457 with the same image recipe, not yet on the Spark.
+
+# v0.2.5: GNOME Shell's gjs helpers are the desktop, not the host's use
+
+Built on v0.2.4 (main 29faf93). Found on the first DGX Spark in container mode: with someone
+logged in, `host_busy` named `gjs-console` -- GNOME Shell's desktop-icons extension (DING),
+a gjs process that draws on the GPU for as long as the session runs. As host use it would
+have held every rental back (up to its start_by) while the host was merely logged in, though
+it closes with the desktop like the rest of GNOME. v0.2.3's item 1 named the desktop's
+infrastructure by name (`desktopPrefixes`, with `gsd-*` and `xdg-desktop-portal*`); gjs
+cannot be added by name alone, since `gjs` also runs a host's own scripts. So a `gjs` /
+`gjs-console` process is the desktop only when an argument of its command line is a script
+under a `/share/gnome-shell/` directory (GNOME Shell's own, or an extension's, system-wide or
+in the user's `~/.local/share`); any other gjs program stays the host's use. Nothing else
+changes. Test: `TestGNOMEShellScriptsAreTheDesktop` (DING is the desktop on a Spark, a
+host's own gjs script is host use, and on a workstation DING is the desktop that does not
+close).

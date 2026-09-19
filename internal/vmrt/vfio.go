@@ -290,6 +290,28 @@ func IsDesktopProcess(name string) bool {
 	return false
 }
 
+// gnomeShellScript reports whether a process is one of GNOME Shell's own
+// JavaScript helpers: gjs running a script that ships with GNOME Shell or one
+// of its extensions -- the desktop icons (DING), notifications, the screen
+// saver. They draw on the GPU for as long as someone is logged in and close
+// with the desktop, so they are its infrastructure. A gjs program the host
+// runs from anywhere else stays the host's own use.
+func gnomeShellScript(h Host, pid, name string) bool {
+	if name != "gjs" && name != "gjs-console" {
+		return false
+	}
+	data, err := h.ReadFile("/proc/" + pid + "/cmdline")
+	if err != nil {
+		return false
+	}
+	for _, arg := range strings.Split(string(data), "\x00") {
+		if strings.Contains(arg, "/share/gnome-shell/") {
+			return true
+		}
+	}
+	return false
+}
+
 // transientTools are NVIDIA's short-lived command-line tools. Each opens the
 // GPU's device files for a moment and exits -- a monitoring script's
 // nvidia-smi, a support bundle -- so one seen holding the GPU is waited for,
@@ -450,7 +472,7 @@ func readGPUHolders(h Host, gpus []string) gpuHolders {
 		// Short-lived tools before the session: an nvidia-smi the login
 		// screen's user runs is waited for, not taken for the desktop.
 		switch {
-		case IsDesktopProcess(name):
+		case IsDesktopProcess(name) || gnomeShellScript(h, pid, name):
 			g.desktop = append(g.desktop, who)
 		case IsTransientTool(name) || isAgentChild(h, pid):
 			g.transient = append(g.transient, who)
