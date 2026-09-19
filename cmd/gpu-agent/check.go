@@ -38,16 +38,22 @@ func printCapability(c control.Capability) {
 		if i > 0 {
 			label = ""
 		}
-		detail := g.PCIID
+		var detail []string
+		if g.PCIID != "" {
+			detail = append(detail, g.PCIID)
+		}
 		if g.MemoryMB > 0 {
-			detail += fmt.Sprintf(", %d MB", g.MemoryMB)
+			detail = append(detail, fmt.Sprintf("%d MB", g.MemoryMB))
 		}
-		if g.Driver != "" {
-			detail += ", driver " + g.Driver + " in the VM"
-		} else {
-			detail += ", no driver in the VM"
+		switch {
+		case c.Kind == provisioner.KindContainer:
+			detail = append(detail, "the host's driver, shared into the container")
+		case g.Driver != "":
+			detail = append(detail, "driver "+g.Driver+" in the VM")
+		default:
+			detail = append(detail, "no driver in the VM")
 		}
-		fmt.Printf("%-14s%s (%s)\n", label, g.Model, detail)
+		fmt.Printf("%-14s%s (%s)\n", label, g.Model, strings.Join(detail, ", "))
 	}
 	if c.GPUCount != nil && *c.GPUCount == 0 {
 		fmt.Println("GPU:          none — a rental on this machine gets its CPUs, memory and disk")
@@ -174,7 +180,11 @@ func runCheck(svc service.Service, args []string) {
 	printSetup()
 
 	fmt.Println()
-	fmt.Println("While rented, the tenant runs in a microVM attached only to the " + netguard.Bridge +
+	tenant := "a microVM"
+	if c.Kind == provisioner.KindContainer {
+		tenant = "a hardened container"
+	}
+	fmt.Println("While rented, the tenant runs in " + tenant + " attached only to the " + netguard.Bridge +
 		" bridge, behind one nftables table (inet " + netguard.Table + ") that the agent loads and reads back before booting anything. It blocks:")
 	fmt.Println("  - every private and special range: 10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, 127/8, multicast, fc00::/7, fe80::/10")
 	fmt.Println("  - every network configured on this machine, whatever its addressing (your LAN, your NAS)")

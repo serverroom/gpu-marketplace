@@ -125,8 +125,12 @@ func containerReasons(h vmrt.Host, spec vmrt.Spec, version string) []Finding {
 	if len(vmrt.CDIDeviceRefs(h)) == 0 {
 		add(ReasonHuman, "nvidia-smi does not list a usable GPU, so none can be shared into a container")
 	}
-	if problem := vmrt.ContainerImageProblem(h); problem != "" {
-		add(ReasonImage, "%s", problem)
+	// Without podman the tools finding above already says so; the image is
+	// only worth naming once podman is there to build it.
+	if _, err := h.LookPath("podman"); err == nil {
+		if problem := vmrt.ContainerImageProblem(h); problem != "" {
+			add(ReasonImage, "%s", problem)
+		}
 	}
 	// The same memory, CPU and disk floors a rental needs either way.
 	if spec.GuestMemoryMB() == 0 {

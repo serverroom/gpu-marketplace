@@ -640,3 +640,62 @@ cancelled), control (202 body, /status shapes, teardown cancel, pair start_by), 
 (first test without the GPU, retest when free, failed GPU test retried only with the GPU
 after 6 h, Keep running a test the setup will not, setup off as a problem), hostctl,
 status lines. Not run on hardware.
+
+# v0.2.4: a DGX Spark is rented as a hardened container (owner decision, 2026-09-19)
+
+Built on origin/main e94f377, tagged and released as **v0.2.3**, so this is v0.2.4. The GB10
+cannot be passed through over VFIO on any DGX OS kernel so far: its IOMMU group asks for a
+1:1 (RMR) mapping, generic `vfio-pci` refuses it, and the signed `nvgrace-gpu-vfio-pci` lacks
+its id (10de:2e12) -- still true on 7.0.0-1019-nvidia. A patched module cannot be loaded
+under Secure Boot without enrolling a MOK, which a Spark's firmware makes impractical; the
+id was asked for upstream on NVIDIA's DGX Spark forum. The owner chose a hardened container
+as the interim, until NVIDIA ships it. Design notes: `internal/vmrt/CONTAINER-DESIGN.md`.
+
+## Decisions
+
+1. **Rootful podman with `--userns=auto`, not rootless (owner's choice):** rootless podman
+   cannot join the host's bridge, so it could not sit behind the same fence. Container root
+   is an unprivileged host uid; `--userns=auto:size=65536`, because the default 1024-id map
+   leaves sshd's privsep gid 65534 unmapped (`setgroups: Invalid argument`, connection reset).
+2. **Container mode is a fallback only (owner's choice):** chosen when every rented GPU is
+   NVIDIA, its IOMMU group has a `direct`/`direct-relaxable` reserved region, and the
+   installed nvgrace does not list its id. A VFIO-capable machine stays a microVM host;
+   `GPU_AGENT_FORCE_CONTAINER=1` forces container mode, for testing only. Kind `container-nv`,
+   vendor `VendorContainerNV`; ServCast needs no change (nothing branches on the kind).
+3. **Reused from the microVM:** the fence, the bridge and `GuestIP` (so the renter's forward
+   is unchanged), the dm-crypt volume (as the renter's home, mounted `idmap`), fail-closed
+   teardown, the GPU verifier (read-only `nvidia-smi`; the container path never unbinds or
+   resets a GPU).
+4. **Hardening:** `--cap-drop=ALL` plus only CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID,
+   KILL, NET_BIND_SERVICE, SYS_CHROOT (sshd's needs); `no-new-privileges`; `--network=none`
+   then a veth into the bridge; `--pids-limit 4096`; memory and CPUs as a rental's. **Not
+   read-only:** `--read-only` breaks the NVIDIA CDI hook's driver injection.
+5. **CDI normalized to 0.6.0:** podman 4.9.3 (Ubuntu 24.04) rejects nvidia-ctk 1.20's 0.7.0
+   spec on its `additionalGids` field; the agent strips the field and pins `cdiVersion`.
+6. **The container test boot runs beside the desktop:** the container shares the GPU, so
+   the test never closes a Spark's desktop; only a rental does (the microVM path's rules,
+   the 15-minute warning and the wait for the host's own programs apply unchanged -- they
+   read `RuntimeSpec()`, which covers both runtimes).
+7. **No linked pairs in container mode:** a pair needs VMs; `check --boot --pair` says so.
+
+## What this does not give (said plainly)
+
+The renter shares the host's kernel and GPU driver: isolation is a hardened container's,
+not a VM's. A kernel or driver exploit from inside reaches the host, which VFIO would have
+contained. That is the owner's accepted trade until the signed nvgrace carries the GB10.
+
+## Checked
+
+- Unit tests: start order and hardening flags, teardown wipe and GPU verification, the
+  test evaluation, detection (RMR + nvgrace both ways), the desktop rule for a test boot vs
+  a rental, host use and the desktop warning on a container Spark.
+- SID 2457 (x86, CMP 170HX, forced container mode): `runtime prepare`, `check --boot`
+  passed; the automatic setup prepared a reset host to ready; a renter logged in as
+  `renter`, saw the GPU, wrote their home, had no sudo.
+- SID 2457 in microVM mode with the v0.2.4 build: `check --boot` passed (the GPU handed
+  over, internet, host/LAN blocked, clean teardown) -- the shared disk, network and
+  autosetup changes did not move the microVM path.
+- A real DGX Spark (arm64, DGX OS kernel 7.0.0-1019-nvidia, Secure Boot on): container mode
+  found by itself; `runtime prepare --install-deps` installed the stack, wrote CDI 0.6.0,
+  built the image; `check --boot` passed (GB10 seen, internet, host/router/LAN blocked). The
+  renter login was proven on 2457 with the same image recipe, not yet on the Spark.

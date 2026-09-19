@@ -271,6 +271,34 @@ desktop as before. The control panel says so while a test runs. A Spark made hea
 (`runtime prepare --headless`) is left headless. The capability the agent reports carries
 the raw DMI strings (`identity`) so the match can be checked.
 
+## DGX Spark: rented as a hardened container (v0.2.4)
+
+A microVM needs its GPU passed through over VFIO, and the GB10 cannot be yet: its IOMMU
+group asks for a 1:1 mapping, which the kernel's generic `vfio-pci` refuses, and the signed
+`nvgrace-gpu-vfio-pci` that handles such GPUs does not carry the GB10's id (10de:2e12) in
+any DGX OS kernel so far (checked up to 7.0.0-1019-nvidia). Until it does, a machine whose
+NVIDIA GPUs all have no VFIO path is rented as a **hardened container** instead. The agent
+finds this by itself; there is nothing to set. What a rental gets stays the same:
+
+- rootful podman with a user-namespace remap (`--userns=auto`): root in the container is an
+  unprivileged uid on the host; every capability dropped except the few sshd needs,
+  `no-new-privileges`, no host network, a process limit, the rental's memory and CPUs;
+- the GPU shared in over CDI (the NVIDIA Container Toolkit) with the host's own driver; the
+  renter installs the CUDA userspace they want;
+- the same fence (the `gpurent0` bridge and the `inet gpu_rental` table), the same address
+  for the renter's SSH, an encrypted home (`/home/renter`) whose key dies with the rental,
+  and a teardown that fails closed;
+- the renter logs in as `renter`, without sudo.
+
+`sudo gpu-agent runtime prepare --install-deps` (or the automatic setup) installs podman and
+the container toolkit, writes the CDI spec, adds the user-namespace id ranges and builds the
+rental image; `sudo gpu-agent check --boot` runs the container test boot. The container
+shares the GPU, so **a container test boot runs beside the desktop** and never closes it; a
+rental closes it as above, with the 15-minute warning, and waits for your own programs on
+the GPU first, as on any Spark. A linked pair needs microVMs, so a Spark in container mode
+cannot be half of a pair. When the signed nvgrace carries the GB10, the agent goes back to
+microVMs by itself.
+
 ## Using your machine while it is listed
 
 From v0.2.3 you keep using your machine until it is rented. Your own programs on the GPU
