@@ -128,29 +128,51 @@ func removableMedia(h vmrt.Host, source string) string {
 	return ""
 }
 
-// storageProblems are the reasons the rentals' disks cannot go where they
-// would: on removable media, or where there is not room -- then naming the
-// biggest fixed filesystem that has room, with the command that moves them.
-func storageProblems(h vmrt.Host, storage string, diskGB int) []string {
-	var problems []string
+// usbDisk reports whether source is on a disk attached over USB: a drive the
+// host plugged in (a backup disk, say), which the agent never picks by itself.
+func usbDisk(h vmrt.Host, source string) bool {
+	if !strings.HasPrefix(source, "/dev/") {
+		return false
+	}
+	link, err := h.Readlink("/sys/block/" + diskOf(source))
+	return err == nil && strings.Contains(link, "/usb")
+}
+
+// storageFindings are the reasons the rentals' disks cannot go where they
+// would: on removable media, or where there is not room. When there is not
+// room where the agent keeps them by default (chosen false: no `setup
+// --data-dir`) and a fixed internal disk -- NVMe, SATA, eMMC, never USB --
+// has room, the finding is the setup's to fix (ReasonStorage, with the
+// directory it moves them to): a board with a small system partition and a
+// big data one hosts with nothing typed. A place the host chose is never
+// overruled, and a USB drive is only ever named, with the command.
+func storageFindings(h vmrt.Host, storage string, diskGB int, chosen bool) []Finding {
+	var findings []Finding
 	here := mounts(h, existingParent(h, storage))
 	if len(here) == 1 {
 		if media := removableMedia(h, here[0].source); media != "" {
-			problems = append(problems, fmt.Sprintf("the rentals' disks would go on %s (%s holds %s): a rental's disk never goes on removable media; "+
-				"put the agent's data on eMMC, NVMe or SATA storage with 'sudo gpu-agent setup --data-dir <directory on that disk>'", media, here[0].source, storage))
+			findings = append(findings, Finding{Kind: ReasonHuman, Text: fmt.Sprintf("the rentals' disks would go on %s (%s holds %s): a rental's disk never goes on removable media; "+
+				"put the agent's data on eMMC, NVMe or SATA storage with 'sudo gpu-agent setup --data-dir <directory on that disk>'", media, here[0].source, storage)})
 		}
 	}
 	if diskGB >= 20 {
-		return problems
+		return findings
 	}
 	msg := fmt.Sprintf("there is not 20 GB free for a rental's disk under %s after the 20 GB the machine keeps for itself", storage)
-	if best, ok := biggestFit(h, here); ok {
+	best, ok := biggestFit(h, here)
+	switch {
+	case ok && !chosen && !usbDisk(h, best.source):
+		dir := path.Join(best.target, "gpu-agent")
+		return append(findings, Finding{Kind: ReasonStorage, Dir: dir, Text: msg + fmt.Sprintf(
+			"; %s has %d GB free, so the automatic setup keeps the rentals' disks in %s ('sudo gpu-agent setup' does it now; 'sudo gpu-agent setup --data-dir <directory>' puts them elsewhere)",
+			best.target, best.availGB, dir)})
+	case ok:
 		msg += fmt.Sprintf("; %s has %d GB free: 'sudo gpu-agent setup --data-dir %s' puts the rentals' disks there",
 			best.target, best.availGB, path.Join(best.target, "gpu-agent"))
-	} else {
+	default:
 		msg += "; add a disk (NVMe, SATA or a USB drive -- not an SD card) with at least 40 GB free and run 'sudo gpu-agent setup --data-dir <its mount point>/gpu-agent'"
 	}
-	return append(problems, msg)
+	return append(findings, Finding{Kind: ReasonHuman, Text: msg})
 }
 
 // biggestFit is the mounted fixed filesystem with the most room, if it has

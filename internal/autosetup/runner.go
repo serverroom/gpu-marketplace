@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
@@ -31,8 +32,42 @@ type Runner struct {
 	// the GPU while the host's programs hold it, in a smaller VM while the
 	// host uses the memory).
 	InstallDeps func(ctx context.Context) error
+	MoveStorage func(dir string) error
 	BuildImage  func(ctx context.Context, spec vmrt.Spec, drv vmrt.DriverChoice) error
 	TestBoot    func(ctx context.Context, rt *vmrt.Runtime, o vmrt.TestOptions) vmrt.SelfTestResult
+}
+
+// moveStorage puts the rentals' disks (and the base image, if built) on the
+// disk preflight found with room, and records it as `setup --data-dir` would:
+// the rest of the setup, and every rental after, uses it.
+func (r *Runner) moveStorage() error {
+	var dir string
+	for _, f := range r.Detect().Findings() {
+		if f.Kind == provisioner.ReasonStorage {
+			dir = f.Dir
+		}
+	}
+	if dir == "" {
+		return nil // the disks fit where they are now
+	}
+	if r.MoveStorage != nil {
+		return r.MoveStorage(dir)
+	}
+	target, err := provisioner.StorageTarget(r.Host, dir)
+	if err != nil {
+		return err
+	}
+	from := provisioner.StorageDir(r.DataDir)
+	if err := provisioner.MoveStorage(r.Host, from, target); err != nil {
+		return err
+	}
+	if err := config.SetStorageDir(target); err != nil {
+		return fmt.Errorf("could not record %s as where the rentals' disks go: %w", target, err)
+	}
+	if r.Log != nil {
+		r.Log("the rentals' disks and the base image now live in %s", target)
+	}
+	return nil
 }
 
 // testBoot runs one test boot as o says.
@@ -148,6 +183,9 @@ func (r *Runner) Run(ctx context.Context, a Attempt) (out Attempt) {
 }
 
 func (r *Runner) step(ctx context.Context, s Step, a Attempt) error {
+	if s == StepStorage {
+		return r.moveStorage()
+	}
 	if r.Detect().IsContainer() {
 		return r.containerStep(ctx, s, a)
 	}

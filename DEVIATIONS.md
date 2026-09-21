@@ -715,3 +715,30 @@ in the user's `~/.local/share`); any other gjs program stays the host's use. Not
 changes. Test: `TestGNOMEShellScriptsAreTheDesktop` (DING is the desktop on a Spark, a
 host's own gjs script is host use, and on a workstation DING is the desktop that does not
 close).
+
+# v0.2.6: the setup puts the rentals' disks on a disk with room by itself
+
+Built on v0.2.5 (main f1a8227). Found on a host whose machines have 500 GB in a strange
+layout: `/var/lib/gpu-agent` on a 7 GB system partition (1 GB free) and the big partition
+mounted elsewhere. Every version since v0.2.0 found the big partition and named it with
+`sudo gpu-agent setup --data-dir <dir>`, but left it to a person, so the automatic setup
+stopped at "there is not 20 GB free". The owner's call: the agent should do it.
+
+1. **A new finding kind, `ReasonStorage`,** with the directory (`Finding.Dir`): the rentals'
+   disks do not fit where the agent keeps them by default, and the biggest mounted fixed
+   filesystem with 40 GB free (the same `biggestFit` as before: not tmpfs/vfat/overlay,
+   not `/boot`, not removable, not where they are now) is an internal disk.
+2. **The setup's first step, `storage`,** runs what `setup --data-dir` runs:
+   `StorageTarget` (re-checks 40 GB free and fixed storage), `MoveStorage` (the base image
+   and cloud image move with it), `config.SetStorageDir`. Then the image is built there.
+3. **Never overruled, never a USB drive:** a place the host chose with `--data-dir` that
+   runs out of room stays a person's finding (so the agent never moves the disks back and
+   forth), and a disk attached over USB (`/sys/block/<disk>` resolves through `/usb`) --
+   a backup drive the host plugged in -- is only named, with the command, as before.
+   Removable media and SD cards were already never picked.
+4. **The same in container mode** (`containerReasons` uses the same findings).
+
+Tests: the finding and the plan (storage first, nothing for a person) and the step handing
+the right directory to the move, on a 1 GB root beside a 460 GB SATA `/data`; a USB `/data`
+is only named; a place the host chose is not moved; `PlanFor` orders storage before the
+image. The move itself is the code `setup --data-dir` has run since v0.2.0.

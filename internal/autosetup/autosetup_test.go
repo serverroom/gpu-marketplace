@@ -720,12 +720,13 @@ func TestPlanFor(t *testing.T) {
 		steps    string
 		human    int
 	}{
-		"ready":           {nil, true, "", 0},
-		"tools":           {[]provisioner.Finding{f(provisioner.ReasonTools)}, true, "deps,test-boot", 0},
-		"tools, no apt":   {[]provisioner.Finding{f(provisioner.ReasonTools)}, false, "", 1},
-		"image and tools": {[]provisioner.Finding{f(provisioner.ReasonImage), f(provisioner.ReasonTools)}, true, "deps,image,test-boot", 0},
-		"human and image": {[]provisioner.Finding{f(provisioner.ReasonHuman), f(provisioner.ReasonImage)}, true, "image,test-boot", 1},
-		"test boot":       {[]provisioner.Finding{f(provisioner.ReasonTestBoot)}, true, "test-boot", 0},
+		"ready":             {nil, true, "", 0},
+		"tools":             {[]provisioner.Finding{f(provisioner.ReasonTools)}, true, "deps,test-boot", 0},
+		"tools, no apt":     {[]provisioner.Finding{f(provisioner.ReasonTools)}, false, "", 1},
+		"image and tools":   {[]provisioner.Finding{f(provisioner.ReasonImage), f(provisioner.ReasonTools)}, true, "deps,image,test-boot", 0},
+		"human and image":   {[]provisioner.Finding{f(provisioner.ReasonHuman), f(provisioner.ReasonImage)}, true, "image,test-boot", 1},
+		"test boot":         {[]provisioner.Finding{f(provisioner.ReasonTestBoot)}, true, "test-boot", 0},
+		"storage and image": {[]provisioner.Finding{f(provisioner.ReasonImage), f(provisioner.ReasonStorage)}, true, "storage,image,test-boot", 0},
 	} {
 		p := PlanFor(c.findings, c.apt)
 		var steps []string

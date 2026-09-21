@@ -50,12 +50,18 @@ const (
 	ReasonImage ReasonKind = "image"
 	// ReasonTestBoot: no passing test boot for this agent version and GPUs.
 	ReasonTestBoot ReasonKind = "test-boot"
+	// ReasonStorage: the rentals' disks do not fit where the agent keeps them
+	// by default, and a fixed internal disk has room: the setup moves them
+	// there (Finding.Dir).
+	ReasonStorage ReasonKind = "storage"
 )
 
 // Finding is one reason with its kind.
 type Finding struct {
 	Kind ReasonKind
 	Text string
+	// Dir is where a ReasonStorage finding's setup puts the rentals' disks.
+	Dir string
 }
 
 // HostReport is what preflight found: the GPUs a rental would get, and every
@@ -229,8 +235,9 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	if n := spec.GuestCPUs(); n < 2 {
 		add("a rental on this machine would get %d CPU (what the machine keeps for itself taken off), and a rental needs at least 2", n)
 	}
-	for _, problem := range storageProblems(h, spec.Storage(), spec.DiskGB) {
-		add("%s", problem)
+	for _, f := range storageFindings(h, spec.Storage(), spec.DiskGB, spec.StorageDir != "") {
+		rep.Reasons = append(rep.Reasons, f.Text)
+		rep.Findings = append(rep.Findings, f)
 	}
 
 	// A test boot proves what the checks above cannot: that this GPU really

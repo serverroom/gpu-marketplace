@@ -153,7 +153,7 @@ func TestAnRK3588SaysWhatItLacks(t *testing.T) {
 				"tmpfs /run tmpfs 2G\n/dev/mmcblk0p1 /boot vfat 1G\n/dev/nvme0n1p1 /mnt/nvme ext4 900G\n/dev/sda1 /media/stick ext4 60G\n"
 			h.Files["/sys/block/mmcblk0/device/type"] = []byte("MMC\n")
 			h.Files["/sys/block/sda/removable"] = []byte("1\n")
-		}, "not 20 GB free for a rental's disk under /var/lib/gpu-agent after the 20 GB the machine keeps for itself; /mnt/nvme has 900 GB free: 'sudo gpu-agent setup --data-dir /mnt/nvme/gpu-agent'"},
+		}, "not 20 GB free for a rental's disk under /var/lib/gpu-agent after the 20 GB the machine keeps for itself; /mnt/nvme has 900 GB free, so the automatic setup keeps the rentals' disks in /mnt/nvme/gpu-agent"},
 		"a small eMMC and nothing else": {func(h *fakehost.Host) { h.Outputs["df --output=avail"] = " Avail\n  5G\n" },
 			"add a disk (NVMe, SATA or a USB drive -- not an SD card)"},
 		"a non-apt system": {func(h *fakehost.Host) {
@@ -227,6 +227,28 @@ func TestMoveStorageTakesTheImagesAlong(t *testing.T) {
 	for _, item := range []string{"golden.img", "golden.img.json", "images"} {
 		if !h.Ran("run mv /var/lib/gpu-agent/" + item + " /mnt/nvme/gpu-agent/" + item) {
 			t.Errorf("%s not moved: %v", item, h.Calls)
+		}
+	}
+}
+
+// A place the host chose with `setup --data-dir` is never overruled: when it
+// runs out of room the host is told, with the command, and the setup waits.
+func TestStorageTheHostChoseIsNotMoved(t *testing.T) {
+	h := fakehost.New()
+	h.Files["/srv/gpu-agent"] = nil
+	h.Outputs["df -B1G --output=source,target,fstype,avail /srv/gpu-agent"] = "Filesystem Mounted on Type Avail\n/dev/sda2 /srv ext4 5G\n"
+	h.Outputs["df -B1G --output=source,target,fstype,avail"] = "Filesystem Mounted on Type Avail\n/dev/sda2 /srv ext4 5G\n/dev/nvme0n1p1 /data ext4 900G\n"
+	for _, chosen := range []bool{true, false} {
+		fs := storageFindings(h, "/srv/gpu-agent", 5, chosen)
+		if len(fs) != 1 {
+			t.Fatalf("chosen=%v: findings %+v", chosen, fs)
+		}
+		want := ReasonStorage
+		if chosen {
+			want = ReasonHuman
+		}
+		if fs[0].Kind != want {
+			t.Errorf("chosen=%v: kind %s, want %s (%s)", chosen, fs[0].Kind, want, fs[0].Text)
 		}
 	}
 }

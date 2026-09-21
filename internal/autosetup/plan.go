@@ -17,18 +17,22 @@ import (
 type Step string
 
 const (
+	StepStorage  Step = "storage"
 	StepDeps     Step = "deps"
 	StepImage    Step = "image"
 	StepTestBoot Step = "test-boot"
 )
 
-// order is the order steps run in: packages, then the image built with them,
-// then the proof that the machine can host.
-var order = []Step{StepDeps, StepImage, StepTestBoot}
+// order is the order steps run in: the rentals' disks moved to a disk with
+// room (so the image is built there), packages, then the image built with
+// them, then the proof that the machine can host.
+var order = []Step{StepStorage, StepDeps, StepImage, StepTestBoot}
 
 // Doing is the step in words, as the host reads it in the panel.
 func (s Step) Doing() string {
 	switch s {
+	case StepStorage:
+		return "moving the rentals' disks to a disk with room"
 	case StepDeps:
 		return "installing the rental runtime (QEMU, UEFI firmware, cloud-image-utils, cryptsetup, nftables)"
 	case StepImage:
@@ -42,6 +46,8 @@ func (s Step) Doing() string {
 // Takes is how long the step usually takes.
 func (s Step) Takes() string {
 	switch s {
+	case StepStorage:
+		return "a minute"
 	case StepDeps:
 		return "a few minutes"
 	case StepImage:
@@ -72,6 +78,8 @@ func PlanFor(findings []provisioner.Finding, aptGet bool) Plan {
 	need := map[Step]bool{}
 	for _, f := range findings {
 		switch {
+		case f.Kind == provisioner.ReasonStorage:
+			need[StepStorage] = true
 		case f.Kind == provisioner.ReasonTools && aptGet:
 			need[StepDeps] = true
 		case f.Kind == provisioner.ReasonImage:

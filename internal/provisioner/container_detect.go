@@ -139,9 +139,7 @@ func containerReasons(h vmrt.Host, spec vmrt.Spec, version string) []Finding {
 	if n := spec.GuestCPUs(); n < 2 {
 		add(ReasonHuman, "a rental on this machine would get %d CPU, and a rental needs at least 2", n)
 	}
-	for _, problem := range storageProblems(h, spec.Storage(), spec.DiskGB) {
-		add(ReasonHuman, "%s", problem)
-	}
+	findings = append(findings, storageFindings(h, spec.Storage(), spec.DiskGB, spec.StorageDir != "")...)
 	// The container test boot proves the GPU works in the container and the
 	// fence holds -- only once the checks above pass.
 	if len(findings) == 0 {
