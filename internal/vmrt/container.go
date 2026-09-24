@@ -160,8 +160,17 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 	if err = rt.h.WriteFile(akFile, []byte(pubkey+"\n"), 0644); err != nil {
 		return fmt.Errorf("write renter key: %w", err)
 	}
+	// Public resolvers: the container starts with --network=none (its veth is
+	// wired in after), and the host's own resolver (systemd-resolved, a WSL or
+	// VM NAT gateway) sits in a range the fence blocks. A resolv.conf of public
+	// servers, bind-mounted read-only, is the tenant's DNS. (--dns cannot be
+	// used here: podman rejects it together with --network=none.)
+	resolv := r.Dir + "/resolv.conf"
+	if err = rt.h.WriteFile(resolv, []byte("nameserver 1.1.1.1\nnameserver 8.8.8.8\n"), 0644); err != nil {
+		return fmt.Errorf("write resolv.conf: %w", err)
+	}
 
-	if err = rt.h.Run("podman", rt.runArgs(name, akFile, st.VolumeMount, o)...); err != nil {
+	if err = rt.h.Run("podman", rt.runArgs(name, akFile, st.VolumeMount, resolv, o)...); err != nil {
 		return fmt.Errorf("start container: %w", err)
 	}
 	st.ContainerID = name
@@ -188,7 +197,7 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 // much as what is there: no host bind-mounts, no host network, no added
 // capabilities, no privilege. userns=auto remaps container-root off host-root;
 // the GPU is shared read-only over CDI, never --privileged and never all GPUs.
-func (rt *ContainerRuntime) runArgs(name, akFile, volume string, o StartOptions) []string {
+func (rt *ContainerRuntime) runArgs(name, akFile, volume, resolv string, o StartOptions) []string {
 	args := []string{
 		"run", "--detach", "--name", name,
 		// size=65536 maps the full 0..65535 id range into the user namespace.
@@ -211,15 +220,15 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume string, o StartOptions)
 		"--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=KILL",
 		"--cap-add=NET_BIND_SERVICE", "--cap-add=SYS_CHROOT",
 		"--network=none",
-		// Public resolvers: the host's own (a LAN router, systemd-resolved, WSL's
-		// NAT gateway) sit in ranges the fence blocks, so a copy of its
-		// resolv.conf would leave the renter without DNS.
-		"--dns", "1.1.1.1", "--dns", "8.8.8.8",
 		"--pids-limit", "4096",
 		"--stop-timeout", "30",
 		// The renter's key, read-only; the image's entrypoint installs it for
 		// user 'renter' and starts sshd.
 		"--mount", "type=bind,src=" + akFile + ",dst=/run/renter/authorized_keys,ro",
+		// Public DNS, read-only: the container starts with --network=none, and
+		// the host's own resolver sits in a fenced range, so the tenant gets a
+		// resolv.conf of public servers instead of the host's.
+		"--mount", "type=bind,src=" + resolv + ",dst=/etc/resolv.conf,ro",
 		// The encrypted writable space as the renter's home. idmap remaps the
 		// host-root-owned volume into the container's user namespace, so the
 		// container can create and own the renter's files on it (without idmap
