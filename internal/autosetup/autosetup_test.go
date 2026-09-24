@@ -716,20 +716,26 @@ func TestPlanFor(t *testing.T) {
 		return provisioner.Finding{Kind: kind, Text: string(kind)}
 	}
 	for name, c := range map[string]struct {
-		findings []provisioner.Finding
-		apt      bool
-		steps    string
-		human    int
+		findings    []provisioner.Finding
+		apt         bool
+		selfInstall bool
+		steps       string
+		human       int
 	}{
-		"ready":             {nil, true, "", 0},
-		"tools":             {[]provisioner.Finding{f(provisioner.ReasonTools)}, true, "deps,test-boot", 0},
-		"tools, no apt":     {[]provisioner.Finding{f(provisioner.ReasonTools)}, false, "", 1},
-		"image and tools":   {[]provisioner.Finding{f(provisioner.ReasonImage), f(provisioner.ReasonTools)}, true, "deps,image,test-boot", 0},
-		"human and image":   {[]provisioner.Finding{f(provisioner.ReasonHuman), f(provisioner.ReasonImage)}, true, "image,test-boot", 1},
-		"test boot":         {[]provisioner.Finding{f(provisioner.ReasonTestBoot)}, true, "test-boot", 0},
-		"storage and image": {[]provisioner.Finding{f(provisioner.ReasonImage), f(provisioner.ReasonStorage)}, true, "storage,image,test-boot", 0},
+		"ready":             {nil, true, false, "", 0},
+		"tools":             {[]provisioner.Finding{f(provisioner.ReasonTools)}, true, false, "deps,test-boot", 0},
+		"tools, no apt":     {[]provisioner.Finding{f(provisioner.ReasonTools)}, false, false, "", 1},
+		"image and tools":   {[]provisioner.Finding{f(provisioner.ReasonImage), f(provisioner.ReasonTools)}, true, false, "deps,image,test-boot", 0},
+		"human and image":   {[]provisioner.Finding{f(provisioner.ReasonHuman), f(provisioner.ReasonImage)}, true, false, "image,test-boot", 1},
+		"test boot":         {[]provisioner.Finding{f(provisioner.ReasonTestBoot)}, true, false, "test-boot", 0},
+		"storage and image": {[]provisioner.Finding{f(provisioner.ReasonImage), f(provisioner.ReasonStorage)}, true, false, "storage,image,test-boot", 0},
+		// A self-installing machine (Windows/macOS) whose deps step builds its
+		// whole Linux environment gets the image step alongside deps, though the
+		// preflight could not yet see into that environment to find it missing.
+		"self-install tools only":         {[]provisioner.Finding{f(provisioner.ReasonTools)}, true, true, "deps,image,test-boot", 0},
+		"self-install but no deps needed": {[]provisioner.Finding{f(provisioner.ReasonTestBoot)}, true, true, "test-boot", 0},
 	} {
-		p := PlanFor(c.findings, c.apt)
+		p := PlanFor(c.findings, c.apt, c.selfInstall)
 		var steps []string
 		for _, s := range p.Steps {
 			steps = append(steps, string(s))

@@ -40,7 +40,7 @@ func TestSetupMovesTheRentalsToADiskWithRoom(t *testing.T) {
 	if dir != "/data/gpu-agent" {
 		t.Fatalf("storage finding dir = %q, want /data/gpu-agent", dir)
 	}
-	plan := PlanFor(detect().Findings(), true)
+	plan := PlanFor(detect().Findings(), true, false)
 	if !plan.Eligible() || len(plan.Steps) == 0 || plan.Steps[0] != StepStorage {
 		t.Fatalf("plan = %+v, want the storage move first and nothing for a person", plan)
 	}
@@ -67,7 +67,7 @@ func TestSetupNeverPicksAUSBDrive(t *testing.T) {
 			t.Fatalf("a USB drive was picked by itself: %+v", f)
 		}
 	}
-	plan := PlanFor(p.Findings(), true)
+	plan := PlanFor(p.Findings(), true, false)
 	if plan.Eligible() || !strings.Contains(strings.Join(plan.Human, " | "), "'sudo gpu-agent setup --data-dir /data/gpu-agent' puts the rentals' disks there") {
 		t.Errorf("plan = %+v, want the command named for a person", plan)
 	}

@@ -129,7 +129,7 @@ func runSetup(svc service.Service, args []string) {
 	if !ok || p.RentalPresent() {
 		exitf("a rental (or the leftover of one) is on this machine; the setup does not run beside it")
 	}
-	plan := autosetup.PlanFor(p.Findings(), autosetup.CanInstall(h, p))
+	plan := autosetup.PlanFor(p.Findings(), autosetup.CanInstall(h, p), p.SelfInstalls())
 	if len(plan.Human) > 0 {
 		fmt.Println("This machine needs a person before it can be set up:")
 		for _, r := range plan.Human {

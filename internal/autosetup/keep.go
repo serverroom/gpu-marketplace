@@ -73,7 +73,7 @@ func (d *Daemon) KeepOnce(ctx context.Context, justStarted bool) {
 	// Nothing owed, or nothing the agent can do: no need to look closer.
 	if c := d.Prov.Capability(); c.Ready && !c.RetestPending {
 		return
-	} else if !c.Ready && len(PlanFor(d.Prov.Findings(), CanInstall(d.Runner.Host, d.Prov)).Human) > 0 {
+	} else if !c.Ready && len(PlanFor(d.Prov.Findings(), CanInstall(d.Runner.Host, d.Prov), d.Prov.SelfInstalls()).Human) > 0 {
 		return
 	}
 	fresh := d.Runner.Detect()
@@ -88,7 +88,7 @@ func (d *Daemon) KeepOnce(ctx context.Context, justStarted bool) {
 		}
 		return
 	}
-	plan := PlanFor(fresh.Findings(), CanInstall(d.Runner.Host, fresh))
+	plan := PlanFor(fresh.Findings(), CanInstall(d.Runner.Host, fresh), fresh.SelfInstalls())
 	if len(plan.Human) > 0 || len(plan.Steps) == 0 {
 		return
 	}

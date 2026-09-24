@@ -545,7 +545,7 @@ func runRegister(svc service.Service, args []string) {
 		printCapability(capability)
 		return
 	}
-	plan := autosetup.PlanFor(p.Findings(), autosetup.CanInstall(vmrt.OSHost{}, p))
+	plan := autosetup.PlanFor(p.Findings(), autosetup.CanInstall(vmrt.OSHost{}, p), p.SelfInstalls())
 	if hostsRentals() && plan.Eligible() && autosetup.Enabled(config.ConfigDir()) {
 		fmt.Println("Hosting:      not ready yet -- the agent finishes the setup by itself, nothing to do:")
 		for i, s := range plan.Steps {

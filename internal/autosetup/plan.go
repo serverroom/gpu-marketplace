@@ -71,16 +71,23 @@ type Plan struct {
 func (p Plan) Eligible() bool { return len(p.Human) == 0 && len(p.Steps) > 0 }
 
 // PlanFor turns preflight's findings into steps. Missing packages are the
-// setup's to install only where apt-get is (aptGet); a finished setup is
-// always proven by a test boot, so any step brings the test boot with it.
-func PlanFor(findings []provisioner.Finding, aptGet bool) Plan {
+// setup's to install only where the agent can (install: apt-get on Linux, or a
+// machine that brings its own Linux -- Windows' WSL, macOS' VM); a finished
+// setup is always proven by a test boot, so any step brings the test boot.
+//
+// selfInstall couples the image to the deps: on a machine whose deps step
+// creates its whole Linux environment (Windows, macOS), the rental image
+// cannot be there yet, and the preflight cannot see into an environment that
+// does not exist to report it missing -- so the image step is planned
+// alongside the deps step instead of waited for on a later pass.
+func PlanFor(findings []provisioner.Finding, install, selfInstall bool) Plan {
 	var plan Plan
 	need := map[Step]bool{}
 	for _, f := range findings {
 		switch {
 		case f.Kind == provisioner.ReasonStorage:
 			need[StepStorage] = true
-		case f.Kind == provisioner.ReasonTools && aptGet:
+		case f.Kind == provisioner.ReasonTools && install:
 			need[StepDeps] = true
 		case f.Kind == provisioner.ReasonImage:
 			need[StepImage] = true
@@ -89,6 +96,9 @@ func PlanFor(findings []provisioner.Finding, aptGet bool) Plan {
 		default:
 			plan.Human = append(plan.Human, f.Text)
 		}
+	}
+	if need[StepDeps] && selfInstall {
+		need[StepImage] = true
 	}
 	if len(need) > 0 {
 		need[StepTestBoot] = true
