@@ -113,6 +113,23 @@ func TestExecHostFiles(t *testing.T) {
 	}
 }
 
+// A write to a /proc pseudo-file must not chmod (the kernel fixes its mode and
+// chmod would fail there); the script special-cases /proc and /sys.
+func TestExecHostWriteProcSkipsChmod(t *testing.T) {
+	var scripts []string
+	f := &fakeWSL{answer: func(argv []string) (string, int) {
+		scripts = append(scripts, strings.Join(argv, " "))
+		return "", 0
+	}}
+	h := ExecHost{Exec: f.exec}
+	if err := h.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(scripts, " ; "), "/proc/*|/sys/*") {
+		t.Errorf("write script does not special-case /proc: %v", scripts)
+	}
+}
+
 // A command that fails names itself and what it said.
 func TestExecHostFailures(t *testing.T) {
 	f := &fakeWSL{answer: func(argv []string) (string, int) { return "no such device", 1 }}

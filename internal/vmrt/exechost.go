@@ -143,7 +143,9 @@ func (w ExecHost) ReadTail(p string, max int64) ([]byte, error) {
 
 func (w ExecHost) WriteFile(p string, data []byte, perm os.FileMode) error {
 	p = lp(p)
-	_, code, err := w.sh(data, `cat > "$1" && chmod "$2" "$1"`, p, strconv.FormatUint(uint64(perm.Perm()), 8))
+	// chmod is skipped for /proc and /sys: their permissions are fixed by the
+	// kernel and chmod fails there, but writing "1" to ip_forward must succeed.
+	_, code, err := w.sh(data, `cat > "$1" || exit 1; case "$1" in /proc/*|/sys/*) : ;; *) chmod "$2" "$1" ;; esac`, p, strconv.FormatUint(uint64(perm.Perm()), 8))
 	if err == nil && code != 0 {
 		err = fmt.Errorf("exit status %d", code)
 	}
