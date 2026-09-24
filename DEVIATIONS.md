@@ -742,3 +742,67 @@ Tests: the finding and the plan (storage first, nothing for a person) and the st
 the right directory to the move, on a 1 GB root beside a 460 GB SATA `/data`; a USB `/data`
 is only named; a place the host chose is not moved; `PlanFor` orders storage before the
 image. The move itself is the code `setup --data-dir` has run since v0.2.0.
+
+# v0.3.0: Windows and macOS host rentals
+
+Built on v0.2.6 (main ff80021). Owner's ask: make the agent host on every Windows and every
+Mac, a container instead of a microVM where need be. Until now the agent installed, linked
+and tunnelled on Windows and macOS but never hosted ("rentals run inside a Linux KVM
+microVM"). Both now run the v0.2.4 hardened container, unchanged, inside a Linux
+environment the agent owns.
+
+## The one design
+1. **`vmrt.ExecHost`**: the runtime's `Host` over an exec callback into a Linux environment
+   (every argv passed NUL-joined in base64, so no shell or Windows quoting re-splits it;
+   paths are Linux paths). `ContainerRuntime`, the fence and the dm-crypt volumes run there
+   exactly as on a Linux host. Kinds: `container-wsl` (Windows), `container-vm` (macOS);
+   ServCast branches on neither.
+2. **Windows (internal/wsl)**: a WSL 2 distribution (Canonical's Ubuntu 24.04 WSL image,
+   SHA256SUMS-checked) under a local account of the agent's own, `gpu-agent-wsl`: hidden,
+   batch-logon only (interactive, RDP and network logon denied), password random and
+   DPAPI-sealed. Why an account: WSL cannot be driven as LocalSystem, but WSL 2.0+
+   (`%ProgramFiles%\WSL\wsl.exe`) can from session 0 as a normal user; WSL also runs one VM
+   per user, so the agent's VM is apart from the person's WSL and has its own `.wslconfig`
+   (memory, processors, NAT only, no localhost forwarding, no GUI). `/etc/wsl.conf`: no
+   drive automount, no interop, no Windows PATH. The setup turns on the Windows features,
+   installs WSL 2 from Microsoft's GitHub release (Authenticode-checked), asks for one
+   restart and never restarts by itself. GPU: NVIDIA only, via WSL's GPU paravirtualization
+   (CDI `nvidia.com/gpu=all`, driver 470+); otherwise CPU-only. A keep-alive session holds
+   the distribution up while a rental runs (WSL stops idle distributions).
+3. **macOS (internal/mac)**: a Linux VM under QEMU with Apple's Hypervisor.framework
+   (`-accel hvf`), Intel and Apple Silicon: Canonical's Ubuntu 24.04 cloud image
+   (SHA256SUMS-checked raw disk) under a sparse qcow2 overlay sized for a rental, a
+   cloud-init NoCloud seed made with hdiutil, UEFI on Apple Silicon, user-mode networking
+   with one loopback SSH forward (the guest never sits on the Mac's LAN). QEMU comes from
+   Homebrew, run as the Homebrew install's owner (brew refuses root); Homebrew itself is a
+   person's to install. No GPU: a Mac cannot pass its GPU to a guest.
+4. **Versions**: Windows 10 21H2+, 11, Server 2022/2025; macOS 12+. Older is told exactly what
+   to update. Windows 7/8/8.1/Server 2012 R2 and macOS 11 and older cannot run this agent
+   at all (Go 1.26's floor) and have no isolation that could hand a renter a machine.
+
+## Changes the Linux paths share
+- vmrt builds its paths with `path`, not `filepath` (identical on Linux; filepath made
+  backslash paths on Windows).
+- netguard loads its ruleset with `nft -f -` over stdin, not a host temp file.
+- The container gets public DNS from a bind-mounted resolv.conf (podman rejects `--dns`
+  with `--network=none`; the host's resolver sits in a fenced range) -- DGX Sparks too.
+- `PlanFor(..., selfInstall)`: where the deps step creates the whole Linux environment, the
+  image step is planned with it (the preflight cannot see into what does not exist yet).
+- `gpu-agent remove` now also stops a container rental's leftover (a gap on Sparks too),
+  and on Windows/macOS deletes the distribution/VM and the account.
+
+## Checked
+- Unit tests: ExecHost argv round-trip, missing files and no-distribution reads, /proc
+  writes, the hold; Windows and macOS detection (every version gate, restart pending, old
+  NVIDIA driver, full disk, missing WSL/QEMU/Homebrew, ready GPU and CPU-only machines);
+  the WSL and macOS config/seed/QEMU builders; PlanFor with selfInstall.
+- **Windows Server 2022 (SID 6326), as LocalSystem**: the setup turned on the features and
+  installed WSL 2, asked for the restart, then created the account and distribution,
+  installed the container stack and built the image; `check --boot` PASSED (internet
+  reached; WSL gateway and LAN, the Windows gateway and the Windows machine blocked);
+  `check` says ready; `remove` took it all off again.
+- **Not checked on hardware**: CUDA through WSL (no Windows machine with an NVIDIA GPU was
+  at hand); macOS (no Mac); `gpu-agent setup`/`check` run by an administrator by hand on
+  Windows (over WinRM that path did not reach the distribution; the service's does).
+- Known: Windows and macOS agents still do not update themselves (the installer updates
+  them); after a Mac restart the setup boots the VM again before the Mac reports ready.

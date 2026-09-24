@@ -14,10 +14,11 @@ var errNotMac = errors.New("VM hosting on this OS is macOS-only")
 
 // Options size the agent's VM.
 type Options struct {
-	Arch  string
-	MemMB int
-	CPUs  int
-	Log   func(format string, args ...interface{})
+	Arch   string
+	MemMB  int
+	CPUs   int
+	DiskGB int
+	Log    func(format string, args ...interface{})
 }
 
 func Facts() provisioner.MacFacts { return provisioner.MacFacts{Problem: errNotMac.Error()} }

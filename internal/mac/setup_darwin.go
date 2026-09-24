@@ -11,18 +11,21 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 // Options size the agent's VM.
 type Options struct {
-	Arch  string
-	MemMB int
-	CPUs  int
-	Log   func(format string, args ...interface{})
+	Arch   string
+	MemMB  int
+	CPUs   int
+	DiskGB int // a rental's disk, which lives inside the VM's
+	Log    func(format string, args ...interface{})
 }
 
 func (o Options) log(format string, a ...interface{}) {
@@ -54,6 +57,7 @@ func Setup(ctx context.Context, o Options) error {
 	if err := ensureDisk(ctx, p, o); err != nil {
 		return err
 	}
+	growDisk(ctx, p, o)
 	if err := ensureSeed(ctx, p); err != nil {
 		return err
 	}
@@ -75,8 +79,7 @@ func installQEMU(ctx context.Context, o Options) error {
 		return fmt.Errorf("QEMU is not installed and Homebrew is not present to install it; install Homebrew from https://brew.sh then run the setup again")
 	}
 	o.log("installing QEMU with Homebrew")
-	cmd := exec.CommandContext(ctx, brew, "install", "qemu")
-	cmd.Env = append(os.Environ(), "HOMEBREW_NO_AUTO_UPDATE=1", "NONINTERACTIVE=1")
+	cmd := brewCommand(ctx, brew, "install", "qemu")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("brew install qemu: %w: %s", err, tail(string(out), 400))
 	}
@@ -84,6 +87,32 @@ func installQEMU(ctx context.Context, o Options) error {
 		return fmt.Errorf("QEMU still not found after brew install")
 	}
 	return nil
+}
+
+// brewCommand runs brew as the account that owns the Homebrew install. brew
+// refuses to run as root, and the agent's macOS daemon runs as root; root can
+// act as that account without a password (sudo -u).
+func brewCommand(ctx context.Context, brew string, args ...string) *exec.Cmd {
+	env := []string{"HOMEBREW_NO_AUTO_UPDATE=1", "NONINTERACTIVE=1", "HOMEBREW_NO_ENV_HINTS=1"}
+	owner := ""
+	if os.Geteuid() == 0 {
+		if fi, err := os.Stat(brew); err == nil {
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid != 0 {
+				if u, err := user.LookupId(strconv.Itoa(int(st.Uid))); err == nil {
+					owner = u.Username
+				}
+			}
+		}
+	}
+	var cmd *exec.Cmd
+	if owner != "" {
+		cmd = exec.CommandContext(ctx, "sudo", append(append([]string{"-u", owner, "-H", "env"}, env...), append([]string{brew}, args...)...)...)
+	} else {
+		cmd = exec.CommandContext(ctx, brew, args...)
+		cmd.Env = append(os.Environ(), env...)
+	}
+	cmd.Dir = "/tmp" // a directory the owner can enter
+	return cmd
 }
 
 // ensureKey generates the agent's ed25519 key to the VM (once).
@@ -171,15 +200,36 @@ func ensureDisk(ctx context.Context, p vmPaths, o Options) error {
 		}
 	}
 	// A qcow2 overlay: the base stays read-only and shared, the VM writes here.
-	disk := 20 + o.diskGB()
-	cmd := exec.CommandContext(ctx, qemuImg, "create", "-q", "-f", "qcow2", "-F", "raw", "-b", p.basePath(), p.diskPath(), fmt.Sprintf("%dG", disk))
+	// Sparse, so its size costs nothing until used.
+	cmd := exec.CommandContext(ctx, qemuImg, "create", "-q", "-f", "qcow2", "-F", "raw", "-b", p.basePath(), p.diskPath(), fmt.Sprintf("%dG", o.vmDiskGB()))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("create the VM disk: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-func (o Options) diskGB() int { return 40 } // the base plus headroom; the rental's own disk is a file inside
+// growDisk grows the VM's disk (never shrinks it) while the VM is down, when
+// a rental's disk would no longer fit -- the Mac's free space grew. cloud-init
+// grows the root partition to match at the next boot.
+func growDisk(ctx context.Context, p vmPaths, o Options) {
+	if running(p) {
+		return
+	}
+	qemuImg, err := qemuImgPath()
+	if err != nil {
+		return
+	}
+	_ = exec.CommandContext(ctx, qemuImg, "resize", "-q", p.diskPath(), fmt.Sprintf("%dG", o.vmDiskGB())).Run()
+}
+
+// vmDiskGB is the VM disk: the rental's own disk (a file inside it) plus 20 GB
+// for the guest system, the container image and headroom.
+func (o Options) vmDiskGB() int {
+	if o.DiskGB < 20 {
+		return 40
+	}
+	return o.DiskGB + 20
+}
 
 // ensureSeed builds the cloud-init NoCloud seed image (a FAT image labelled
 // cidata holding user-data and meta-data), with hdiutil (built into macOS).

@@ -63,7 +63,7 @@ func prepareMachine(log func(format string, a ...interface{})) func(ctx context.
 			})
 		case "darwin":
 			return mac.Setup(ctx, mac.Options{
-				Arch: runtime.GOARCH, MemMB: mac.VMMemoryMB(spec.TotalMemMB, spec.GuestMemoryMB()), CPUs: spec.CPUs, Log: log,
+				Arch: runtime.GOARCH, MemMB: mac.VMMemoryMB(spec.TotalMemMB, spec.GuestMemoryMB()), CPUs: spec.CPUs, DiskGB: spec.DiskGB, Log: log,
 			})
 		}
 		return nil
