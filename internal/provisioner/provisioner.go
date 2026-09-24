@@ -446,7 +446,7 @@ func (p *Provisioner) ContainerRuntime() *vmrt.ContainerRuntime {
 func (p *Provisioner) SelfInstalls() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.capability.Kind == KindContainerWSL
+	return p.capability.Kind == KindContainerWSL || p.capability.Kind == KindContainerVM
 }
 
 // IsContainer reports whether this machine hosts rentals as a hardened
@@ -454,7 +454,7 @@ func (p *Provisioner) SelfInstalls() bool {
 func (p *Provisioner) IsContainer() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.capability.Kind == KindContainer || p.capability.Kind == KindContainerWSL
+	return p.capability.Kind == KindContainer || p.capability.Kind == KindContainerWSL || p.capability.Kind == KindContainerVM
 }
 
 // RuntimeSpec is the spec of whichever runtime backs this machine -- the

@@ -283,6 +283,9 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	if goos == "windows" {
 		return detectWindows(h, arch, dataDir, version)
 	}
+	if goos == "darwin" {
+		return detectMacOS(h, arch, dataDir, version)
+	}
 	storage := StorageDir(dataDir)
 	spec := vmrt.Spec{
 		Arch:        arch,

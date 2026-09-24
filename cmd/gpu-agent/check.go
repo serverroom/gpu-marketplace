@@ -530,8 +530,8 @@ func runContainerPrepare(deps bool) {
 		os.Exit(1)
 	}
 	defer release()
-	if deps && runtime.GOOS == "windows" {
-		if err := prepareWindows(logf)(context.Background()); err != nil {
+	if deps && (runtime.GOOS == "windows" || runtime.GOOS == "darwin") {
+		if err := prepareMachine(logf)(context.Background()); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
 			os.Exit(1)
 		}

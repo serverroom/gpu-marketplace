@@ -14,6 +14,7 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
+	"github.com/serverroom/gpu-marketplace/internal/mac"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
@@ -116,6 +117,15 @@ func runRemove(svc service.Service, args []string) {
 			fmt.Printf("WSL:      could not remove everything (%v); run 'wsl --unregister %s' and 'net user %s /delete' as the account's administrator.\n", err, wsl.Distro, wsl.Account)
 		} else {
 			fmt.Printf("WSL:      the %s distribution and the Windows account %s are deleted.\n", wsl.Distro, wsl.Account)
+		}
+	}
+	// On macOS: stop the agent's VM and delete it. QEMU (and Homebrew) stay:
+	// they are the person's, and other things may use them.
+	if runtime.GOOS == "darwin" {
+		if err := mac.Remove(); err != nil {
+			fmt.Printf("VM:       could not remove it (%v); delete %s by hand.\n", err, config.DataDir())
+		} else {
+			fmt.Println("VM:       the agent's Linux VM is stopped and deleted.")
 		}
 	}
 	if runtime.GOOS == "linux" {

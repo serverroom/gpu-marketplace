@@ -432,6 +432,37 @@ its disk.
 - The agent reports the machine with `gpu_count` 0, and the marketplace shows it
   as a machine without a GPU.
 
+## Windows and macOS hosting
+
+The agent hosts on Windows and macOS too, not only Linux. On both, a rental runs
+as the same [hardened container](#dgx-spark-rented-as-a-hardened-container-v024) a
+DGX Spark uses, inside a Linux environment the agent owns — so a rental is fenced
+off your network, on an encrypted disk whose key dies with it, and the renter logs
+in as an unprivileged user, exactly as on a Linux host. There is nothing to set up
+by hand: link the machine and the agent does the rest, the same as everywhere.
+
+**Windows** (Windows 10 version 21H2 or later, Windows 11, Windows Server 2022 or
+2025 — any edition, Home included). The agent installs WSL 2 from Microsoft's
+signed release (one restart, then the setup carries on by itself), creates a
+locked-down Linux distribution under an account of its own, and runs rentals in
+it. An NVIDIA GPU reaches the rental through WSL's GPU sharing from your own
+Windows driver (CUDA on WSL, NVIDIA driver 470+); a machine without an NVIDIA GPU
+hosts CPU-only. Older Windows is told exactly what to update. What the agent adds
+is removed cleanly by `gpu-agent remove`; WSL 2 itself stays, since it is part of
+Windows and you may use it.
+
+**macOS** (macOS 12 Monterey or later, Intel or Apple Silicon). The agent runs a
+Linux VM with QEMU on Apple's Hypervisor.framework and runs rentals in it. QEMU is
+installed with Homebrew (install Homebrew first if it is absent; the agent then
+installs QEMU itself). A Mac cannot pass its GPU through to a guest, so a Mac rents
+its CPUs, memory and disk ([a machine without a GPU](#hosting-a-machine-without-a-gpu));
+a physical Mac only — a Mac that is itself a VM cannot host. `gpu-agent remove`
+stops and deletes the VM; QEMU and Homebrew stay.
+
+Everything else in this document — the fence, the encrypted disk, the automatic
+setup, updates, the control panel, `gpu-agent status`/`check`/`remove` — works the
+same on all three. `gpu-agent check` names anything a machine still needs.
+
 ## ARM boards (RK3588)
 
 Any 64-bit ARM Linux machine with KVM can host: Rockchip RK3588 and RK3588S boards
