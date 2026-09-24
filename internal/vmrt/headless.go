@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 )
@@ -28,7 +28,7 @@ type HeadlessRecord struct {
 }
 
 // HeadlessPath is where that record lives.
-func HeadlessPath(dataDir string) string { return filepath.Join(dataDir, headlessFile) }
+func HeadlessPath(dataDir string) string { return path.Join(dataDir, headlessFile) }
 
 // DefaultTarget is the systemd target this machine starts into.
 func DefaultTarget(h Host) (string, error) {

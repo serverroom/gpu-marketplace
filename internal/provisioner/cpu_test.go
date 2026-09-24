@@ -113,7 +113,7 @@ func TestAMachineThatGainedAGPURebuilds(t *testing.T) {
 }
 
 func TestGPUCountIsOnlyReportedWhereTheAgentHosts(t *testing.T) {
-	for goos, want := range map[string]string{"darwin": "qemu-vfio", "windows": "qemu-vfio"} {
+	for goos, want := range map[string]string{"darwin": "qemu-vfio", "windows": "container-wsl"} {
 		c := Detect(fakehost.New(), goos, "arm64", dataDir, version).Capability()
 		if c.GPUCount != nil || c.Kind != want {
 			t.Errorf("%s: gpu_count %v kind %s", goos, c.GPUCount, c.Kind)

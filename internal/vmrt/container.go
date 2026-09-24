@@ -42,6 +42,30 @@ type ContainerRuntime struct {
 	// is left on the GPUs. The provisioner supplies it (gpuVerifier), given the
 	// rented GPUs as BoundDevice{Driver:"nvidia"} -- the GPU never left nvidia.
 	verifyGPU func(returned []BoundDevice) bool
+	// extraProbes are more addresses the test boot must find blocked: on
+	// Windows, the Windows machine's own LAN address and gateway, which the
+	// Linux inside WSL does not see as its networks.
+	extraProbes []string
+	// release lets the machine go once the rental is gone (holder).
+	release func()
+}
+
+// letGo releases the machine a rental held (holder).
+func (rt *ContainerRuntime) letGo() {
+	if rt.release != nil {
+		rt.release()
+		rt.release = nil
+	}
+}
+
+// holder is a Host that must be held up while a rental runs on it: a WSL
+// distribution, which WSL stops once nothing is attached to it.
+type holder interface{ Hold() (release func()) }
+
+// AddProbes adds addresses (host:port) the container test boot must find
+// blocked, beyond the ones this Linux's own routes name.
+func (rt *ContainerRuntime) AddProbes(probes ...string) {
+	rt.extraProbes = append(rt.extraProbes, probes...)
 }
 
 // NewContainer builds a container runtime.
@@ -69,6 +93,9 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 	}
 	if o.Pair != nil {
 		return errors.New("a linked-pair rental cannot run in container mode")
+	}
+	if hh, ok := rt.h.(holder); ok && rt.release == nil {
+		rt.release = hh.Hold()
 	}
 	name := containerName(o.ID)
 	r := NewRental(rt.spec.Storage(), o.ID)
@@ -184,6 +211,10 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume string, o StartOptions)
 		"--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=KILL",
 		"--cap-add=NET_BIND_SERVICE", "--cap-add=SYS_CHROOT",
 		"--network=none",
+		// Public resolvers: the host's own (a LAN router, systemd-resolved, WSL's
+		// NAT gateway) sit in ranges the fence blocks, so a copy of its
+		// resolv.conf would leave the renter without DNS.
+		"--dns", "1.1.1.1", "--dns", "8.8.8.8",
 		"--pids-limit", "4096",
 		"--stop-timeout", "30",
 		// The renter's key, read-only; the image's entrypoint installs it for
@@ -218,7 +249,7 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume string, o StartOptions)
 // socket, so those services must stay up. It only closes a DGX Spark's desktop
 // (restored at teardown) so nothing on the host's screen competes for the GPU.
 func (rt *ContainerRuntime) freeGPU(st *State, save func() error) error {
-	if len(rt.spec.GPUs) == 0 {
+	if len(rt.spec.GPUs) == 0 || rt.spec.SharedGPU {
 		return nil
 	}
 	// A test boot never stops a program of the host's (the microVM's rule too):
@@ -375,6 +406,7 @@ func (rt *ContainerRuntime) exitReason(name string) string {
 // the desktop and NVIDIA services back, the GPU clear of the rental, the
 // network and fence removed. A teardown that does not verify is left dirty.
 func (rt *ContainerRuntime) Stop() StopResult {
+	defer rt.letGo()
 	st, err := LoadState(rt.h, rt.spec.DataDir)
 	if err != nil {
 		return StopResult{Detail: []string{"read rental state: " + err.Error()}}

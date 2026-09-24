@@ -11,9 +11,12 @@ import (
 // accepts) and ensures the user-namespace id ranges --userns=auto needs. It is
 // idempotent. It does NOT install packages -- that is InstallContainerPackages,
 // behind --install-deps.
-func EnsureContainerHost(h Host, log func(format string, args ...interface{})) error {
-	if err := generateContainerCDI(h, log); err != nil {
-		return err
+// gpu false (a machine renting its CPUs only) skips the NVIDIA CDI spec.
+func EnsureContainerHost(h Host, gpu bool, log func(format string, args ...interface{})) error {
+	if gpu {
+		if err := generateContainerCDI(h, log); err != nil {
+			return err
+		}
 	}
 	return ensureContainersSubID(h, log)
 }

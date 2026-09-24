@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/update"
+	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
 
 func autoAgent(t *testing.T) *agent {
@@ -98,7 +98,7 @@ func TestABusyMachineWaitsForTheNextAnswer(t *testing.T) {
 		"a leftover":      func(a *agent) { a.m.present = true },
 		"a pair test": func(a *agent) {
 			a.h.Files["/proc/9999"] = nil
-			a.h.Files[filepath.Join(a.DataDir, "busy.json")] = []byte(`{"pid":9999,"what":"running a pair test boot"}`)
+			a.h.Files[vmrt.BusyPath(a.DataDir)] = []byte(`{"pid":9999,"what":"running a pair test boot"}`)
 		},
 	} {
 		a := autoAgent(t)
@@ -111,7 +111,7 @@ func TestABusyMachineWaitsForTheNextAnswer(t *testing.T) {
 		}
 		// Idle again.
 		a.m.status, a.m.settingUp, a.m.present = provisioner.StatusFree, false, false
-		delete(a.h.Files, filepath.Join(a.DataDir, "busy.json"))
+		delete(a.h.Files, vmrt.BusyPath(a.DataDir))
 		if started, why := a.Offer(&control.AgentUpdate{Version: "v0.1.11"}); !started {
 			t.Errorf("%s, then idle: %q", name, why)
 		}

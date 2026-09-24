@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -273,13 +273,13 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return fmt.Errorf("%w (%s)", ErrRentalPresent, st.RentalID)
 	}
 
-	dir := filepath.Join(spec.Storage(), "images")
+	dir := path.Join(spec.Storage(), "images")
 	if err := h.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	name := cloudImageName(spec.Arch)
-	base := filepath.Join(dir, name)
-	sumsPath := filepath.Join(dir, "SHA256SUMS")
+	base := path.Join(dir, name)
+	sumsPath := path.Join(dir, "SHA256SUMS")
 	log("Fetching %sSHA256SUMS ...", cloudImageBase())
 	if err := h.Download(cloudImageBase()+"SHA256SUMS", sumsPath); err != nil {
 		return fmt.Errorf("download checksums: %w", err)
@@ -311,7 +311,7 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return fmt.Errorf("the base image build was stopped: %w", err)
 	}
 
-	bake := filepath.Join(dir, "bake.qcow2")
+	bake := path.Join(dir, "bake.qcow2")
 	_ = h.Remove(bake)
 	if err := h.Run("qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", base, bake, "20G"); err != nil {
 		return fmt.Errorf("create bake disk: %w", err)

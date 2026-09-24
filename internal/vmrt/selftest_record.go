@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -16,7 +16,7 @@ import (
 )
 
 // SelfTestPath is where the latest self-test result lives.
-func SelfTestPath(dataDir string) string { return filepath.Join(dataDir, "selftest.json") }
+func SelfTestPath(dataDir string) string { return path.Join(dataDir, "selftest.json") }
 
 // SaveSelfTest records a result. A test that took the GPUs is also the
 // machine's last full test; one run without them keeps the last full test of

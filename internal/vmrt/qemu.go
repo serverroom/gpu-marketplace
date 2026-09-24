@@ -2,7 +2,7 @@ package vmrt
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"strconv"
 )
 
@@ -23,17 +23,17 @@ type Rental struct {
 
 // NewRental lays out a rental's working directory under dataDir.
 func NewRental(dataDir, id string) Rental {
-	dir := filepath.Join(dataDir, "rentals", id)
+	dir := path.Join(dataDir, "rentals", id)
 	return Rental{
 		ID:         id,
 		Dir:        dir,
 		Disk:       "/dev/mapper/" + MapperName(id),
 		DiskFormat: "raw",
-		Seed:       filepath.Join(dir, "seed.iso"),
-		Vars:       filepath.Join(dir, "efivars.fd"),
-		SerialLog:  filepath.Join(dir, "serial.log"),
+		Seed:       path.Join(dir, "seed.iso"),
+		Vars:       path.Join(dir, "efivars.fd"),
+		SerialLog:  path.Join(dir, "serial.log"),
 		Unit:       "gpu-rental-" + id,
-		QMP:        filepath.Join(dir, "qmp.sock"),
+		QMP:        path.Join(dir, "qmp.sock"),
 	}
 }
 

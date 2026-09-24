@@ -16,6 +16,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/update"
+	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt/fakehost"
 )
 
@@ -127,7 +128,7 @@ func TestUpdateIsRefusedWhileTheMachineIsBusy(t *testing.T) {
 		"removed":         func(a *agent) { a.m.withdrawn = "removed" },
 		"a person's check --boot": func(a *agent) {
 			a.h.Files["/proc/9999"] = nil
-			a.h.Files[filepath.Join(a.DataDir, "busy.json")] = []byte(`{"pid":9999,"what":"running a test boot"}`)
+			a.h.Files[vmrt.BusyPath(a.DataDir)] = []byte(`{"pid":9999,"what":"running a test boot"}`)
 		},
 	} {
 		a := newAgent(t)

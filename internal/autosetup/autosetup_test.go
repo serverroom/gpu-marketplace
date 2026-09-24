@@ -287,14 +287,15 @@ func TestNothingRunsForAReasonOnlyAPersonCanFix(t *testing.T) {
 	}
 }
 
-func TestNotOffLinux(t *testing.T) {
+// The setup runs where rentals can: Linux, and Windows in WSL 2 -- not macOS.
+func TestNotOnMacOS(t *testing.T) {
 	h := machine(t)
 	noImage(h)
 	r := newRig(t, h)
-	r.d.GOOS = "windows"
+	r.d.GOOS = "darwin"
 	r.run()
 	if r.ran() != "" {
-		t.Errorf("steps ran on windows: %s", r.ran())
+		t.Errorf("steps ran on macOS: %s", r.ran())
 	}
 }
 

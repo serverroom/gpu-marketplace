@@ -32,9 +32,17 @@ type Runner struct {
 	// the GPU while the host's programs hold it, in a smaller VM while the
 	// host uses the memory).
 	InstallDeps func(ctx context.Context) error
-	MoveStorage func(dir string) error
-	BuildImage  func(ctx context.Context, spec vmrt.Spec, drv vmrt.DriverChoice) error
-	TestBoot    func(ctx context.Context, rt *vmrt.Runtime, o vmrt.TestOptions) vmrt.SelfTestResult
+	// Machine is where a container rental runs when that is not Host, and
+	// MachineDataDir the agent's data directory there: on Windows, the WSL 2
+	// distribution (Host stays Windows, where the setup's records live).
+	Machine        vmrt.Host
+	MachineDataDir string
+	// PrepareMachine runs first in the tools step: on Windows, WSL 2, the
+	// agent's account and its distribution (wsl.Setup).
+	PrepareMachine func(ctx context.Context) error
+	MoveStorage    func(dir string) error
+	BuildImage     func(ctx context.Context, spec vmrt.Spec, drv vmrt.DriverChoice) error
+	TestBoot       func(ctx context.Context, rt *vmrt.Runtime, o vmrt.TestOptions) vmrt.SelfTestResult
 }
 
 // moveStorage puts the rentals' disks (and the base image, if built) on the
@@ -94,6 +102,13 @@ func (r *Runner) log(format string, args ...interface{}) {
 // AptGet reports whether this machine installs packages the agent's way:
 // apt-get on Ubuntu, Debian or a system built on them (Armbian included).
 func AptGet(h vmrt.Host) bool { return provisioner.AptDistro(h) }
+
+// CanInstall reports whether the setup can install p's missing tools: with
+// apt-get on a Linux host, or always on a machine whose setup brings its own
+// Linux (Windows, WSL 2).
+func CanInstall(h vmrt.Host, p *provisioner.Provisioner) bool {
+	return p.SelfInstalls() || AptGet(h)
+}
 
 // Begin is a new attempt at plan: the driver the image gets (matched to the
 // host's), and the key it is for.
@@ -284,25 +299,41 @@ func (r *Runner) step(ctx context.Context, s Step, a Attempt) error {
 // containerStep runs a setup step on a machine that hosts as a container: the
 // container stack instead of QEMU, the container image instead of the golden
 // disk, and the container self-test instead of the microVM test boot.
+// machine is where container rentals run, and the agent's data directory there.
+func (r *Runner) machine() (vmrt.Host, string) {
+	if r.Machine != nil {
+		return r.Machine, r.MachineDataDir
+	}
+	return r.Host, r.DataDir
+}
+
 func (r *Runner) containerStep(ctx context.Context, s Step, a Attempt) error {
+	h, dataDir := r.machine()
+	spec, _ := r.Detect().RuntimeSpec()
+	gpu := len(spec.GPUs) > 0
 	switch s {
 	case StepDeps:
+		if r.PrepareMachine != nil {
+			if err := r.PrepareMachine(ctx); err != nil {
+				return err
+			}
+		}
 		if r.InstallDeps != nil {
 			if err := r.InstallDeps(ctx); err != nil {
 				return err
 			}
-		} else if err := vmrt.InstallContainerPackages(r.Host, r.Log); err != nil {
+		} else if err := vmrt.InstallContainerPackages(h, r.Log); err != nil {
 			return err
 		}
-		return vmrt.EnsureContainerHost(r.Host, r.Log)
+		return vmrt.EnsureContainerHost(h, gpu, r.Log)
 
 	case StepImage:
 		// EnsureContainerHost is idempotent; run it here too so a machine that
 		// only needed the image also gets a fresh, normalized CDI spec.
-		if err := vmrt.EnsureContainerHost(r.Host, r.Log); err != nil {
+		if err := vmrt.EnsureContainerHost(h, gpu, r.Log); err != nil {
 			return err
 		}
-		return vmrt.PrepareContainerImage(r.Host, r.DataDir, r.Log)
+		return vmrt.PrepareContainerImage(h, dataDir, r.Log)
 
 	case StepTestBoot:
 		p := r.Detect()

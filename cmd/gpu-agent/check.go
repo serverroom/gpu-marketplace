@@ -48,6 +48,8 @@ func printCapability(c control.Capability) {
 		switch {
 		case c.Kind == provisioner.KindContainer:
 			detail = append(detail, "the host's driver, shared into the container")
+		case c.Kind == provisioner.KindContainerWSL:
+			detail = append(detail, "the Windows driver, shared into the container through WSL 2")
 		case g.Driver != "":
 			detail = append(detail, "driver "+g.Driver+" in the VM")
 		default:
@@ -181,8 +183,11 @@ func runCheck(svc service.Service, args []string) {
 
 	fmt.Println()
 	tenant := "a microVM"
-	if c.Kind == provisioner.KindContainer {
+	switch c.Kind {
+	case provisioner.KindContainer:
 		tenant = "a hardened container"
+	case provisioner.KindContainerWSL:
+		tenant = "a hardened container inside the agent's own WSL 2 VM,"
 	}
 	fmt.Println("While rented, the tenant runs in " + tenant + " attached only to the " + netguard.Bridge +
 		" bridge, behind one nftables table (inet " + netguard.Table + ") that the agent loads and reads back before booting anything. It blocks:")
@@ -212,12 +217,12 @@ func runCheck(svc service.Service, args []string) {
 // it down, and records the verdict that preflight requires before a machine is
 // offered to renters.
 func runSelfTest(svc service.Service, yes bool) {
-	if runtime.GOOS != "linux" {
-		fmt.Fprintln(os.Stderr, "a test boot needs a Linux KVM host")
+	if !hostsRentals() {
+		fmt.Fprintln(os.Stderr, "a test boot needs a Linux KVM host, or Windows with WSL 2")
 		os.Exit(1)
 	}
-	if os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "check --boot needs root: run 'sudo gpu-agent check --boot'")
+	if !isAdmin() {
+		fmt.Fprintf(os.Stderr, "check --boot needs administrator rights: %s\n", adminHint("check --boot"))
 		os.Exit(1)
 	}
 	p := detectProvisioner()
@@ -356,7 +361,12 @@ func runContainerSelfTest(svc service.Service, yes bool, p *provisioner.Provisio
 		os.Exit(2)
 	}
 	fmt.Println("This starts a test rental as a hardened container for a minute:")
-	fmt.Println("  - the GPU is shared into the container over CDI (the host keeps the driver)")
+	if runtime.GOOS == "windows" {
+		fmt.Println("  - it runs in the agent's own WSL 2 environment; the GPU, when there is one, is shared")
+		fmt.Println("    into it through WSL 2 (Windows keeps the driver)")
+	} else {
+		fmt.Println("  - the GPU is shared into the container over CDI (the host keeps the driver)")
+	}
 	fmt.Println("  - it runs behind the fence, on an encrypted disk, and reports whether it reaches")
 	fmt.Println("    the internet and that it CANNOT reach this machine or its network")
 	fmt.Println("  - then it is destroyed and its disk key discarded")
@@ -464,12 +474,12 @@ func runPrepare(args []string) {
 	yes := fs.Bool("yes", false, "with --headless: do not ask for confirmation")
 	fs.Parse(args)
 
-	if runtime.GOOS != "linux" {
-		fmt.Fprintln(os.Stderr, "the rental runtime runs on Linux only")
+	if !hostsRentals() {
+		fmt.Fprintln(os.Stderr, "the rental runtime runs on Linux and Windows only")
 		os.Exit(1)
 	}
-	if os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "runtime prepare needs root: run 'sudo gpu-agent runtime prepare'")
+	if !isAdmin() {
+		fmt.Fprintf(os.Stderr, "runtime prepare needs administrator rights: %s\n", adminHint("runtime prepare"))
 		os.Exit(1)
 	}
 	if *headless {
@@ -512,27 +522,34 @@ func runPrepare(args []string) {
 // podman and the NVIDIA Container Toolkit, then it configures the host (CDI
 // spec + user-namespace ranges) and builds the container rental image.
 func runContainerPrepare(deps bool) {
-	h := vmrt.OSHost{}
+	h, dataDir := machineHost()
 	logf := func(format string, a ...interface{}) { fmt.Printf(format+"\n", a...) }
-	release, err := vmrt.AcquireBusy(h, config.DataDir(), os.Getpid(), "preparing container hosting")
+	release, err := vmrt.AcquireBusy(vmrt.OSHost{}, config.DataDir(), os.Getpid(), "preparing container hosting")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "runtime prepare: %v; 'gpu-agent setup --status' shows where it is\n", err)
 		os.Exit(1)
 	}
 	defer release()
+	if deps && runtime.GOOS == "windows" {
+		if err := prepareWindows(logf)(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	if deps {
 		if err := vmrt.InstallContainerPackages(h, logf); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
 			os.Exit(1)
 		}
 	}
-	if err := vmrt.EnsureContainerHost(h, logf); err != nil {
+	spec, _ := detectProvisioner().RuntimeSpec()
+	if err := vmrt.EnsureContainerHost(h, len(spec.GPUs) > 0, logf); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
 		os.Exit(1)
 	}
-	if err := vmrt.PrepareContainerImage(h, config.DataDir(), logf); err != nil {
+	if err := vmrt.PrepareContainerImage(h, dataDir, logf); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime prepare failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("The machine is set up for container hosting. Next: sudo gpu-agent check --boot")
+	fmt.Printf("The machine is set up for container hosting. Next: %s\n", adminHint("check --boot"))
 }

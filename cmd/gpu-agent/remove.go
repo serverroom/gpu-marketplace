@@ -17,6 +17,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
+	"github.com/serverroom/gpu-marketplace/internal/wsl"
 )
 
 // runRemove takes the agent off this machine completely and revokes it, so a
@@ -90,13 +91,31 @@ func runRemove(svc service.Service, args []string) {
 
 	// 3. Anything a rental left behind: a running VM is stopped, its disk key
 	// discarded and the GPU given back before the directories go.
-	if runtime.GOOS == "linux" {
-		if rt := detectProvisioner().Runtime(); rt != nil && rt.Present() {
+	if hostsRentals() {
+		p := detectProvisioner()
+		if rt := p.Runtime(); rt != nil && rt.Present() {
 			if res := rt.Stop(); res.Clean() {
 				fmt.Println("Rental:   stopped; its disk is destroyed and the GPU is back with its driver.")
 			} else {
 				fmt.Printf("Rental:   stopped, but not everything verified (%s); reboot this machine to be sure the GPU is released.\n", strings.Join(res.Detail, "; "))
 			}
+		}
+		if crt := p.ContainerRuntime(); crt != nil && crt.Present() {
+			if res := crt.Stop(); res.Clean() {
+				fmt.Println("Rental:   its container is stopped and its disk destroyed.")
+			} else {
+				fmt.Printf("Rental:   its container is stopped, but not everything verified (%s).\n", strings.Join(res.Detail, "; "))
+			}
+		}
+	}
+	// On Windows: the agent's WSL 2 distribution (and every rental disk in it)
+	// and the Windows account it ran under. WSL 2 itself stays: it is part of
+	// Windows, and this machine's person may use it.
+	if runtime.GOOS == "windows" {
+		if err := wsl.Remove(); err != nil {
+			fmt.Printf("WSL:      could not remove everything (%v); run 'wsl --unregister %s' and 'net user %s /delete' as the account's administrator.\n", err, wsl.Distro, wsl.Account)
+		} else {
+			fmt.Printf("WSL:      the %s distribution and the Windows account %s are deleted.\n", wsl.Distro, wsl.Account)
 		}
 	}
 	if runtime.GOOS == "linux" {

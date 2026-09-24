@@ -32,6 +32,9 @@ const (
 	// NVIDIA GPU that cannot be passed through over VFIO (a DGX Spark's GB10,
 	// until the signed nvgrace-gpu-vfio-pci carries its id). See container.go.
 	KindContainer = "container-nv"
+	// KindContainerWSL is the same hardened container inside a WSL 2
+	// distribution the agent owns: how a Windows machine hosts (windows.go).
+	KindContainerWSL = "container-wsl"
 )
 
 // ReasonKind says who can fix a reason this machine is not ready: the agent's
@@ -277,6 +280,9 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 // runtime, whose Capability says what it found. It is the only constructor
 // production code should use.
 func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
+	if goos == "windows" {
+		return detectWindows(h, arch, dataDir, version)
+	}
 	storage := StorageDir(dataDir)
 	spec := vmrt.Spec{
 		Arch:        arch,

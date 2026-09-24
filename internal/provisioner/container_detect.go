@@ -93,8 +93,11 @@ func containerFallback(h vmrt.Host, bdfs []string) bool {
 // cannot host a rental as a container. It drops the microVM's KVM/IOMMU/VFIO/
 // firmware/golden checks and adds the container stack's, keeping the shared
 // memory, CPU and disk floors and gating on a passing container test boot.
-func containerReasons(h vmrt.Host, spec vmrt.Spec, version string) []Finding {
-	var findings []Finding
+// findings are ones the caller already has (they hold the test boot back too);
+// storage false leaves the disk floor to the caller (Windows reads its own
+// drive, not the distribution's).
+func containerReasons(h vmrt.Host, spec vmrt.Spec, version string, findings []Finding, storage bool) []Finding {
+	gpu := len(spec.GPUs) > 0
 	add := func(kind ReasonKind, format string, a ...interface{}) {
 		findings = append(findings, Finding{Kind: kind, Text: fmt.Sprintf(format, a...)})
 	}
@@ -118,11 +121,12 @@ func containerReasons(h vmrt.Host, spec vmrt.Spec, version string) []Finding {
 	if data, err := h.ReadFile("/etc/subuid"); err != nil || len(strings.TrimSpace(string(data))) == 0 {
 		add(ReasonTools, "user-namespace ranges are not configured (/etc/subuid is empty), so the container cannot remap root; add a subuid/subgid range")
 	}
-	// The NVIDIA container stack and a GPU it can see.
-	if _, err := h.LookPath("nvidia-ctk"); err != nil && !h.Exists("/etc/cdi/nvidia.yaml") && !h.Exists("/var/run/cdi/nvidia.yaml") {
+	// The NVIDIA container stack and a GPU it can see (a machine renting its
+	// CPUs only -- a Windows machine without an NVIDIA GPU -- needs neither).
+	if _, err := h.LookPath("nvidia-ctk"); gpu && err != nil && !h.Exists("/etc/cdi/nvidia.yaml") && !h.Exists("/var/run/cdi/nvidia.yaml") {
 		add(ReasonTools, "the NVIDIA Container Toolkit (nvidia-ctk) and its CDI spec are missing, so the GPU cannot be shared into a container; install nvidia-container-toolkit and run 'nvidia-ctk cdi generate'")
 	}
-	if len(vmrt.CDIDeviceRefs(h)) == 0 {
+	if gpu && len(vmrt.CDIDeviceRefs(h)) == 0 {
 		add(ReasonHuman, "nvidia-smi does not list a usable GPU, so none can be shared into a container")
 	}
 	// Without podman the tools finding above already says so; the image is
@@ -139,7 +143,9 @@ func containerReasons(h vmrt.Host, spec vmrt.Spec, version string) []Finding {
 	if n := spec.GuestCPUs(); n < 2 {
 		add(ReasonHuman, "a rental on this machine would get %d CPU, and a rental needs at least 2", n)
 	}
-	findings = append(findings, storageFindings(h, spec.Storage(), spec.DiskGB, spec.StorageDir != "")...)
+	if storage {
+		findings = append(findings, storageFindings(h, spec.Storage(), spec.DiskGB, spec.StorageDir != "")...)
+	}
 	// The container test boot proves the GPU works in the container and the
 	// fence holds -- only once the checks above pass.
 	if len(findings) == 0 {
@@ -160,7 +166,7 @@ func detectContainer(h vmrt.Host, goos, arch, dataDir, version string, spec vmrt
 	cdi := vmrt.CDIDeviceRefs(h)
 	crt := vmrt.NewContainer(h, spec, fence, vmrt.ContainerImageRef, cdi, gpuVerifier(h))
 
-	findings := containerReasons(h, spec, version)
+	findings := containerReasons(h, spec, version, nil, true)
 	var reasons []string
 	for _, f := range findings {
 		reasons = append(reasons, f.Text)

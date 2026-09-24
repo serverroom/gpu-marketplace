@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"path"
-	"path/filepath"
 	"strings"
 )
 
@@ -41,7 +40,7 @@ func CreateDisk(h Host, dir, id string, sizeGB int, golden string) (DiskState, e
 // is what makes the wipe a wipe. Shared by CreateDisk (which then writes the
 // golden image through it) and createEncryptedVolume (which formats it).
 func openEncrypted(h Host, dir, id string, sizeGB int) (DiskState, error) {
-	ds := DiskState{File: filepath.Join(dir, "disk.img")}
+	ds := DiskState{File: path.Join(dir, "disk.img")}
 	if err := h.Run("truncate", "-s", mib(sizeGB), ds.File); err != nil {
 		return ds, fmt.Errorf("allocate disk: %w", err)
 	}
@@ -84,7 +83,7 @@ func createEncryptedVolume(h Host, dir, id string, sizeGB int) (DiskState, strin
 	if err := h.Run("mkfs.ext4", "-q", "-m", "0", ds.Mapper); err != nil {
 		return ds, "", fmt.Errorf("format volume: %w", err)
 	}
-	mount := filepath.Join(dir, "vol")
+	mount := path.Join(dir, "vol")
 	if err := h.MkdirAll(mount, 0700); err != nil {
 		return ds, "", fmt.Errorf("volume mount point: %w", err)
 	}

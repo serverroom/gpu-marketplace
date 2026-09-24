@@ -64,7 +64,7 @@ func onlyTestBoot(p Plan) bool { return len(p.Steps) == 1 && p.Steps[0] == StepT
 // KeepOnce is one look (Keep). justStarted: the first since the agent started,
 // when a failed test is tried again at once.
 func (d *Daemon) KeepOnce(ctx context.Context, justStarted bool) {
-	if d.GOOS != "linux" || !Enabled(d.ConfigDir) {
+	if d.GOOS != "linux" && d.GOOS != "windows" || !Enabled(d.ConfigDir) {
 		return
 	}
 	if d.Prov.Status() != provisioner.StatusFree || d.Prov.Withdrawn() || d.Prov.SettingUp() {
@@ -73,7 +73,7 @@ func (d *Daemon) KeepOnce(ctx context.Context, justStarted bool) {
 	// Nothing owed, or nothing the agent can do: no need to look closer.
 	if c := d.Prov.Capability(); c.Ready && !c.RetestPending {
 		return
-	} else if !c.Ready && len(PlanFor(d.Prov.Findings(), AptGet(d.Runner.Host)).Human) > 0 {
+	} else if !c.Ready && len(PlanFor(d.Prov.Findings(), CanInstall(d.Runner.Host, d.Prov)).Human) > 0 {
 		return
 	}
 	fresh := d.Runner.Detect()
@@ -88,7 +88,7 @@ func (d *Daemon) KeepOnce(ctx context.Context, justStarted bool) {
 		}
 		return
 	}
-	plan := PlanFor(fresh.Findings(), AptGet(d.Runner.Host))
+	plan := PlanFor(fresh.Findings(), CanInstall(d.Runner.Host, fresh))
 	if len(plan.Human) > 0 || len(plan.Steps) == 0 {
 		return
 	}

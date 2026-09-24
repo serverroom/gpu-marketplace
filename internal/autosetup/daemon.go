@@ -149,7 +149,7 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 	d.started = true
 	d.mu.Unlock()
 
-	if d.GOOS != "linux" {
+	if d.GOOS != "linux" && d.GOOS != "windows" {
 		return
 	}
 	if !Enabled(d.ConfigDir) {
@@ -158,7 +158,7 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 		// not only this log.
 		if d.Errors != nil && d.Prov.Status() == provisioner.StatusFree && !d.Prov.Withdrawn() {
 			fresh := d.Runner.Detect()
-			if !fresh.Capability().Ready && PlanFor(fresh.Findings(), AptGet(d.Runner.Host)).Eligible() {
+			if !fresh.Capability().Ready && PlanFor(fresh.Findings(), CanInstall(d.Runner.Host, fresh)).Eligible() {
 				d.Errors.Raise(control.AreaSetup, SetupOffProblem, "")
 			} else {
 				d.Errors.Resolve(control.AreaSetup, SetupOffProblem)
@@ -184,7 +184,7 @@ func (d *Daemon) once(ctx context.Context) (retryAt time.Time, again bool) {
 		}
 		return
 	}
-	plan := PlanFor(fresh.Findings(), AptGet(d.Runner.Host))
+	plan := PlanFor(fresh.Findings(), CanInstall(d.Runner.Host, fresh))
 	if len(plan.Human) > 0 {
 		d.say("Automatic setup cannot make this machine ready by itself; a person has to fix: %s", strings.Join(plan.Human, "; "))
 		return

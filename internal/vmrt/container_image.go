@@ -2,7 +2,7 @@ package vmrt
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -81,14 +81,14 @@ func ContainerImageProblem(h Host) string {
 // PrepareContainerImage builds the rental image with podman from the embedded
 // Dockerfile and entrypoint. The build context lives under the data dir.
 func PrepareContainerImage(h Host, dataDir string, log func(format string, args ...interface{})) error {
-	dir := filepath.Join(dataDir, "container-build")
+	dir := path.Join(dataDir, "container-build")
 	if err := h.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("build context: %w", err)
 	}
-	if err := h.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(containerDockerfile()), 0600); err != nil {
+	if err := h.WriteFile(path.Join(dir, "Dockerfile"), []byte(containerDockerfile()), 0600); err != nil {
 		return fmt.Errorf("write Dockerfile: %w", err)
 	}
-	if err := h.WriteFile(filepath.Join(dir, "gpuagent-entrypoint"), []byte(containerEntrypoint), 0700); err != nil {
+	if err := h.WriteFile(path.Join(dir, "gpuagent-entrypoint"), []byte(containerEntrypoint), 0700); err != nil {
 		return fmt.Errorf("write entrypoint: %w", err)
 	}
 	if log != nil {

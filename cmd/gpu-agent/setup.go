@@ -35,16 +35,18 @@ func (a *gpuAgent) autoSetup() *autosetup.Daemon {
 	if a.ops != nil {
 		errs = a.ops.errs
 	}
+	runner := autosetup.Runner{
+		Host:    vmrt.OSHost{},
+		Arch:    runtime.GOARCH,
+		DataDir: config.DataDir(),
+		Version: version,
+		Detect:  detectProvisioner,
+		Log:     a.say,
+	}
+	onMachine(&runner)
 	return &autosetup.Daemon{
-		Errors: errs,
-		Runner: autosetup.Runner{
-			Host:    vmrt.OSHost{},
-			Arch:    runtime.GOARCH,
-			DataDir: config.DataDir(),
-			Version: version,
-			Detect:  detectProvisioner,
-			Log:     a.say,
-		},
+		Errors:    errs,
+		Runner:    runner,
 		GOOS:      runtime.GOOS,
 		ConfigDir: config.ConfigDir(),
 		PID:       os.Getpid(),
@@ -75,7 +77,7 @@ func setupSummary() string {
 }
 
 func printSetup() {
-	if runtime.GOOS == "linux" {
+	if hostsRentals() {
 		fmt.Printf("Setup:        %s\n", setupSummary())
 	}
 }
@@ -90,15 +92,15 @@ func runSetup(svc service.Service, args []string) {
 	dataDir := fs.String("data-dir", "", "keep the rental base image and the rentals' disks on another disk, e.g. an NVMe on a board with a small eMMC (never an SD card)")
 	fs.Parse(args)
 
-	if runtime.GOOS != "linux" {
-		exitf("the rental runtime, and so its setup, runs on Linux only")
+	if !hostsRentals() {
+		exitf("the rental runtime, and so its setup, runs on Linux and Windows only")
 	}
 	if *status {
 		fmt.Println(setupSummary())
 		return
 	}
-	if os.Geteuid() != 0 {
-		exitf("setup needs root: run 'sudo gpu-agent setup'")
+	if !isAdmin() {
+		exitf("setup needs administrator rights: %s", adminHint("setup"))
 	}
 	if *dataDir != "" {
 		runDataDir(svc, *dataDir)
@@ -127,7 +129,7 @@ func runSetup(svc service.Service, args []string) {
 	if !ok || p.RentalPresent() {
 		exitf("a rental (or the leftover of one) is on this machine; the setup does not run beside it")
 	}
-	plan := autosetup.PlanFor(p.Findings(), autosetup.AptGet(h))
+	plan := autosetup.PlanFor(p.Findings(), autosetup.CanInstall(h, p))
 	if len(plan.Human) > 0 {
 		fmt.Println("This machine needs a person before it can be set up:")
 		for _, r := range plan.Human {
@@ -165,6 +167,7 @@ func runSetup(svc service.Service, args []string) {
 			fmt.Printf("\n== Step %d of %d: %s ==\n", a.Step, len(a.Steps), a.CurrentStep().Doing())
 		},
 	}
+	onMachine(&runner)
 	a := runner.Begin(plan, spec.GPUs, autosetup.ByCommand)
 	line := a.DriverLine()
 	fmt.Printf("%s%s.\n", strings.ToUpper(line[:1]), line[1:])

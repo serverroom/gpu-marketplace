@@ -545,8 +545,8 @@ func runRegister(svc service.Service, args []string) {
 		printCapability(capability)
 		return
 	}
-	plan := autosetup.PlanFor(p.Findings(), autosetup.AptGet(vmrt.OSHost{}))
-	if runtime.GOOS == "linux" && plan.Eligible() && autosetup.Enabled(config.ConfigDir()) {
+	plan := autosetup.PlanFor(p.Findings(), autosetup.CanInstall(vmrt.OSHost{}, p))
+	if hostsRentals() && plan.Eligible() && autosetup.Enabled(config.ConfigDir()) {
 		fmt.Println("Hosting:      not ready yet -- the agent finishes the setup by itself, nothing to do:")
 		for i, s := range plan.Steps {
 			fmt.Printf("                %d. %s (about %s)\n", i+1, s.Doing(), s.Takes())

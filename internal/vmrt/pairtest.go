@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -30,7 +30,7 @@ type PairTestResult struct {
 }
 
 // PairTestPath is where the latest pair test result lives.
-func PairTestPath(dataDir string) string { return filepath.Join(dataDir, "pairtest.json") }
+func PairTestPath(dataDir string) string { return path.Join(dataDir, "pairtest.json") }
 
 // SavePairTest records a result.
 func SavePairTest(h Host, dataDir string, res PairTestResult) error {

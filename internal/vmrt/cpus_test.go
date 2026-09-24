@@ -3,7 +3,7 @@ package vmrt
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"testing"
 
@@ -99,8 +99,8 @@ func TestTheRentalsLiveInTheStorageDir(t *testing.T) {
 	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join("/mnt/nvme/gpu-agent", "rentals", "R1")
-	if !h.Ran("run truncate -s 100G " + filepath.Join(want, "disk.img")) {
+	want := path.Join("/mnt/nvme/gpu-agent", "rentals", "R1")
+	if !h.Ran("run truncate -s 100G " + path.Join(want, "disk.img")) {
 		t.Errorf("the disk is not in the storage dir: %v", h.Calls)
 	}
 	if st, _ := LoadState(h, dataDir); st == nil || st.Rental.Dir != want {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 )
@@ -39,7 +39,7 @@ func (e *BusyError) Error() string {
 func (e *BusyError) Is(target error) bool { return target == ErrBusy }
 
 // BusyPath is where the record lives.
-func BusyPath(dataDir string) string { return filepath.Join(dataDir, "busy.json") }
+func BusyPath(dataDir string) string { return path.Join(dataDir, "busy.json") }
 
 const bootIDFile = "/proc/sys/kernel/random/boot_id"
 

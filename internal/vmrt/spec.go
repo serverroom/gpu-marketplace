@@ -49,6 +49,12 @@ type Spec struct {
 	GuestCPUName string
 	// StorageDir holds the base image and the rentals' disks; "" is DataDir.
 	StorageDir string
+	// SharedGPU: the GPUs reach the rental through the host OS's GPU
+	// paravirtualization (WSL 2's /dev/dxg on Windows) rather than a PCI
+	// device of this Linux. Nothing in this Linux holds them, and there is no
+	// desktop here to close: the programs using them are the host's own, read
+	// on the host.
+	SharedGPU bool
 }
 
 // Storage is where the base image and the rentals' disks live.

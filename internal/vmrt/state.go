@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
+	"path"
 )
 
 // State is the rental on this machine, written to disk after every step of a
@@ -66,7 +66,7 @@ func (st *State) ServicesToRestart() []string {
 const ModeContainer = "container"
 
 // StatePath is where the rental state lives.
-func StatePath(dataDir string) string { return filepath.Join(dataDir, "rental.json") }
+func StatePath(dataDir string) string { return path.Join(dataDir, "rental.json") }
 
 // SaveState writes the state, readable only by root.
 func SaveState(h Host, dataDir string, st *State) error {

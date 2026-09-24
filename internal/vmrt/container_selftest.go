@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -37,7 +37,7 @@ type ContainerTest struct {
 
 // ContainerSelfTestPath is where the latest container test result lives.
 func ContainerSelfTestPath(dataDir string) string {
-	return filepath.Join(dataDir, "container-selftest.json")
+	return path.Join(dataDir, "container-selftest.json")
 }
 
 // ContainerFingerprint is the machine a container test's verdict holds for: the
@@ -173,7 +173,7 @@ func (rt *ContainerRuntime) SelfTestContext(ctx context.Context, version string)
 	if err != nil {
 		return fail("could not make a test key: " + err.Error())
 	}
-	probes := DefaultProbes(rt.h)
+	probes := append(DefaultProbes(rt.h), rt.extraProbes...)
 	id := fmt.Sprintf("%s%d", SelfTestPrefix, now)
 	name := containerName(id)
 	// Start waits for the container's sshd to open (BootTimeout); its success

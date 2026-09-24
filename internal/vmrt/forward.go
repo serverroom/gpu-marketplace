@@ -13,6 +13,7 @@ import (
 type Forwarder struct {
 	ln     net.Listener
 	target string
+	dial   func() (net.Conn, error)
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	done   chan struct{}
@@ -20,11 +21,21 @@ type Forwarder struct {
 
 // StartForward listens on listen (a loopback address) and forwards to target.
 func StartForward(listen, target string) (*Forwarder, error) {
+	return StartForwardVia(listen, target, nil)
+}
+
+// StartForwardVia is StartForward with the connection to target opened by
+// dial: on Windows the guest is inside WSL, which the agent reaches through
+// wsl.exe, not over a route. nil dials target over TCP.
+func StartForwardVia(listen, target string, dial func(addr string) (net.Conn, error)) (*Forwarder, error) {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return nil, err
 	}
 	f := &Forwarder{ln: ln, target: target, conns: map[net.Conn]struct{}{}, done: make(chan struct{})}
+	if dial != nil {
+		f.dial = func() (net.Conn, error) { return dial(target) }
+	}
 	go f.serve()
 	return f, nil
 }
@@ -56,7 +67,13 @@ func (f *Forwarder) track(c net.Conn, add bool) {
 }
 
 func (f *Forwarder) pipe(client net.Conn) {
-	server, err := net.DialTimeout("tcp", f.target, 10*time.Second)
+	var server net.Conn
+	var err error
+	if f.dial != nil {
+		server, err = f.dial()
+	} else {
+		server, err = net.DialTimeout("tcp", f.target, 10*time.Second)
+	}
 	if err != nil {
 		client.Close()
 		return

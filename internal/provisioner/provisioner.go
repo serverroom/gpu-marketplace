@@ -107,6 +107,25 @@ var startForward = func(listen, target string) (stopper, error) {
 	return f, nil
 }
 
+// forwardVia opens the renter's SSH forward through dial; a variable so tests
+// need no socket.
+var forwardVia = func(listen, target string, dial func(string) (net.Conn, error)) (stopper, error) {
+	f, err := vmrt.StartForwardVia(listen, target, dial)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// openForward opens the renter's SSH forward to the guest: over TCP, or through
+// dialGuest where the agent has no route to the guest.
+func (p *Provisioner) openForward(listen, target string) (stopper, error) {
+	if p.dialGuest != nil {
+		return forwardVia(listen, target, p.dialGuest)
+	}
+	return startForward(listen, target)
+}
+
 // SSHListen is where the renter's SSH arrives from the relay tunnel.
 var SSHListen = net.JoinHostPort("127.0.0.1", strconv.Itoa(register.MicroVMSSHPort))
 
@@ -171,6 +190,9 @@ type Provisioner struct {
 	// readHostUse looks at the host's use now; nil: vmrt.ReadHostUse on the
 	// runtime's spec (nothing, on a provisioner built by hand).
 	readHostUse func() vmrt.HostUse
+	// dialGuest opens the renter's SSH to the guest where the agent has no
+	// route to it (a container inside WSL on Windows); nil dials over TCP.
+	dialGuest func(addr string) (net.Conn, error)
 	// notify tells the people on the machine; nil: vmrt.NotifyHost.
 	notify func(title, body string) (reached, problems []string)
 	// preRentalTest runs the full test boot right before a rental; busy
@@ -418,12 +440,21 @@ func (p *Provisioner) ContainerRuntime() *vmrt.ContainerRuntime {
 	return crt
 }
 
+// SelfInstalls reports whether the automatic setup installs this machine's
+// rental runtime whatever its package manager: a Windows machine, whose setup
+// installs WSL 2 and the distribution the runtime lives in.
+func (p *Provisioner) SelfInstalls() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.capability.Kind == KindContainerWSL
+}
+
 // IsContainer reports whether this machine hosts rentals as a hardened
 // container rather than a microVM.
 func (p *Provisioner) IsContainer() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.capability.Kind == KindContainer
+	return p.capability.Kind == KindContainer || p.capability.Kind == KindContainerWSL
 }
 
 // RuntimeSpec is the spec of whichever runtime backs this machine -- the
@@ -553,7 +584,7 @@ func (p *Provisioner) startNoting(machine Machine, o vmrt.StartOptions, noteInUs
 	err := machine.Start(o)
 	var fwd stopper
 	if err == nil {
-		fwd, err = startForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
+		fwd, err = p.openForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
 		if err != nil {
 			err = fmt.Errorf("open the renter's SSH forward: %w", err)
 			machine.Stop()
@@ -679,7 +710,7 @@ func (p *Provisioner) resume() (freed bool) {
 		p.status = StatusDirty
 		p.dirtyLocked("a rental's cleanup from before the agent started did not verify")
 	case p.machine.Alive():
-		fwd, err := startForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
+		fwd, err := p.openForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
 		if err != nil {
 			p.lastErr = "reopen the renter's SSH forward: " + err.Error()
 		} else {
