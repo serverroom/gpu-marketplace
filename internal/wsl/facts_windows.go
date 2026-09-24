@@ -56,9 +56,9 @@ func Facts() provisioner.WinFacts {
 	}
 	f.StorageDrive = filepath.VolumeName(dir)
 	f.StorageFreeGB = freeGB(dir)
-	f.Machine = vmrt.WSLHost{}
+	f.Machine = vmrt.ExecHost{}
 	if f.Ready {
-		f.Machine = vmrt.WSLHost{Exec: Exec, Dial: Dial, Keep: Keep}
+		f.Machine = vmrt.ExecHost{Exec: Exec, Dial: Dial, Keep: Keep}
 		f.Dial = Dial
 	}
 	return f

@@ -267,7 +267,7 @@ func importDistro(ctx context.Context, s *session, o Options) error {
 // takes effect, and installs what the agent needs in it beyond the container
 // stack.
 func configure(o Options) error {
-	h := vmrt.WSLHost{Exec: Exec}
+	h := vmrt.ExecHost{Exec: Exec}
 	if cur, err := h.ReadFile("/etc/wsl.conf"); err != nil || string(cur) != wslConf {
 		if err := h.WriteFile("/etc/wsl.conf", []byte(wslConf), 0644); err != nil {
 			return err

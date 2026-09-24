@@ -32,7 +32,7 @@ func adminHint(command string) string {
 // there: this machine, or on Windows the agent's WSL 2 distribution.
 func machineHost() (vmrt.Host, string) {
 	if runtime.GOOS == "windows" {
-		return vmrt.WSLHost{Exec: wsl.Exec, Dial: wsl.Dial, Keep: wsl.Keep}, provisioner.WSLDataDir
+		return vmrt.ExecHost{Exec: wsl.Exec, Dial: wsl.Dial, Keep: wsl.Keep}, provisioner.WSLDataDir
 	}
 	return vmrt.OSHost{}, config.DataDir()
 }

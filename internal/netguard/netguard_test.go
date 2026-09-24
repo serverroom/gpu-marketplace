@@ -12,6 +12,7 @@ type fakeRunner struct {
 	fail   map[string]bool // "nft -f" / "nft list" -> should error
 	listed string          // what `nft list table` prints
 	calls  []string
+	loaded string          // the ruleset fed to `nft -f -`
 }
 
 func (f *fakeRunner) key(name string, args []string) string {
@@ -27,6 +28,11 @@ func (f *fakeRunner) Run(name string, args ...string) error {
 		}
 	}
 	return nil
+}
+
+func (f *fakeRunner) RunInput(stdin []byte, name string, args ...string) error {
+	f.loaded = string(stdin)
+	return f.Run(name, args...)
 }
 
 func (f *fakeRunner) Output(name string, args ...string) (string, error) {

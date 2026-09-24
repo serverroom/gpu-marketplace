@@ -17,14 +17,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"sort"
 	"strings"
 )
 
-// Runner executes host commands. provisioner.ExecRunner satisfies it.
+// Runner executes host commands. vmrt.Host satisfies it. The ruleset is fed to
+// nft over stdin (RunInput), not a temp file, so the fence loads the same way
+// whether nft runs on this machine or inside a Linux environment the agent
+// owns (WSL on Windows, a VM on macOS), where a host temp path would not exist.
 type Runner interface {
 	Run(name string, args ...string) error
+	RunInput(stdin []byte, name string, args ...string) error
 	Output(name string, args ...string) (string, error)
 }
 
@@ -180,21 +183,8 @@ func (g *Guard) Apply() error {
 	if err != nil {
 		return fmt.Errorf("read host networks: %w", err)
 	}
-	f, err := os.CreateTemp("", "gpu-rental-*.nft")
-	if err != nil {
-		return fmt.Errorf("write firewall rules: %w", err)
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.WriteString(Ruleset(g.bridge, g.subnet, nets)); err != nil {
-		f.Close()
-		return fmt.Errorf("write firewall rules: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("write firewall rules: %w", err)
-	}
-
 	_ = g.runner.Run("nft", "delete", "table", "inet", Table) // absent is fine
-	if err := g.runner.Run("nft", "-f", f.Name()); err != nil {
+	if err := g.runner.RunInput([]byte(Ruleset(g.bridge, g.subnet, nets)), "nft", "-f", "-"); err != nil {
 		return fmt.Errorf("load firewall rules: %w", err)
 	}
 	out, err := g.runner.Output("nft", "list", "table", "inet", Table)

@@ -59,7 +59,7 @@ type WinFacts struct {
 	RestartPending bool
 	// Ready: the agent's Windows account and its distribution both exist.
 	Ready bool
-	// Machine is the distribution (a vmrt.WSLHost), which has nothing in it
+	// Machine is the distribution (a vmrt.ExecHost), which has nothing in it
 	// until Ready; Dial reaches a rental's container inside it.
 	Machine vmrt.Host
 	Dial    func(addr string) (net.Conn, error)
@@ -163,7 +163,7 @@ func detectWindows(osHost vmrt.Host, arch, dataDir, version string) *Provisioner
 
 	machine := f.Machine
 	if machine == nil {
-		machine = vmrt.WSLHost{}
+		machine = vmrt.ExecHost{}
 	}
 	findings, done := windowsFindings(f, spec)
 	if !done {
