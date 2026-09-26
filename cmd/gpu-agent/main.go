@@ -138,6 +138,8 @@ func (a *gpuAgent) Start(s service.Service) error {
 		}()
 		go a.announcePeers(bg)
 		go a.reportLoop(bg)
+		// The listing's network figures, measured again each day (speedtest.go).
+		go a.speedtestJob().daily(bg)
 	}
 
 	// Legacy local stats server (best-effort; superseded by push-over-tunnel).

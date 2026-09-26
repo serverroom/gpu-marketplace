@@ -806,3 +806,34 @@ environment the agent owns.
   Windows (over WinRM that path did not reach the distribution; the service's does).
 - Known: Windows and macOS agents still do not update themselves (the installer updates
   them); after a Mac restart the setup boots the VM again before the Mac reports ready.
+
+# v0.3.1: the network is measured again every day
+
+Built on v0.3.0 (main f823688). Found on a DGX Spark whose host moved it from Wi-Fi to a
+cable and from a 40 to a 300 Mbps plan: the listing kept its first measurement (31.5 / 26.4
+Mbps), and `sudo gpu-agent speedtest` refused with "the marketplace has not named a speed
+test server for this machine, and none is saved from an earlier agent start" -- the
+marketplace names the server only while a listing has no measurement, and that machine was
+measured by an agent from before the server was saved. The owner's call: the agent measures
+again daily.
+
+1. **The control plane names the server always** (`speedtest_target`, ServCast from
+   2026-09-26), with `speedtest_every_hours` (24; 0 turns it off everywhere) and
+   `measured_at`. `speedtest` keeps its meaning -- "measure now", only while the listing has
+   no figures -- so older agents behave as before. The saved `speedtest.json` keeps the
+   target, the interval and the last measurement (the marketplace's, or this machine's own
+   last posted result).
+2. **`gpu-agent speedtest` works on a measured listing**: the fresh answer's
+   `speedtest_target` is used when there is no `speedtest`, so nothing saved is needed.
+3. **The daemon measures again a day after the last measurement** (`daily`, speedtest.go),
+   against the saved server, only while the machine is free: a rented or provisioning
+   machine, a failure (warned, and noted on the problem list), or no named server, are
+   looked at again an hour later. A measurement taken in between -- the command, the first
+   one at start -- moves the day. A starting agent that knows of no measurement waits a
+   random part of the day, and an overdue one runs within the hour, spread the same way, so
+   a fleet updated in the same hour does not measure against one server in the same minute.
+
+Tests: the interval (default, off, bounds), the first run (unknown, recent, overdue), one
+daily step (due and free, measured since, rented, failed, no server, off), the loop stops
+with the agent, the command's target from a measured listing's answer, and the saved file
+(target folded into `speedtest`, `measured_at` from the answer and from a post).

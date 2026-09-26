@@ -200,3 +200,124 @@ func TestChooseSpeedtestTarget(t *testing.T) {
 		t.Error("no target anywhere: want an error")
 	}
 }
+
+func hours(h int) *int { return &h }
+
+func TestSpeedtestEvery(t *testing.T) {
+	for _, c := range []struct {
+		h    *int
+		want time.Duration
+	}{
+		{nil, 24 * time.Hour},     // an older control plane: the agent's day
+		{hours(0), 0},             // turned off
+		{hours(-3), 0},            // nonsense is off, not a busy loop
+		{hours(6), 6 * time.Hour}, // as the marketplace says
+		{hours(100000), 30 * 24 * time.Hour},
+	} {
+		if got := speedtestEvery(register.CapabilityResponse{SpeedtestEveryHours: c.h}); got != c.want {
+			t.Errorf("every %v: %s, want %s", c.h, got, c.want)
+		}
+	}
+}
+
+func TestFirstSpeedtestIsSpreadAndKeepsTheDay(t *testing.T) {
+	now := time.Unix(1790000000, 0)
+	half := func(d time.Duration) time.Duration { return d / 2 }
+	day := 24 * time.Hour
+
+	if got, want := firstSpeedtest(now, 0, day, half), now.Add(10*time.Minute+12*time.Hour); !got.Equal(want) {
+		t.Errorf("no measurement known: %s, want %s (a random part of the day)", got, want)
+	}
+	measured := now.Add(-3 * time.Hour).Unix()
+	if got, want := firstSpeedtest(now, measured, day, half), time.Unix(measured, 0).Add(day); !got.Equal(want) {
+		t.Errorf("measured 3 h ago: %s, want a day after it, %s", got, want)
+	}
+	overdue := now.Add(-40 * time.Hour).Unix()
+	if got, want := firstSpeedtest(now, overdue, day, half), now.Add(35*time.Minute); !got.Equal(want) {
+		t.Errorf("overdue: %s, want within the hour, %s", got, want)
+	}
+}
+
+// dailyJob is a fakeJob with a saved answer and a clock.
+func dailyJob(status func() string, run func(context.Context) (speedtest.Result, error), saved register.CapabilityResponse, now time.Time) *fakeJob {
+	f := newFakeJob(status, run)
+	f.saved = func() register.CapabilityResponse { return saved }
+	f.now = func() time.Time { return now }
+	f.spread = func(time.Duration) time.Duration { return 0 }
+	f.problem = func(message, _ string) { f.log = append(f.log, "problem: "+message) }
+	return f
+}
+
+func TestDailySpeedtest(t *testing.T) {
+	now := time.Unix(1790000000, 0)
+	day := 24 * time.Hour
+	due := register.CapabilityResponse{Speedtest: &jobTarget, MeasureURL: "https://example.net/measure", MeasuredAt: now.Add(-25 * time.Hour).Unix()}
+
+	f := dailyJob(always(provisioner.StatusFree), succeed, due, now)
+	if next := f.again(context.Background()); f.runs != 1 || f.posts != 1 || f.postedTo != due.MeasureURL || !next.Equal(now.Add(day)) {
+		t.Errorf("due and free: %d runs, %d posts to %q, next %s; want one measurement posted and the next a day on", f.runs, f.posts, f.postedTo, next)
+	}
+
+	recent := due
+	recent.MeasuredAt = now.Add(-2 * time.Hour).Unix() // `gpu-agent speedtest` ran since
+	f = dailyJob(always(provisioner.StatusFree), succeed, recent, now)
+	if next := f.again(context.Background()); f.runs != 0 || !next.Equal(now.Add(22*time.Hour)) {
+		t.Errorf("measured 2 h ago: %d runs, next %s; want none, and a day after that measurement", f.runs, next)
+	}
+
+	f = dailyJob(always(provisioner.StatusRented), succeed, due, now)
+	if next := f.again(context.Background()); f.runs != 0 || len(f.log) != 0 || !next.Equal(now.Add(time.Hour)) {
+		t.Errorf("rented: %d runs, log %q, next %s; want nothing run or said, and a look in an hour", f.runs, f.log, next)
+	}
+
+	f = dailyJob(always(provisioner.StatusFree), func(context.Context) (speedtest.Result, error) {
+		return speedtest.Result{}, errors.New("download: connection reset")
+	}, due, now)
+	if next := f.again(context.Background()); f.runs != 1 || f.posts != 0 || !next.Equal(now.Add(time.Hour)) || len(f.log) != 2 || !strings.HasPrefix(f.log[1], "problem: the daily network speed test failed") {
+		t.Errorf("failed: %d runs, %d posts, next %s, log %q; want a warning, a problem and a retry in an hour", f.runs, f.posts, next, f.log)
+	}
+
+	unnamed := due
+	unnamed.Speedtest = nil
+	f = dailyJob(always(provisioner.StatusFree), succeed, unnamed, now)
+	if next := f.again(context.Background()); f.runs != 0 || !next.Equal(now.Add(time.Hour)) {
+		t.Errorf("no server named: %d runs, next %s; want none and a look in an hour", f.runs, next)
+	}
+
+	off := due
+	off.SpeedtestEveryHours = hours(0)
+	f = dailyJob(always(provisioner.StatusFree), succeed, off, now)
+	if next := f.again(context.Background()); f.runs != 0 || !next.Equal(now.Add(day)) {
+		t.Errorf("turned off: %d runs, next %s; want none and a look tomorrow", f.runs, next)
+	}
+}
+
+func TestDailySpeedtestStopsWithTheAgent(t *testing.T) {
+	f := dailyJob(always(provisioner.StatusFree), succeed, register.CapabilityResponse{Speedtest: &jobTarget}, time.Now())
+	f.now = time.Now
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		f.daily(ctx)
+		close(done)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the daily loop outlived the agent")
+	}
+	if f.runs != 0 {
+		t.Errorf("%d runs; the first daily measurement is at least ten minutes after the start", f.runs)
+	}
+}
+
+func TestChooseSpeedtestTargetFromAMeasuredListing(t *testing.T) {
+	// v0.3.1 control planes name the server of a measured listing as
+	// speedtest_target: nothing saved from an earlier start is needed.
+	target, url, err := chooseSpeedtestTarget(&register.CapabilityResponse{SpeedtestTarget: &jobTarget, MeasureURL: "https://example.net/measure"}, register.CapabilityResponse{})
+	if err != nil || target != jobTarget || url != "https://example.net/measure" {
+		t.Errorf("%+v %q %v; want the named server", target, url, err)
+	}
+}

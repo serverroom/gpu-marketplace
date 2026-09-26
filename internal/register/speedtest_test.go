@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/speedtest"
@@ -264,5 +265,64 @@ func TestPlainBodyKeepsNoMarkup(t *testing.T) {
 	}
 	if got := PlainBody(strings.Repeat("a", 400)); len([]rune(got)) != 300 {
 		t.Errorf("long body kept %d characters", len([]rune(got)))
+	}
+}
+
+// From v0.3.1 the control plane names the server even for a listing that is
+// already measured, with the interval and the last measurement; the file keeps
+// all three for the daily re-measurement and the speedtest command.
+func TestAMeasuredListingStillNamesItsServer(t *testing.T) {
+	answer := `{"measure_url":"https://example.net/api/marketplace/measure","measured_at":1789792246,"speedtest_every_hours":24,
+		"speedtest_target":{"server":"speedtest-ny.example.net",
+			"download_url":"https://speedtest-ny.example.net/backend/garbage",
+			"upload_url":"https://speedtest-ny.example.net/backend/empty",
+			"latency_host":"console-nyc.example.net","latency_port":2222}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, answer)
+	}))
+	defer srv.Close()
+	registeredAt(t, srv.URL+"/api/marketplace/capability")
+
+	resp, err := ReportCapability(control.Capability{Ready: true})
+	if err != nil {
+		t.Fatalf("ReportCapability: %v", err)
+	}
+	if resp.Speedtest != nil {
+		t.Errorf("speedtest = %+v; a measured listing is not asked to measure", resp.Speedtest)
+	}
+	saved := SavedSpeedtest()
+	if saved.Speedtest == nil || *saved.Speedtest != testTarget {
+		t.Errorf("saved target = %+v, want %+v", saved.Speedtest, testTarget)
+	}
+	if saved.SpeedtestTarget != nil || saved.AgentUpdate != nil {
+		t.Errorf("saved = %+v; the target is kept once, as speedtest, and no update offer", saved)
+	}
+	if saved.MeasuredAt != 1789792246 || saved.SpeedtestEveryHours == nil || *saved.SpeedtestEveryHours != 24 {
+		t.Errorf("saved measured_at %d, every %v; want the marketplace's", saved.MeasuredAt, saved.SpeedtestEveryHours)
+	}
+
+	// An older control plane's answer names no target: what is saved stays.
+	answer = `{"measure_url":"https://example.net/api/marketplace/measure"}`
+	if _, err := ReportCapability(control.Capability{Ready: true}); err != nil {
+		t.Fatalf("ReportCapability: %v", err)
+	}
+	if again := SavedSpeedtest(); again.Speedtest == nil || again.MeasuredAt != 1789792246 {
+		t.Errorf("after an answer without a target: %+v, want the saved target and measurement kept", again)
+	}
+}
+
+// A result this machine posts is when its next daily measurement counts from.
+func TestPostingAMeasurementRemembersWhen(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+	registeredAt(t, srv.URL+"/api/marketplace/capability")
+	before := time.Now().Unix()
+	if err := PostMeasurement(srv.URL+"/api/marketplace/measure", speedtest.Result{Server: "speedtest-ny.example.net", DownMbps: 300, UpMbps: 100}); err != nil {
+		t.Fatalf("PostMeasurement: %v", err)
+	}
+	if at := SavedSpeedtest().MeasuredAt; at < before || at > time.Now().Unix() {
+		t.Errorf("measured_at %d, want the moment it was posted", at)
 	}
 }

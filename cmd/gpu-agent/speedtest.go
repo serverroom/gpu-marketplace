@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"runtime"
@@ -31,6 +32,11 @@ type speedtestJob struct {
 	// problem records a measurement the listing asked for that failed, for
 	// the marketplace's problem list; nil: nowhere.
 	problem func(message, detail string)
+	// For the daily re-measurement: the target, interval and last
+	// measurement as last saved, the clock, and a random part of a duration.
+	saved  func() register.CapabilityResponse
+	now    func() time.Time
+	spread func(time.Duration) time.Duration
 }
 
 // busyError: the machine was not free, so nothing was measured.
@@ -53,6 +59,14 @@ func (a *gpuAgent) speedtestJob() speedtestJob {
 			if a.ops != nil {
 				a.ops.errs.Note(control.AreaAgent, message, detail)
 			}
+		},
+		saved: register.SavedSpeedtest,
+		now:   time.Now,
+		spread: func(d time.Duration) time.Duration {
+			if d <= 0 {
+				return 0
+			}
+			return time.Duration(rand.Int63n(int64(d)))
 		},
 	}
 }
@@ -134,14 +148,123 @@ func (j speedtestJob) initial(ctx context.Context, resp *register.CapabilityResp
 	}
 }
 
+// The daily re-measurement. What a listing says about its line is what renters
+// choose by, and a host's line changes -- a faster plan, Wi-Fi swapped for a
+// cable -- without the host thinking to measure again. So the running agent
+// measures again once a day, or as often as the marketplace says, against the
+// server the marketplace last named, while the machine is free. A rented or
+// busy machine, and a test that fails, are tried again an hour later.
+const (
+	defaultSpeedtestEvery = 24 * time.Hour
+	maxSpeedtestEvery     = 30 * 24 * time.Hour
+	speedtestRecheck      = time.Hour
+)
+
+// speedtestEvery is the marketplace's interval, the default when it named
+// none, and 0 when it turned the re-measurement off.
+func speedtestEvery(saved register.CapabilityResponse) time.Duration {
+	h := saved.SpeedtestEveryHours
+	switch {
+	case h == nil:
+		return defaultSpeedtestEvery
+	case *h <= 0:
+		return 0
+	case time.Duration(*h)*time.Hour > maxSpeedtestEvery:
+		return maxSpeedtestEvery
+	}
+	return time.Duration(*h) * time.Hour
+}
+
+// firstSpeedtest is when a starting agent first measures again: a day after
+// the last measurement it knows of. Knowing of none, it waits a random part of
+// the interval, and a measurement already overdue runs within the hour, spread
+// the same way -- so a fleet that updated itself in the same hour does not
+// measure against the same server in the same minute.
+func firstSpeedtest(now time.Time, measuredAt int64, every time.Duration, spread func(time.Duration) time.Duration) time.Time {
+	if measuredAt <= 0 {
+		return now.Add(10*time.Minute + spread(every))
+	}
+	earliest := now.Add(5*time.Minute + spread(time.Hour))
+	if due := time.Unix(measuredAt, 0).Add(every); due.After(earliest) {
+		return due
+	}
+	return earliest
+}
+
+// daily re-measures until ctx ends.
+func (j speedtestJob) daily(ctx context.Context) {
+	saved := j.saved()
+	every := speedtestEvery(saved)
+	if every == 0 {
+		every = defaultSpeedtestEvery // off for now; again() looks each day
+	}
+	next := firstSpeedtest(j.now(), saved.MeasuredAt, every, j.spread)
+	for {
+		timer := time.NewTimer(next.Sub(j.now()))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		next = j.again(ctx)
+	}
+}
+
+// again is one daily measurement, when one is due, and says when to look
+// next. It reads the saved answer each time, so a new server, a new interval
+// or a measurement taken in between (`gpu-agent speedtest`, an agent start)
+// is followed.
+func (j speedtestJob) again(ctx context.Context) time.Time {
+	saved := j.saved()
+	every := speedtestEvery(saved)
+	now := j.now()
+	if every == 0 {
+		return now.Add(defaultSpeedtestEvery)
+	}
+	if saved.MeasuredAt > 0 {
+		if due := time.Unix(saved.MeasuredAt, 0).Add(every); due.After(now.Add(time.Minute)) {
+			return due
+		}
+	}
+	if saved.Speedtest == nil {
+		return now.Add(speedtestRecheck) // no server named yet
+	}
+	target := *saved.Speedtest
+	if err := target.Validate(); err != nil {
+		j.warn("Daily speed test not run: %v", err)
+		return now.Add(speedtestRecheck)
+	}
+	res, err := j.measure(ctx, target)
+	if err == nil {
+		if err = j.post(saved.MeasureURL, res); err == nil {
+			j.say("Daily %s", res.Summary())
+			return now.Add(every)
+		}
+		err = fmt.Errorf("the result was not posted to the listing: %w", err)
+	}
+	var busy *busyError
+	if ctx.Err() != nil || errors.As(err, &busy) || errors.Is(err, errRentalStarted) {
+		return now.Add(speedtestRecheck)
+	}
+	j.warn("Daily speed test failed: %v; trying again in %s", err, speedtestRecheck)
+	if j.problem != nil {
+		j.problem("the daily network speed test failed; it is tried again every hour until it succeeds", err.Error())
+	}
+	return now.Add(speedtestRecheck)
+}
+
 // chooseSpeedtestTarget prefers what the marketplace just answered, then what
-// it answered last: a listing that already has its measurement is no longer
-// offered a target, but can be measured again against the same server.
+// it answered last: a listing that already has its measurement is offered no
+// measurement, but a control plane from v0.3.1 still names its server
+// (SpeedtestTarget), and an older one's last-named server is saved.
 func chooseSpeedtestTarget(fresh *register.CapabilityResponse, saved register.CapabilityResponse) (speedtest.Target, string, error) {
 	target, measureURL := saved.Speedtest, saved.MeasureURL
 	if fresh != nil {
 		if fresh.Speedtest != nil {
 			target = fresh.Speedtest
+		} else if fresh.SpeedtestTarget != nil {
+			target = fresh.SpeedtestTarget
 		}
 		if fresh.MeasureURL != "" {
 			measureURL = fresh.MeasureURL

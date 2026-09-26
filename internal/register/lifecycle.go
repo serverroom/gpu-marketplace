@@ -115,6 +115,18 @@ type CapabilityResponse struct {
 	// Speedtest names the server to measure against while the listing still
 	// needs its initial network measurement; nil once it has one.
 	Speedtest *speedtest.Target `json:"speedtest,omitempty"`
+	// SpeedtestTarget names the same server whether or not a measurement is
+	// wanted now: what `gpu-agent speedtest` and the daily re-measurement use
+	// once the listing has its first figures. Control planes before v0.3.1
+	// do not send it.
+	SpeedtestTarget *speedtest.Target `json:"speedtest_target,omitempty"`
+	// SpeedtestEveryHours is how often the running agent measures again; 0
+	// turns that off, and no value means the agent's own default (a day).
+	SpeedtestEveryHours *int `json:"speedtest_every_hours,omitempty"`
+	// MeasuredAt is when the listing's network was last measured (Unix
+	// seconds): the marketplace's word in an answer, and in the saved file
+	// also this machine's own last posted result. 0: never, or not known.
+	MeasuredAt int64 `json:"measured_at,omitempty"`
 	// MeasureURL is where a measurement is posted.
 	MeasureURL string `json:"measure_url,omitempty"`
 	// AgentUpdate names the release this machine should run, when it runs an
@@ -209,19 +221,43 @@ func SavedSpeedtest() CapabilityResponse {
 	return r
 }
 
-// rememberSpeedtest saves the newest target and measure URL. An answer that
-// names neither -- the listing is already measured -- keeps the old ones.
+// rememberSpeedtest saves the newest target, measure URL and interval, and
+// when the listing was last measured. The target is kept as Speedtest,
+// whichever field named it. An answer that names no target -- an older
+// control plane, and the listing already measured -- keeps the saved one and
+// says nothing about the last measurement, so that is kept too.
 func rememberSpeedtest(resp *CapabilityResponse) error {
-	if resp == nil || (resp.Speedtest == nil && resp.MeasureURL == "") {
+	if resp == nil || (resp.Speedtest == nil && resp.SpeedtestTarget == nil && resp.MeasureURL == "") {
 		return nil
 	}
 	saved := SavedSpeedtest()
-	if resp.Speedtest != nil {
-		saved.Speedtest = resp.Speedtest
+	if target := resp.Speedtest; target != nil || resp.SpeedtestTarget != nil {
+		if target == nil {
+			target = resp.SpeedtestTarget
+		}
+		saved.Speedtest = target
+		saved.MeasuredAt = resp.MeasuredAt
+	}
+	if resp.SpeedtestEveryHours != nil {
+		saved.SpeedtestEveryHours = resp.SpeedtestEveryHours
 	}
 	if resp.MeasureURL != "" {
 		saved.MeasureURL = resp.MeasureURL
 	}
+	return saveSpeedtest(saved)
+}
+
+// rememberMeasured records a result this machine just posted, so the daily
+// re-measurement counts its day from it.
+func rememberMeasured(at time.Time) error {
+	saved := SavedSpeedtest()
+	saved.MeasuredAt = at.Unix()
+	return saveSpeedtest(saved)
+}
+
+func saveSpeedtest(saved CapabilityResponse) error {
+	saved.SpeedtestTarget = nil // folded into Speedtest
+	saved.AgentUpdate = nil     // an answer's, not the file's
 	if err := os.MkdirAll(config.ConfigDir(), 0755); err != nil {
 		return err
 	}
@@ -271,6 +307,8 @@ func PostMeasurement(measureURL string, r speedtest.Result) error {
 	if code != http.StatusOK {
 		return &EndpointError{Op: "speed test report", Code: code, Body: string(body)}
 	}
+	// Best effort: losing it costs one early daily re-measurement.
+	_ = rememberMeasured(time.Now())
 	return nil
 }
 
