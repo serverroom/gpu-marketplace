@@ -766,6 +766,38 @@ func gpuVerifier(r Runner) func(returned []vmrt.BoundDevice) bool {
 	}
 }
 
+// sharedGPUVerifier is the look at a GPU a container rental shared over CDI,
+// once the container is gone. The host kept the driver and its own programs
+// the whole time -- its desktop, and whatever the owner runs beside a rental
+// (llama-server, a training job) -- so what THEY hold on the GPU is not the
+// rental's, and the rental's own processes died with the container: Stop only
+// asks once podman confirms it gone. gpuVerifier, written for a GPU handed to
+// a microVM whole, reads any compute process or any used memory as the
+// rental's leftover, and on a shared GPU that quarantined a DGX Spark whose
+// owner was running a model while the automatic test rental tore down
+// (spark-683a, 2026-09-26): the machine sat off the market for a day over
+// the owner's own work. What can still be wrong after a shared rental is the
+// GPU itself: the vendor tool no longer lists it, which is a driver the rental
+// left broken. That is what this verifies, and nothing else.
+func sharedGPUVerifier(r Runner) func(returned []vmrt.BoundDevice) bool {
+	return func(returned []vmrt.BoundDevice) bool {
+		var nvidia []string
+		for _, d := range returned {
+			if d.Driver == "nvidia" {
+				nvidia = append(nvidia, d.BDF)
+			}
+		}
+		if len(nvidia) == 0 {
+			return true
+		}
+		if _, err := r.LookPath("nvidia-smi"); err != nil {
+			return true
+		}
+		_, listed := nvidiaListed(r, nvidia)
+		return listed
+	}
+}
+
 // smiRows reads nvidia-smi's "<bus id>, <name>, <value>" rows by PCI address.
 // The name sits between the first and the last comma.
 func smiRows(out string) map[string][2]string {
@@ -782,8 +814,10 @@ func smiRows(out string) map[string][2]string {
 	return rows
 }
 
-func nvidiaClear(r Runner, bdfs []string) bool {
-	// The driver takes a moment to bring a GPU back after it is rebound.
+// nvidiaListed waits for nvidia-smi to list every one of these GPUs again and
+// returns their rows (name, memory.used). The driver takes a moment to bring a
+// GPU back after it is rebound; a GPU it never lists again is not back.
+func nvidiaListed(r Runner, bdfs []string) (map[string][2]string, bool) {
 	var rows map[string][2]string
 	back := false
 	for i := 0; i < 12 && !back; i++ {
@@ -799,6 +833,11 @@ func nvidiaClear(r Runner, bdfs []string) bool {
 			verifySleep()
 		}
 	}
+	return rows, back
+}
+
+func nvidiaClear(r Runner, bdfs []string) bool {
+	rows, back := nvidiaListed(r, bdfs)
 	if !back {
 		return false
 	}

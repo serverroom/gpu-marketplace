@@ -296,7 +296,10 @@ the container toolkit, writes the CDI spec, adds the user-namespace id ranges an
 rental image; `sudo gpu-agent check --boot` runs the container test boot. The container
 shares the GPU, so **a container test boot runs beside the desktop** and never closes it; a
 rental closes it as above, with the 15-minute warning, and waits for your own programs on
-the GPU first, as on any Spark. A linked pair needs microVMs, so a Spark in container mode
+the GPU first, as on any Spark. Because the GPU stays yours throughout, the check at the end
+of a container rental is that the driver still lists the GPU -- your own programs on it
+(your desktop, a model you are running) are not read as the rental's leftovers, and cannot
+hold the machine back from renters (since v0.3.2; v0.3.1 and earlier did). A linked pair needs microVMs, so a Spark in container mode
 cannot be half of a pair. When the signed nvgrace carries the GB10, the agent goes back to
 microVMs by itself.
 

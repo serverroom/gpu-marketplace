@@ -330,6 +330,46 @@ func TestGPUVerifierChecksANoFigureGPUByItsHolders(t *testing.T) {
 	}
 }
 
+// A container rental shares the GPU with the host, whose desktop and whatever
+// the owner runs stay on it: a compute process or used memory after the
+// container is gone is the host's, never the rental's. spark-683a was
+// quarantined for a day over its owner's own model. Only a GPU the driver no
+// longer lists fails.
+func TestSharedGPUVerifierIgnoresTheHostsOwnUse(t *testing.T) {
+	noSleep(t)
+	gb10 := returned("000f:01:00.0", "nvidia")
+	unified := &fakeRunner{outputs: map[string]string{
+		"nvidia-smi --query-gpu=pci.bus_id,name,memory.used": "0000000F:01:00.0, NVIDIA GB10, [N/A]\n",
+		"nvidia-smi --query-compute-apps":                    "0000000F:01:00.0, 4242\n",
+	}}
+	if !sharedGPUVerifier(unified)(gb10) {
+		t.Error("a shared unified-memory GPU with the owner's own process on it did not verify")
+	}
+	if gpuVerifier(unified)(gb10) {
+		t.Error("the whole-GPU verifier would have quarantined it, which is the case this guards")
+	}
+
+	rented := returned("0000:01:00.0", "nvidia")
+	discrete := &fakeRunner{outputs: map[string]string{
+		"nvidia-smi --query-gpu=pci.bus_id,name,memory.used": "00000000:01:00.0, NVIDIA L4, 9000\n",
+	}}
+	if !sharedGPUVerifier(discrete)(rented) {
+		t.Error("a shared discrete GPU with the host's own memory in use did not verify")
+	}
+
+	missing := &fakeRunner{outputs: map[string]string{
+		"nvidia-smi --query-gpu=pci.bus_id,name,memory.used": "00000000:41:00.0, NVIDIA L4, 3\n",
+	}}
+	if sharedGPUVerifier(missing)(rented) {
+		t.Error("a shared GPU the driver no longer lists verified")
+	}
+
+	noTool := &fakeRunner{missing: map[string]bool{"nvidia-smi": true}}
+	if !sharedGPUVerifier(noTool)(rented) {
+		t.Error("a host without nvidia-smi has nothing to check and must not fail closed here")
+	}
+}
+
 // Only the rented GPUs are the rental's. A GPU the rental left out may be busy
 // with the provider's own work, and that is no reason to quarantine the machine.
 func TestGPUVerifierLooksOnlyAtTheRentedGPUs(t *testing.T) {

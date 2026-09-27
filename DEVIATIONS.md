@@ -837,3 +837,23 @@ Tests: the interval (default, off, bounds), the first run (unknown, recent, over
 daily step (due and free, measured since, rented, failed, no server, off), the loop stops
 with the agent, the command's target from a measured listing's answer, and the saved file
 (target folded into `speedtest`, `measured_at` from the answer and from a post).
+
+## Shared GPU teardown check (v0.3.2)
+
+1. **A container rental's teardown verifies only that the driver still lists the GPU**
+   (`sharedGPUVerifier`, container_detect.go). `gpuVerifier` was written for a GPU handed to
+   a microVM whole, where any compute process or used memory afterwards is the rental's. A
+   container shares the GPU over CDI and the host keeps the driver, its desktop and whatever
+   the owner runs, so that reading quarantined machines over their owners' own work:
+   spark-683a's automatic test rental on 2026-09-26 18:35 UTC tore down beside the owner's
+   running model, `nvidia-smi --query-compute-apps` listed it, and the machine sat `dirty`
+   and off the market until the teardown was re-run from the control plane a day later.
+   The rental's own processes cannot outlive the container (Stop asks only once podman
+   confirms it gone), so nothing of the rental can be on the GPU; what the check can still
+   catch is a driver the rental left broken (the GPU no longer listed).
+2. The microVM path is unchanged: there the GPU was the rental's alone and the old check is
+   right. Windows/WSL keeps `dxgVerifier`.
+
+Tests: the shared verifier passes a unified GPU with a compute process on it and a discrete
+GPU with memory in use (both of which the whole-GPU verifier fails), fails a GPU the driver
+no longer lists, and does not fail closed on a host without nvidia-smi.

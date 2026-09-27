@@ -164,7 +164,9 @@ func containerReasons(h vmrt.Host, spec vmrt.Spec, version string, findings []Fi
 func detectContainer(h vmrt.Host, goos, arch, dataDir, version string, spec vmrt.Spec, rep HostReport) *Provisioner {
 	fence := netguard.New(h, netguard.Bridge, vmrt.GuestSubnet, netguard.HostNetworks)
 	cdi := vmrt.CDIDeviceRefs(h)
-	crt := vmrt.NewContainer(h, spec, fence, vmrt.ContainerImageRef, cdi, gpuVerifier(h))
+	// The GPU is shared with the host, not handed over: the host's own
+	// programs stay on it, so the teardown check is sharedGPUVerifier's.
+	crt := vmrt.NewContainer(h, spec, fence, vmrt.ContainerImageRef, cdi, sharedGPUVerifier(h))
 
 	findings := containerReasons(h, spec, version, nil, true)
 	var reasons []string
