@@ -140,6 +140,9 @@ func (a *gpuAgent) Start(s service.Service) error {
 		go a.reportLoop(bg)
 		// The listing's network figures, measured again each day (speedtest.go).
 		go a.speedtestJob().daily(bg)
+		// A container rental on a GPU that shares the machine's memory (a GB10)
+		// is held to its memory by the agent, which --memory alone cannot do.
+		go a.prov.GuardMemory(bg, a.warn)
 	}
 
 	// Legacy local stats server (best-effort; superseded by push-over-tunnel).
@@ -581,6 +584,7 @@ func printUsage() {
 	fmt.Println("  setup --status   Show the last setup attempt and whether the automatic setup is on")
 	fmt.Println("  setup --off|--on Turn the automatic setup off or back on")
 	fmt.Println("  setup --data-dir Keep the rental image and disks on another disk (e.g. an NVMe; never an SD card)")
+	fmt.Println("  setup --rental-disk-gb  The disk each rental gets, in GB (0: the agent's choice, up to 500 GB)")
 	fmt.Println("  update           Update the agent to the latest release (--version vX.Y.Z), going back by itself if it does not come up;")
 	fmt.Println("                   --auto off|on pauses or resumes the automatic updates")
 	fmt.Println("  runtime prepare  Install the microVM runtime (--install-deps) and bake the rental base image")

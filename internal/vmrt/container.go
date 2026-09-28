@@ -48,6 +48,9 @@ type ContainerRuntime struct {
 	extraProbes []string
 	// release lets the machine go once the rental is gone (holder).
 	release func()
+	// guardFor and guardCgroup are the container GuardMemory last looked at and
+	// its cgroup (memguard.go); only GuardMemory's goroutine touches them.
+	guardFor, guardCgroup string
 }
 
 // letGo releases the machine a rental held (holder).
@@ -169,8 +172,28 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 	if err = rt.h.WriteFile(resolv, []byte("nameserver 1.1.1.1\nnameserver 8.8.8.8\n"), 0644); err != nil {
 		return fmt.Errorf("write resolv.conf: %w", err)
 	}
+	// The seccomp profile: podman's default without new user namespaces
+	// (seccomp.go). A rental never runs without it.
+	profile, perr := RentalSeccompProfile(rt.h)
+	if perr != nil {
+		return fmt.Errorf("seccomp profile: %w", perr)
+	}
+	seccomp := r.Dir + "/seccomp.json"
+	if err = rt.h.WriteFile(seccomp, profile, 0644); err != nil {
+		return fmt.Errorf("write seccomp profile: %w", err)
+	}
+	// The GPU's CDI spec, written again now: a GB10's DRM card number can change
+	// from one boot to the next, and a spec naming yesterday's card either fails
+	// the start or hands the renter the firmware framebuffer's node.
+	// (A host whose spec came from elsewhere, without the toolkit's nvidia-ctk,
+	// keeps the spec it has.)
+	if _, lerr := rt.h.LookPath("nvidia-ctk"); lerr == nil && !o.NoGPU && len(rt.cdiDevices) > 0 {
+		if err = RefreshContainerCDI(rt.h, nil); err != nil {
+			return err
+		}
+	}
 
-	if err = rt.h.Run("podman", rt.runArgs(name, akFile, st.VolumeMount, resolv, o)...); err != nil {
+	if err = rt.h.Run("podman", rt.runArgs(name, akFile, st.VolumeMount, resolv, seccomp, o)...); err != nil {
 		return fmt.Errorf("start container: %w", err)
 	}
 	st.ContainerID = name
@@ -194,10 +217,12 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 }
 
 // runArgs is the hardened `podman run` command line. What is absent matters as
-// much as what is there: no host bind-mounts, no host network, no added
-// capabilities, no privilege. userns=auto remaps container-root off host-root;
-// the GPU is shared read-only over CDI, never --privileged and never all GPUs.
-func (rt *ContainerRuntime) runArgs(name, akFile, volume, resolv string, o StartOptions) []string {
+// much as what is there: no host network, no dangerous capabilities, no
+// privilege, and of the host's files only the three this rental's own
+// directory holds (the renter's key, its resolv.conf, its encrypted volume).
+// userns=auto remaps container-root off host-root; the GPU is shared read-only
+// over CDI, never --privileged and never all GPUs.
+func (rt *ContainerRuntime) runArgs(name, akFile, volume, resolv, seccomp string, o StartOptions) []string {
 	args := []string{
 		"run", "--detach", "--name", name,
 		// size=65536 maps the full 0..65535 id range into the user namespace.
@@ -206,6 +231,8 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume, resolv string, o Start
 		// connection resets. container-root is still an unprivileged host uid.
 		"--userns=auto:size=65536",
 		"--security-opt=no-new-privileges",
+		// No new user namespaces inside the rental (seccomp.go).
+		"--security-opt=seccomp=" + seccomp,
 		// Drop every capability, then add back only the minimal set sshd needs to
 		// run and set up the renter's account: bind its port, generate keys, own
 		// the renter's home, drop privilege to the renter, and privsep-chroot.
@@ -213,8 +240,10 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume, resolv string, o Start
 		// user namespace, not to host resources), and the dangerous ones
 		// (SYS_ADMIN, NET_ADMIN, SYS_PTRACE, ...) stay dropped. The rootfs is
 		// writable (the NVIDIA CDI hook injects the driver by writing the
-		// container's ldcache/symlinks, which a read-only rootfs breaks) but
-		// ephemeral (--rm); the renter's data lives on the encrypted /home/renter.
+		// container's ldcache/symlinks, which a read-only rootfs breaks) and is
+		// removed with the container; the renter, who is not root, has no
+		// writable place on it: their data lives on the encrypted /home/renter,
+		// and /tmp, /var/tmp and /dev/shm are memory (below).
 		"--cap-drop=ALL",
 		"--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE", "--cap-add=FOWNER",
 		"--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=KILL",
@@ -236,10 +265,26 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume, resolv string, o Start
 		"--mount", "type=bind,src=" + volume + ",dst=/home/renter,idmap",
 	}
 	if mb := rt.spec.GuestMemoryMB(); mb > 0 {
-		args = append(args, "--memory", fmt.Sprintf("%dm", mb))
+		// The same figure for memory and memory+swap: none of the renter's pages
+		// is ever written to the host's swap, which is neither encrypted nor
+		// wiped with the rental's key.
+		args = append(args, "--memory", fmt.Sprintf("%dm", mb), "--memory-swap", fmt.Sprintf("%dm", mb))
+		// Memory-backed scratch space, counted in the same limit: /dev/shm (64 MB
+		// by default, which PyTorch's data loaders outgrow) and /tmp and /var/tmp,
+		// so nothing the renter writes outside their home lands unencrypted on
+		// the host's disk.
+		args = append(args, "--shm-size", fmt.Sprintf("%dm", scratchMB(mb, 2)),
+			"--tmpfs", fmt.Sprintf("/tmp:rw,nosuid,nodev,size=%dm", scratchMB(mb, 4)),
+			"--tmpfs", fmt.Sprintf("/var/tmp:rw,nosuid,nodev,size=%dm", scratchMB(mb, 4)))
 	}
 	if n := rt.spec.GuestCPUs(); n > 0 {
 		args = append(args, "--cpus", fmt.Sprintf("%d", n))
+	}
+	// The cores the listing names (on a GB10, its Cortex-X925s): without a
+	// cpuset the renter sees and runs on every core, and threads sized to
+	// nproc oversubscribe the --cpus quota.
+	if len(rt.spec.GuestCores) > 0 {
+		args = append(args, "--cpuset-cpus", cpuList(rt.spec.GuestCores))
 	}
 	// The GPU(s), shared over CDI. Absent on a self-test that runs without the
 	// GPU, and on a machine renting CPU only.
@@ -250,6 +295,19 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume, resolv string, o Start
 	}
 	args = append(args, rt.image)
 	return args
+}
+
+// scratchMB is a memory-backed scratch mount's ceiling: part of the rental's
+// memory, never more than 16 GiB (the NVIDIA NGC containers' /dev/shm).
+func scratchMB(memoryMB, part int) int {
+	mb := memoryMB / part
+	if mb > 16384 {
+		mb = 16384
+	}
+	if mb < 64 {
+		mb = 64
+	}
+	return mb
 }
 
 // freeGPU gives the renter the GPU to themselves. Unlike the microVM, it does

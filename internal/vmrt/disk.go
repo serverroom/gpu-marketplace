@@ -44,7 +44,25 @@ func openEncrypted(h Host, dir, id string, sizeGB int) (DiskState, error) {
 	if err := h.Run("truncate", "-s", mib(sizeGB), ds.File); err != nil {
 		return ds, fmt.Errorf("allocate disk: %w", err)
 	}
-	loop, err := h.Output("losetup", "--find", "--show", ds.File)
+	// Direct I/O: without it every block the rental reads or writes is cached
+	// twice, once for the loop device and once for the file under it -- on a
+	// GB10, whose GPU shares that memory, twice the renter's I/O comes out of
+	// what the GPU can use. A filesystem that cannot do direct I/O gets the
+	// loop device as before.
+	loop, err := h.Output("losetup", "--direct-io=on", "--find", "--show", ds.File)
+	if loop = strings.TrimSpace(loop); err != nil || !strings.HasPrefix(loop, "/dev/loop") {
+		// losetup may have attached the file and failed only to switch direct
+		// I/O on: use that device rather than attach a second one.
+		loop, err = "", nil
+		if held, jerr := h.Output("losetup", "-j", ds.File); jerr == nil {
+			if dev, _, ok := strings.Cut(strings.TrimSpace(held), ":"); ok && strings.HasPrefix(dev, "/dev/loop") {
+				loop, err = dev, nil
+			}
+		}
+		if loop == "" {
+			loop, err = h.Output("losetup", "--find", "--show", ds.File)
+		}
+	}
 	if err != nil {
 		return ds, fmt.Errorf("attach disk: %w", err)
 	}

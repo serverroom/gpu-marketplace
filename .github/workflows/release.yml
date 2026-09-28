@@ -74,10 +74,29 @@ jobs:
       - name: Generate checksums
         run: sha256sum gpu-agent-* > checksums.txt
 
+      # An annotated tag whose message says [prerelease] is published as a
+      # pre-release: installable by name ('gpu-agent update --version vX.Y.Z'),
+      # never the latest release the marketplace offers to every agent. Promote
+      # it with 'gh release edit vX.Y.Z --prerelease=false --latest'.
+      - name: Release kind
+        id: kind
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=false
+          ref=$(gh api "repos/${{ github.repository }}/git/ref/tags/${{ github.ref_name }}" --jq '.object.type + " " + .object.sha')
+          if [ "${ref%% *}" = "tag" ]; then
+            msg=$(gh api "repos/${{ github.repository }}/git/tags/${ref#* }" --jq '.message')
+            case "$msg" in *"[prerelease]"*) pre=true ;; esac
+          fi
+          echo "pre=$pre" >> "$GITHUB_OUTPUT"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ steps.kind.outputs.pre == 'true' }}
+          make_latest: ${{ steps.kind.outputs.pre == 'true' && 'false' || 'true' }}
           files: |
             gpu-agent-*
             checksums.txt

@@ -90,6 +90,7 @@ func runSetup(svc service.Service, args []string) {
 	off := fs.Bool("off", false, "turn the automatic setup off (the agent then waits for the manual commands)")
 	on := fs.Bool("on", false, "turn the automatic setup back on")
 	dataDir := fs.String("data-dir", "", "keep the rental base image and the rentals' disks on another disk, e.g. an NVMe on a board with a small eMMC (never an SD card)")
+	rentalDisk := fs.Int("rental-disk-gb", -1, "the disk a rental gets, in GB, at most what is free less 20 GB (0: the agent's choice, up to 500 GB)")
 	fs.Parse(args)
 
 	if !hostsRentals() {
@@ -104,6 +105,10 @@ func runSetup(svc service.Service, args []string) {
 	}
 	if *dataDir != "" {
 		runDataDir(svc, *dataDir)
+		return
+	}
+	if *rentalDisk >= 0 {
+		runRentalDisk(svc, *rentalDisk)
 		return
 	}
 	if *off || *on {
@@ -186,6 +191,36 @@ func runSetup(svc service.Service, args []string) {
 	if _, err := svc.Status(); err == nil {
 		if err := service.Control(svc, "restart"); err == nil {
 			fmt.Println("The agent service was restarted so it reports this machine as ready.")
+		}
+	}
+}
+
+// runRentalDisk is `gpu-agent setup --rental-disk-gb <n>`: the size of the
+// encrypted disk each rental gets, chosen by the host instead of the agent's
+// 500 GB ceiling, and never more than is free less 20 GB for the machine. It
+// counts from the next rental on; the listing shows it once the agent reports
+// again, so the service is restarted.
+func runRentalDisk(svc service.Service, gb int) {
+	p := detectProvisioner()
+	if p.RentalPresent() {
+		exitf("a rental (or the leftover of one, or a test boot) is on this machine; change the rental disk once it is gone")
+	}
+	if err := config.SetRentalDiskGB(gb); err != nil {
+		exitf("setup --rental-disk-gb: could not record it (%v)", err)
+	}
+	spec, _ := detectProvisioner().RuntimeSpec()
+	switch {
+	case gb == 0:
+		fmt.Printf("Each rental gets the agent's own disk size again: %d GB now (what is free, up to 500 GB).\n", spec.DiskGB)
+	case spec.DiskGB < gb:
+		fmt.Printf("Each rental gets %d GB: that is what is free in %s less 20 GB for the machine, short of the %d GB chosen. It grows to %d GB as space is freed.\n",
+			spec.DiskGB, spec.Storage(), gb, gb)
+	default:
+		fmt.Printf("Each rental gets a %d GB encrypted disk from the next rental on.\n", spec.DiskGB)
+	}
+	if _, err := svc.Status(); err == nil {
+		if err := service.Control(svc, "restart"); err == nil {
+			fmt.Println("The agent service was restarted, so the listing shows the new size.")
 		}
 	}
 }

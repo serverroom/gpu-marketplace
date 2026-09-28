@@ -31,7 +31,21 @@ func newContainerHost() *fakehost.Host {
 		h.SetOutput("podman inspect --format {{.State.Running}} "+containerName("R1"), "false\n")
 	}
 	h.Dial[GuestIP+":22"] = true
+	// The GPU's DRM nodes, and nvidia-ctk writing a spec that names them.
+	for _, n := range []string{"card1", "renderD128"} {
+		h.Files["/dev/dri/"+n] = nil
+		h.Files["/sys/class/drm/"+n+"/device/vendor"] = []byte("0x10de\n")
+	}
+	h.OnRun["nvidia-ctk cdi generate"] = func(h *fakehost.Host, cmd string) { h.SetFile(containerCDIPath, []byte(testCDISpec("card1"))) }
 	return h
+}
+
+// testCDISpec is a CDI spec as nvidia-ctk writes one for a GB10 whose GPU is
+// DRM card `card` (a 0.7.0 spec, which the agent pins back to 0.6.0).
+func testCDISpec(card string) string {
+	return `{"cdiVersion":"0.7.0","kind":"nvidia.com/gpu","devices":[{"name":"GPU-abc","containerEdits":{"deviceNodes":[` +
+		`{"path":"/dev/nvidia0"},{"path":"/dev/dri/` + card + `"},{"path":"/dev/dri/renderD128"}]}}],` +
+		`"containerEdits":{"deviceNodes":[{"path":"/dev/nvidiactl"}],"additionalGids":[44]}}`
 }
 
 func containerSpec() Spec {

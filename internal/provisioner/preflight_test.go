@@ -622,7 +622,7 @@ func TestDetectReportsIdentityAndDesktopOnDemand(t *testing.T) {
 		t.Error("the runtime of a Spark does not close its desktop on demand")
 	}
 	data, _ := json.Marshal(c)
-	if !strings.Contains(string(data), `"identity":{"sys_vendor":"NVIDIA","product_name":"NVIDIA DGX Spark","board_name":"","product_family":"DGX Spark","confirmed_dgx_spark":true,"reason":""}`) {
+	if !strings.Contains(string(data), `"identity":{"sys_vendor":"NVIDIA","product_name":"NVIDIA DGX Spark","board_name":"","product_family":"DGX Spark","confirmed_dgx_spark":true,"dgx_spark_family":true,"reason":""}`) {
 		t.Errorf("capability JSON = %s", data)
 	}
 }

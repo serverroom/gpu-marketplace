@@ -16,6 +16,8 @@ func winMachine(t *testing.T) (WinFacts, *fakehost.Host) {
 	h := fakehost.New()
 	h.Files["/etc/subuid"] = []byte("containers:2000000000:1000000\n")
 	h.Outputs["nvidia-smi --query-gpu=uuid"] = "GPU-6b7c1f0e-aaaa-bbbb-cccc-0123456789ab\n"
+	// WSL's CDI spec, as the setup writes it: the GPU is /dev/dxg, no DRM nodes.
+	h.Files["/etc/cdi/nvidia.json"] = []byte(`{"cdiVersion":"0.6.0","kind":"nvidia.com/gpu","devices":[{"name":"all","containerEdits":{"deviceNodes":[{"path":"/dev/dxg"}]}}]}`)
 	f := WinFacts{
 		Build: 26100, Name: "Windows 11 Pro", TotalMemMB: 65536, CPUs: 16,
 		WSLInstalled: true, Ready: true, Machine: h,

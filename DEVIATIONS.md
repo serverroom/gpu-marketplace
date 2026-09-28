@@ -857,3 +857,64 @@ with the agent, the command's target from a measured listing's answer, and the s
 Tests: the shared verifier passes a unified GPU with a compute process on it and a discrete
 GPU with memory in use (both of which the whole-GPU verifier fails), fails a GPU the driver
 no longer lists, and does not fail closed on a host without nvidia-smi.
+
+# v0.3.3: the container a rental runs in, hardened from a GB10 host's audit
+
+Built on v0.3.2 (main 0f30d80). A host of an Acer Veriton GN100 (GB10) audited the container
+rental and reported, among other things, that a renter could make a user namespace, that
+the renter's memory could reach the host's swap, that a reboot could leave the GPU's CDI
+spec naming the wrong DRM card while the machine still reported ready, and that CUDA memory
+on a GB10 is not bounded by --memory. Every point was confirmed in the code. The owner's
+calls (2026-09-28): fix the defects, a richer image, a host-set disk size, name other
+makers' Sparks as Sparks, and a real GPU memory limit in the agent.
+
+1. **No new user namespaces** (seccomp.go): the rental runs under podman's own default
+   profile -- the host's, or the podman 4.9 one the agent carries, byte for byte Ubuntu
+   24.04's -- with clone and unshare allowed only without CLONE_NEWUSER (EPERM with it) and
+   clone3 answering ENOSYS (the C library falls back to clone). podman's default allowed
+   all three unconditionally.
+2. **The podman run line**: --memory-swap equal to --memory (no swap); /dev/shm up to 16 GiB
+   (half the rental's memory at most) and /tmp and /var/tmp as tmpfs up to 16 GiB (a quarter
+   each), all counted in the rental's memory; --cpuset-cpus with the cores the listing names
+   when the agent chose them (a GB10's Cortex-X925s). On a machine of one core type the agent
+   chooses none, so there is no cpuset: nproc is the machine's, the quota the rental's.
+3. **CDI spec written again at every agent start and before every rental**, and checked:
+   every /dev/dri node it hands a rental must exist and belong to an NVIDIA device
+   (/sys/class/drm/<node>/device/vendor 0x10de). One that still does not after being written
+   again keeps the machine from being offered. nvidia-cdi-refresh's /var/run/cdi spec is left
+   alone. A host whose spec came without nvidia-ctk keeps it as it is.
+4. **The rental disk's loop device does direct I/O** (no second copy in the page cache, which
+   on a GB10 is GPU memory); a filesystem that cannot is attached as before, reusing a device
+   losetup attached before failing.
+5. **The image** (localhost/gpu-agent-rental:6): python3, venv, pip, git, tmux,
+   build-essential, libgomp1, zstd, rsync, htop, an apt upgrade at build, and a login note
+   saying /home/renter is the encrypted space and /tmp and /dev/shm are memory. The new tag
+   makes every host build it and run the container test boot again.
+6. **`setup --rental-disk-gb N`**: the host chooses the rental disk's size, at most what is
+   free less 20 GB (0: the agent's own, up to 500 GB). Kept in rental-disk.json beside the
+   storage choice; the service restarts so the listing shows it.
+7. **Other makers' DGX Sparks** (Identity.SparkFamily, `dgx_spark_family`): a GB10 machine
+   whose DMI product name or family says DGX Spark, whoever made it. Its desktop closes for a
+   rental as NVIDIA's does. Linked pairs still need a confirmed NVIDIA DGX Spark.
+8. **The GPU memory limit** (memguard.go, provisioner.GuardMemory): on a unified-memory GPU,
+   twice a second while a container rental runs, the container's memory.current plus what
+   its processes hold on the GPU (nvidia-smi --query-compute-apps, matched to its cgroup) may
+   not pass the rental's memory, and the machine's MemAvailable may not fall under half of
+   what it keeps for itself; either way the rental's biggest GPU process is stopped
+   (SIGKILL), as the out-of-memory killer does past --memory. The host's processes are never
+   touched. Where the GPU does not report per-process memory, only the machine floor applies.
+
+Also: the release workflow publishes a tag whose message says [prerelease] as a pre-release
+(installable with 'update --version', never the latest the marketplace offers).
+
+## Checked
+- Unit tests for each point above, and the full suite.
+- **SID 2457 (x86, CMP 170HX, podman 4.9.3, forced container mode)**: image :6 built; the
+  container test boot PASSED twice. Inside the running rental, as the renter: `unshare -Urn`
+  and os.unshare(CLONE_NEWUSER) refused (EPERM); memory.swap.max 0; /dev/shm 14G, /tmp and
+  /var/tmp 6.9G tmpfs; no write outside /home/renter; seccomp mode 2; the tools and a venv
+  with pip; the GPU listed. On the host: the loop device with DIO 1; the CDI spec 0.6.0 with
+  existing NVIDIA nodes.
+- **Not checked on hardware yet**: a GB10 (cpuset on the X925s, the memory guard with real
+  CUDA allocations, the CDI check across a reboot that renumbers the card). Known: old
+  rental images (:1-:5) are not pruned.

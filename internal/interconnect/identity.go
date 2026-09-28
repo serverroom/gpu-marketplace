@@ -84,6 +84,11 @@ func MatchIdentity(id control.Identity, goos, arch string, gpuModels []string) c
 			hasGPU = true
 		}
 	}
+	// The DGX Spark design, whoever built it: its product name or family names
+	// it and it carries the GB10. The vendor is not asked -- Acer, ASUS, Dell
+	// and others sell it under their own names.
+	id.SparkFamily = goos == sparkOS && arch == sparkArch && hasGPU &&
+		(sparkProductPattern.MatchString(id.ProductName) || sparkProductPattern.MatchString(id.ProductFamily))
 	switch {
 	case goos != sparkOS:
 		id.Reason = fmt.Sprintf("this machine runs %s, and an NVIDIA DGX Spark runs Linux", goos)

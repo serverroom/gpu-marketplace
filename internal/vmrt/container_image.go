@@ -9,7 +9,7 @@ import (
 // ContainerImageRef is the base image a container rental runs -- the container
 // analog of the golden disk. Bumped when the entrypoint below changes, so a
 // stale image is rebuilt.
-const ContainerImageRef = "localhost/gpu-agent-rental:5"
+const ContainerImageRef = "localhost/gpu-agent-rental:6"
 
 // containerBaseImage is what the rental image is built from. The NVIDIA driver
 // and nvidia-smi come from the host at run time over CDI, so a plain Ubuntu
@@ -43,20 +43,41 @@ exec /usr/sbin/sshd -D -e \
   -h /run/hostkeys/ssh_host_ed25519_key
 `
 
-// containerDockerfile builds the rental image: sshd, the renter user, and the
-// entrypoint. Host-key generation and authorized_keys happen at run time (a
-// read-only rootfs, per-rental keys), so nothing tenant-specific is baked in.
+// containerPackages is what a rental has from the start. The renter is not root
+// and cannot apt-get, so the image carries what GPU work commonly needs before
+// anything else: Python with venv and pip (PyTorch, vLLM), a compiler
+// (torch.compile, Triton, building llama.cpp) and libgomp (its arm64 builds),
+// git, tmux (a job outlives a dropped SSH session), zstd (Ollama's arm64
+// release), rsync and htop.
+var containerPackages = []string{
+	"openssh-server", "ca-certificates", "iproute2", "iputils-ping", "curl",
+	"python3", "python3-venv", "python3-pip", "git", "tmux", "build-essential",
+	"libgomp1", "zstd", "rsync", "htop",
+}
+
+// containerMotd is shown at login: where the renter's work is kept.
+const containerMotd = `This machine is yours for the rental.
+  /home/renter    your space: encrypted, and wiped when the rental ends
+  /tmp, /dev/shm  memory: counted in your rental's memory, gone at a restart
+`
+
+// containerDockerfile builds the rental image: sshd, the renter user, the tools
+// above and the entrypoint. Host-key generation and authorized_keys happen at
+// run time (per-rental keys), so nothing tenant-specific is baked in. The
+// packages come from the base image's archive at build time: a rebuild (a new
+// ContainerImageRef) takes the current openssh, openssl and libc.
 func containerDockerfile() string {
 	return "FROM " + containerBaseImage + "\n" +
 		"ENV DEBIAN_FRONTEND=noninteractive\n" +
-		"RUN apt-get update && apt-get install -y --no-install-recommends " +
-		"openssh-server ca-certificates iproute2 iputils-ping curl && " +
+		"RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends " +
+		strings.Join(containerPackages, " ") + " && " +
 		"rm -rf /var/lib/apt/lists/* && " +
 		// -p '*' unlocks the account (a bare useradd leaves the shadow field '!',
 		// which sshd refuses even for pubkey auth) without setting a usable
 		// password; login stays key-only.
 		"useradd -m -s /bin/bash -p '*' renter && " +
 		"printf 'PermitRootLogin no\\nPasswordAuthentication no\\nAllowUsers renter\\nX11Forwarding no\\nUsePAM no\\nLogLevel VERBOSE\\n' > /etc/ssh/sshd_config.d/gpu-agent.conf\n" +
+		"COPY motd /etc/motd\n" +
 		"COPY gpuagent-entrypoint /usr/local/sbin/gpuagent-entrypoint\n" +
 		"RUN chmod 0755 /usr/local/sbin/gpuagent-entrypoint\n" +
 		"ENTRYPOINT [\"/usr/local/sbin/gpuagent-entrypoint\"]\n"
@@ -90,6 +111,9 @@ func PrepareContainerImage(h Host, dataDir string, log func(format string, args 
 	}
 	if err := h.WriteFile(path.Join(dir, "gpuagent-entrypoint"), []byte(containerEntrypoint), 0700); err != nil {
 		return fmt.Errorf("write entrypoint: %w", err)
+	}
+	if err := h.WriteFile(path.Join(dir, "motd"), []byte(containerMotd), 0644); err != nil {
+		return fmt.Errorf("write motd: %w", err)
 	}
 	if log != nil {
 		log("building the container rental image %s (this pulls %s the first time)", ContainerImageRef, containerBaseImage)

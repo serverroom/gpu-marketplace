@@ -411,3 +411,33 @@ func TestPeersKeepADayAndOnlyPresentPorts(t *testing.T) {
 		t.Errorf("peers on disk = %+v", got)
 	}
 }
+
+// A GB10 machine another maker built on the DGX Spark design (an Acer Veriton
+// GN100: vendor "Acer Inc.", family "DGX Spark") is of the Spark family --
+// its desktop closes for a rental and the marketplace names it -- but not a
+// confirmed NVIDIA DGX Spark, which linked pairs still require.
+func TestADGXSparkFromAnotherMaker(t *testing.T) {
+	gb10 := []string{"NVIDIA GB10"}
+	acer := control.Identity{SysVendor: "Acer Inc.", ProductName: "Acer Veriton GN100", BoardName: "P4242", ProductFamily: "DGX Spark"}
+	id := MatchIdentity(acer, "linux", "arm64", gb10)
+	if !id.SparkFamily || id.ConfirmedDGXSpark || !strings.Contains(id.Reason, "is not NVIDIA") {
+		t.Errorf("Acer GN100 = %+v; want Spark family, not confirmed", id)
+	}
+	nvidia := MatchIdentity(control.Identity{SysVendor: "NVIDIA", ProductName: "NVIDIA_DGX_Spark", ProductFamily: "DGX Spark"}, "linux", "arm64", gb10)
+	if !nvidia.SparkFamily || !nvidia.ConfirmedDGXSpark {
+		t.Errorf("NVIDIA's own = %+v; want both", nvidia)
+	}
+	for name, c := range map[string]struct {
+		id     control.Identity
+		arch   string
+		models []string
+	}{
+		"no GB10":      {acer, "arm64", []string{"NVIDIA GeForce RTX 4090"}},
+		"not arm64":    {acer, "amd64", gb10},
+		"another GB10": {control.Identity{SysVendor: "HP", ProductName: "HP ZGX Nano G1n", ProductFamily: "ZGX"}, "arm64", gb10},
+	} {
+		if got := MatchIdentity(c.id, "linux", c.arch, c.models); got.SparkFamily {
+			t.Errorf("%s: %+v is not of the Spark family", name, got)
+		}
+	}
+}

@@ -167,6 +167,41 @@ func StorageDir() string {
 	return filepath.Clean(rec.DataDir)
 }
 
+// RentalDiskPath is where the rental disk size a host chose with `gpu-agent
+// setup --rental-disk-gb` is recorded.
+func RentalDiskPath() string { return filepath.Join(ConfigDir(), "rental-disk.json") }
+
+// RentalDiskGB is the rental disk size the host chose, in GB; 0 when it chose
+// none (the agent's own: what is free, up to 500 GB).
+func RentalDiskGB() int {
+	data, err := os.ReadFile(RentalDiskPath())
+	if err != nil {
+		return 0
+	}
+	var rec struct {
+		GB int `json:"rental_disk_gb"`
+	}
+	if json.Unmarshal(data, &rec) != nil || rec.GB < 0 {
+		return 0
+	}
+	return rec.GB
+}
+
+// SetRentalDiskGB records the host's rental disk size (0 forgets it).
+func SetRentalDiskGB(gb int) error {
+	if gb <= 0 {
+		if err := os.Remove(RentalDiskPath()); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(ConfigDir(), 0755); err != nil {
+		return err
+	}
+	data, _ := json.MarshalIndent(map[string]int{"rental_disk_gb": gb}, "", "  ")
+	return os.WriteFile(RentalDiskPath(), data, 0600)
+}
+
 // SetStorageDir records dir as the storage directory ("" or DataDir forgets it).
 func SetStorageDir(dir string) error {
 	if dir == "" || filepath.Clean(dir) == DataDir() {

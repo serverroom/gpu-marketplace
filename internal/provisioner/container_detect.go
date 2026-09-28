@@ -129,6 +129,17 @@ func containerReasons(h vmrt.Host, spec vmrt.Spec, version string, findings []Fi
 	if gpu && len(vmrt.CDIDeviceRefs(h)) == 0 {
 		add(ReasonHuman, "nvidia-smi does not list a usable GPU, so none can be shared into a container")
 	}
+	// The CDI spec names the GPU's DRM nodes by number, which can change from
+	// boot to boot: one that no longer matches is written again here (this
+	// runs at every agent start), and only one that still does not match after
+	// that keeps the machine from being offered.
+	if _, err := h.LookPath("nvidia-ctk"); gpu && err == nil {
+		if problem := vmrt.ContainerCDIProblem(h); problem != "" {
+			if rerr := vmrt.RefreshContainerCDI(h, nil); rerr != nil {
+				add(ReasonTools, "%s", rerr.Error())
+			}
+		}
+	}
 	// Without podman the tools finding above already says so; the image is
 	// only worth naming once podman is there to build it.
 	if _, err := h.LookPath("podman"); err == nil {

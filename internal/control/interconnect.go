@@ -21,6 +21,11 @@ type Identity struct {
 	BoardName         string `json:"board_name"`
 	ProductFamily     string `json:"product_family"`
 	ConfirmedDGXSpark bool   `json:"confirmed_dgx_spark"`
+	// SparkFamily: a GB10 machine built on the DGX Spark design, whoever made
+	// it (an Acer Veriton GN100 says product family "DGX Spark" and vendor
+	// "Acer Inc."). It closes its desktop for a rental as a Spark does, and the
+	// marketplace names it as one; linked pairs still need ConfirmedDGXSpark.
+	SparkFamily bool `json:"dgx_spark_family,omitempty"`
 	// Reason is why the machine was not confirmed; "" when it was.
 	Reason string `json:"reason"`
 }

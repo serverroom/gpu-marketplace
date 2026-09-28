@@ -80,8 +80,8 @@ type HostReport struct {
 	Findings []Finding
 	// Identity is what the machine says it is (nil off Linux).
 	Identity *control.Identity
-	// DesktopOnDemand: a confirmed DGX Spark not made headless on purpose; its
-	// desktop closes while rented or tested rather than refusing the rental.
+	// DesktopOnDemand: a DGX Spark (any maker's) not made headless on purpose;
+	// its desktop closes while rented or tested rather than refusing the rental.
 	DesktopOnDemand bool
 	// GPUCount is how many GPUs the machine has: the ones a rental would get,
 	// or, when it can rent none of them now, its GPU cards.
@@ -149,7 +149,7 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	}
 	id := ReadIdentity(h, goos, spec.Arch, nvNames)
 	rep.Identity = &id
-	if id.ConfirmedDGXSpark {
+	if id.ConfirmedDGXSpark || id.SparkFamily {
 		// Made headless on purpose (runtime prepare --headless): left that way.
 		_, err := vmrt.LoadHeadless(h, spec.DataDir)
 		rep.DesktopOnDemand = errors.Is(err, os.ErrNotExist)
@@ -293,7 +293,7 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		GoldenImage: filepath.Join(storage, "golden.img"),
 		TotalMemMB:  hostMemoryMB(h),
 		CPUs:        runtime.NumCPU(),
-		DiskGB:      rentalDiskGB(h, storage),
+		DiskGB:      rentalDiskGB(h, storage, RentalDiskChoice()),
 	}
 	if storage != dataDir {
 		spec.StorageDir = storage
@@ -455,9 +455,19 @@ func hostMemoryMB(h vmrt.Host) int {
 	return 0
 }
 
+// RentalDiskChoice is the rental disk size the host chose with `gpu-agent setup
+// --rental-disk-gb`, 0 when none. A variable so tests never read this
+// machine's configuration.
+var RentalDiskChoice = func() int { return config.RentalDiskGB() }
+
+// defaultRentalDiskCapGB is the most a rental's disk is given unless the host
+// chooses a size of their own.
+const defaultRentalDiskCapGB = 500
+
 // rentalDiskGB is the disk a rental gets: what is free under dataDir (or the
-// nearest existing parent), less 20 GB for the host, capped at 500 GB.
-func rentalDiskGB(h vmrt.Host, dataDir string) int {
+// nearest existing parent), less 20 GB for the host, and at most the size the
+// host chose -- or, when they chose none, at most 500 GB.
+func rentalDiskGB(h vmrt.Host, dataDir string, chosenGB int) int {
 	dir := dataDir
 	for dir != "" && !h.Exists(dir) {
 		parent := filepath.Dir(dir)
@@ -479,8 +489,12 @@ func rentalDiskGB(h vmrt.Host, dataDir string) int {
 		return 0
 	}
 	gb := avail - 20
-	if gb > 500 {
-		gb = 500
+	limit := defaultRentalDiskCapGB
+	if chosenGB > 0 {
+		limit = chosenGB
+	}
+	if gb > limit {
+		gb = limit
 	}
 	if gb < 0 {
 		gb = 0
