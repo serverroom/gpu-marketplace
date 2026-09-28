@@ -59,19 +59,12 @@ func (rt *ContainerRuntime) GuardMemory() (MemoryVerdict, error) {
 		v.FloorMB = 1024
 	}
 
-	// The container's cgroup, asked of podman once per container.
-	if rt.guardFor != st.ContainerID || rt.guardCgroup == "" {
-		cg, err := rt.h.Output("podman", "inspect", "--format", "{{.State.CgroupPath}}", st.ContainerID)
-		if err != nil {
-			return v, nil // not running (yet, or any more): nothing to hold to a limit
-		}
-		if c := strings.TrimSpace(cg); strings.HasPrefix(c, "/") {
-			rt.guardFor, rt.guardCgroup = st.ContainerID, c
-		} else {
-			return v, nil
-		}
+	// The container's cgroup; none while it is not running (yet, or any more):
+	// nothing to hold to a limit.
+	cgroup := rt.containerCgroup(st.ContainerID)
+	if cgroup == "" {
+		return v, nil
 	}
-	cgroup := rt.guardCgroup
 	own, err := readInt(rt.h, "/sys/fs/cgroup"+cgroup+"/memory.current")
 	if err != nil {
 		return v, fmt.Errorf("read the rental's memory: %w", err)

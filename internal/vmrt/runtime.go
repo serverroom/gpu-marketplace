@@ -36,6 +36,8 @@ type Runtime struct {
 	// back to, as the rental recorded them -- not what the host shows now, which
 	// after an agent restart mid-rental is vfio-pci.
 	verifyGPU func(returned []BoundDevice) bool
+	// usageCPU is the last CPU reading of the rental, for Usage's rate.
+	usageCPU cpuSample
 }
 
 // New builds a runtime.

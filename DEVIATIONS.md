@@ -918,3 +918,40 @@ Also: the release workflow publishes a tag whose message says [prerelease] as a 
 - **Not checked on hardware yet**: a GB10 (cpuset on the X925s, the memory guard with real
   CUDA allocations, the CDI check across a reboot that renumbers the card). Known: old
   rental images (:1-:5) are not pruned.
+
+# v0.3.4: a running rental reports its usage and the renter's SSH
+
+Built on v0.3.3 (main 32cc901). The owner asked for staff to see, per active rental, the
+machine's update state, usage, resource use and the renter's last login. The marketplace
+had only the host-wide stats of the half-hourly capability report (CPU always 0, the GPU's
+figures stale during a microVM rental) and nothing of the renter's sessions.
+
+1. **`/status` carries `rental` while a rental runs** (provisioner.RentalReport), read by
+   the marketplace's 30-second heartbeat: `usage` (vmrt.Usage) and `ssh` (SessionStats).
+   Absent when nothing is rented, so older control planes see nothing new.
+2. **Usage, as the host can see it** (vmrt/usage.go):
+   - a container rental: CPU busy share since the last look (its cgroup's cpu.stat), its
+     memory (memory.current, plus its processes' GPU memory on a unified-memory GPU), the
+     rented GPUs as nvidia-smi reads them, the used space on its encrypted volume (df), and
+     bytes in and out on its veth;
+   - a microVM rental: CPU (the gpu-rental-<id>.service cgroup), what it has written to its
+     disk (du of the sparse file) and bytes on its tap. No memory -- VFIO pins the guest's
+     memory, so its cgroup always reads full -- and no GPU: the GPU is the VM's own and the
+     host's nvidia-smi no longer sees it. Absent, never guessed.
+3. **The renter's SSH** (vmrt.Forwarder.Sessions): the forward the agent runs from the
+   relay tunnel to the guest's port 22 counts connections that stay open 10 seconds or
+   more (a probe does not): open now, ended, the latest start and end, bytes each way. It
+   sees connections, not logins: whether a key was accepted is the guest's sshd's. In
+   memory only, so an agent restart starts it afresh; the marketplace keeps the latest.
+
+## Checked
+- Unit tests: both modes' usage (first look without a CPU rate, then the rate; unified GPU
+  memory counted, the host's not; a VM without memory or GPU), the forward's sessions over
+  real loopback sockets (a probe not counted), the report nil when nothing is rented, and
+  /status with and without it.
+- **SID 2457**: the files and commands each reading uses, in a real container test boot
+  (the podman cgroup path and its cpu.stat and memory.current, df on the volume, the veth's
+  counters, nvidia-smi's bus id matching the rented GPU) and a real microVM test boot (the
+  unit's cgroup cpu.stat, du of disk.img, the tap's counters; nvidia-smi on the host fails
+  while the GPU is the VM's, as expected).
+- Not checked yet: a whole rental through the relay reporting in the heartbeat.

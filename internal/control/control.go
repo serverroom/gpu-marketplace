@@ -530,6 +530,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			body["pair"] = pair
 		}
 	}
+	// The running rental's usage and the renter's SSH sessions (v0.3.4), for the
+	// staff's view of live rentals; absent while nothing is rented.
+	if rr, ok := s.prov.(RentalReporter); ok {
+		if report := rr.RentalReport(); report != nil {
+			body["rental"] = report
+		}
+	}
 	// Provisioning runs in the background, so a rental that did not come up is
 	// reported here rather than on the /provision call that started it.
 	if le, ok := s.prov.(interface{ LastError() string }); ok {
@@ -539,6 +546,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, body)
 }
+
+// RentalReporter is a provisioner that can say what its running rental uses
+// and who is connected to it; nil when nothing is rented.
+type RentalReporter interface{ RentalReport() interface{} }
 
 type updateReq struct {
 	Version string `json:"version"`

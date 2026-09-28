@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
@@ -48,9 +49,12 @@ type ContainerRuntime struct {
 	extraProbes []string
 	// release lets the machine go once the rental is gone (holder).
 	release func()
-	// guardFor and guardCgroup are the container GuardMemory last looked at and
-	// its cgroup (memguard.go); only GuardMemory's goroutine touches them.
+	// guardFor and guardCgroup are the container last looked at and its cgroup
+	// (containerCgroup), shared by GuardMemory and Usage under cgMu.
+	cgMu                  sync.Mutex
 	guardFor, guardCgroup string
+	// usageCPU is the last CPU reading of the rental, for Usage's rate.
+	usageCPU cpuSample
 }
 
 // letGo releases the machine a rental held (holder).

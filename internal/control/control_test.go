@@ -255,3 +255,29 @@ func TestStatusShowsVersionAndUpdate(t *testing.T) {
 		t.Errorf("status = %s", w.Body)
 	}
 }
+
+// reportingProv is a provisioner with a running rental to report.
+type reportingProv struct {
+	fakeProv
+	report interface{}
+}
+
+func (r *reportingProv) RentalReport() interface{} { return r.report }
+
+// v0.3.4: /status carries the running rental's report, and nothing while none.
+func TestStatusCarriesTheRentalReport(t *testing.T) {
+	p := &reportingProv{fakeProv: *readyProv(), report: map[string]interface{}{"ssh": map[string]int{"active": 1}}}
+	w := serve(New("127.0.0.1:0", "secret", p), "GET", "/status", "", "secret")
+	var got map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if r, ok := got["rental"].(map[string]interface{}); !ok || r["ssh"] == nil {
+		t.Errorf("status = %s, want the rental's report", w.Body.String())
+	}
+	p.report = nil
+	w = serve(New("127.0.0.1:0", "secret", p), "GET", "/status", "", "secret")
+	got = nil
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if _, ok := got["rental"]; ok {
+		t.Errorf("status = %s, want no rental while none runs", w.Body.String())
+	}
+}
