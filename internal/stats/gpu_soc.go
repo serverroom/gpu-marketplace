@@ -21,7 +21,7 @@ var socGPUPatterns = []string{
 	"/proc/device-tree/soc@*/gpu@*/compatible",
 }
 
-// socGPUNames are the GPUs whose SoC's compatible string says exactly which
+// socGPUNames are the GPUs whose node's compatible string says exactly which
 // one it is, in the vendors' own words.
 var socGPUNames = map[string]string{
 	"rockchip,rk3588-mali": "Arm Mali-G610 MP4",
@@ -31,21 +31,53 @@ var socGPUNames = map[string]string{
 	"rockchip,rk3399-mali": "Arm Mali-T860 MP4",
 }
 
+// socMaliNames are the Mali GPUs by the SoC the device tree's root names, for
+// a GPU node that says only its family: Rockchip's own kernels describe an
+// RK3588's Mali-G610 as plain "arm,mali-bifrost".
+var socMaliNames = map[string]string{
+	"rockchip,rk3588":  "Arm Mali-G610 MP4",
+	"rockchip,rk3588s": "Arm Mali-G610 MP4",
+	"rockchip,rk3576":  "Arm Mali-G52 MC3",
+	"rockchip,rk3568":  "Arm Mali-G52 2EE",
+	"rockchip,rk3566":  "Arm Mali-G52 2EE",
+	"rockchip,rk3399":  "Arm Mali-T860 MP4",
+}
+
+// dtStrings are a device-tree property's NUL-separated strings.
+func dtStrings(value []byte) []string {
+	var out []string
+	for _, v := range strings.Split(string(value), "\x00") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // socGPUName names a GPU node from its compatible strings: the exact GPU where
-// the SoC says it, the family otherwise ("Arm Mali GPU"), "" for a node that
-// is not a GPU this knows.
-func socGPUName(compatible []byte) string {
-	values := strings.Split(strings.TrimRight(string(compatible), "\x00"), "\x00")
+// the node says it, a Mali by the SoC the root names (rootCompatible), the
+// family otherwise ("Arm Mali GPU"), "" for a node that is not a GPU this knows.
+func socGPUName(compatible, rootCompatible []byte) string {
+	values := dtStrings(compatible)
 	for _, v := range values {
-		if name, ok := socGPUNames[strings.TrimSpace(v)]; ok {
+		if name, ok := socGPUNames[v]; ok {
 			return name
 		}
 	}
+	mali := false
 	for _, v := range values {
-		switch v = strings.TrimSpace(v); {
-		case strings.HasPrefix(v, "arm,mali"):
-			return "Arm Mali GPU"
-		case strings.HasPrefix(v, "qcom,adreno"):
+		mali = mali || strings.HasPrefix(v, "arm,mali")
+	}
+	if mali {
+		for _, v := range dtStrings(rootCompatible) {
+			if name, ok := socMaliNames[v]; ok {
+				return name
+			}
+		}
+		return "Arm Mali GPU"
+	}
+	for _, v := range values {
+		if strings.HasPrefix(v, "qcom,adreno") {
 			return "Qualcomm Adreno GPU"
 		}
 	}
@@ -57,6 +89,7 @@ func socGPUName(compatible []byte) string {
 func socGPUs(fs pcidev.FS) []GPUInfo {
 	var out []GPUInfo
 	seen := map[string]bool{}
+	root, _ := fs.ReadFile("/proc/device-tree/compatible")
 	for _, pattern := range socGPUPatterns {
 		paths, _ := fs.Glob(pattern)
 		for _, path := range paths {
@@ -66,7 +99,7 @@ func socGPUs(fs pcidev.FS) []GPUInfo {
 			}
 			seen[node] = true
 			if status, err := fs.ReadFile(node + "/status"); err == nil {
-				if s := strings.TrimRight(strings.TrimSpace(string(status)), "\x00"); s != "okay" && s != "ok" {
+				if s := dtStrings(status); len(s) > 0 && s[0] != "okay" && s[0] != "ok" {
 					continue
 				}
 			}
@@ -74,7 +107,7 @@ func socGPUs(fs pcidev.FS) []GPUInfo {
 			if err != nil {
 				continue
 			}
-			if name := socGPUName(compatible); name != "" {
+			if name := socGPUName(compatible, root); name != "" {
 				out = append(out, GPUInfo{Model: name, Integrated: true, UnifiedMemory: true})
 			}
 		}

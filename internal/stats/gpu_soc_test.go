@@ -18,6 +18,18 @@ func TestTheSpecsListAnRK3588sMali(t *testing.T) {
 	}
 }
 
+// Rockchip's own kernel calls the RK3588's GPU node plain "arm,mali-bifrost":
+// the device tree's root still names the SoC, and so the GPU.
+func TestAVendorKernelsMaliIsNamedByItsSoC(t *testing.T) {
+	h := fakehost.New()
+	h.Files["/proc/device-tree/compatible"] = []byte("radxa,zaku2\x00rockchip,rk3588\x00")
+	h.Files["/proc/device-tree/gpu@fb000000/compatible"] = []byte("arm,mali-bifrost\x00")
+	gpus := socGPUs(h)
+	if len(gpus) != 1 || gpus[0].Model != "Arm Mali-G610 MP4" {
+		t.Fatalf("gpus = %+v", gpus)
+	}
+}
+
 // A Mali the table does not know by SoC is named by its family; a GPU node the
 // board switched off, and a node that is no GPU this knows, are left out.
 func TestSoCGPUsByFamilyAndStatus(t *testing.T) {
