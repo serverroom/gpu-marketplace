@@ -47,7 +47,8 @@ func integratedName(fs pcidev.FS, d pcidev.Device) string {
 	return pcidev.Name(fs, d)
 }
 
-// integratedGPUs are the processor's own GPUs, marked.
+// integratedGPUs are the processor's own GPUs, marked: on the PCI bus (an x86
+// iGPU, an APU's Radeon) and in an ARM SoC's device tree (gpu_soc.go).
 func integratedGPUs(fs pcidev.FS) []GPUInfo {
 	var out []GPUInfo
 	for _, d := range pcidev.Display(fs) {
@@ -55,7 +56,7 @@ func integratedGPUs(fs pcidev.FS) []GPUInfo {
 			out = append(out, GPUInfo{Model: integratedName(fs, d), Integrated: true, UnifiedMemory: true, bdf: d.BDF})
 		}
 	}
-	return out
+	return append(out, socGPUs(fs)...)
 }
 
 // withIntegrated marks the processor's own GPU where a vendor tool listed it
