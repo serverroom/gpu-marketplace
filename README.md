@@ -660,8 +660,8 @@ reach the device.
   the Secure Boot settings out of the reach of the VM's own kernel.
 - It rebuilds the rental base image once after the update, with Canonical's signed NVIDIA
   kernel modules (`linux-modules-nvidia-<branch>-generic`) in place of a driver built
-  inside the image, which a locked-down kernel would refuse to load. The image no longer
-  carries a compiler or kernel headers.
+  inside the image, which a locked-down kernel would refuse to load. Those modules follow
+  the image's kernel through its updates, so a renter's `apt upgrade` keeps the driver.
 - Its test boot asks the VM itself: is Secure Boot on, is the kernel locked down, and can
   root open the machine's memory. The machine is shown as locked down only on that answer,
   and a VM that booted with Secure Boot and is not locked down fails the test.
