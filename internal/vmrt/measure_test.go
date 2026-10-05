@@ -315,6 +315,12 @@ func TestTheROMIsReadOnlyWhileTheGPUIsHeldForAVM(t *testing.T) {
 	if len(notes) != 0 || roms[testGPU] == nil || !roms[testGPU].Shadow {
 		t.Fatalf("%v %v", roms, notes)
 	}
+	// A card with no ROM for the kernel to read says so, rather than leaving a blank.
+	h.DeleteFile(testROM)
+	if roms, notes := ReadROMs(h, []string{testGPU}); len(roms) != 0 || len(notes) != 1 || !strings.Contains(notes[0], "has no ROM the kernel can read") {
+		t.Errorf("%v %v", roms, notes)
+	}
+	h.Files[testROM] = romImage(0x11)
 	// Not an image: said, and not hashed.
 	h.Files[testROM] = []byte{0xff, 0xff, 0xff, 0xff}
 	if roms, notes := ReadROMs(h, []string{testGPU}); len(roms) != 0 || len(notes) != 1 || !strings.Contains(notes[0], "did not give a ROM image") {

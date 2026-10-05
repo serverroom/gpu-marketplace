@@ -612,7 +612,8 @@ keeps the two readings side by side, so you can see what the rental did to it:
   not report is absent). For a GPU handed to a microVM, also the SHA-256 of its ROM,
   read while the GPU is held for the VM and has no driver of its own on it. A GPU that
   is the machine's boot display gives the firmware's copy of its ROM, which is marked
-  and not compared.
+  and not compared, and a GPU that gives the kernel no ROM to read says so in the
+  reading's notes.
 
 What differs between the two readings that a rental should leave alone is listed, one
 sentence each: a firmware or InfoROM version, the ROM, a setting kept across a restart,

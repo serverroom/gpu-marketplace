@@ -383,7 +383,9 @@ func ReadROMs(h Host, gpus []string) (roms map[string]*ROMReading, notes []strin
 func readROM(h Host, bdf string) (*ROMReading, string) {
 	p := devPath(bdf) + "/rom"
 	if !h.Exists(p) {
-		return nil, ""
+		// Said, not left blank: a record with no ROM in it must not read as
+		// one whose ROM nobody looked at.
+		return nil, fmt.Sprintf("GPU %s has no ROM the kernel can read, so its ROM is not compared", bdf)
 	}
 	if err := h.WriteFile(p, []byte("1"), 0200); err != nil {
 		return nil, fmt.Sprintf("the ROM of GPU %s could not be opened for reading: %s", bdf, firstLine(err.Error()))
