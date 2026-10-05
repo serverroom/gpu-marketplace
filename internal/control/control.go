@@ -325,6 +325,11 @@ func New(listenAddr, token string, prov Provisioner) *Server {
 	if pp, ok := prov.(PairProvisioner); ok {
 		mux.HandleFunc("/pair/provision", s.auth(s.handlePairProvision(pp)))
 	}
+	// Serving the inference API, the same way: only where the provisioner can.
+	if sc, ok := prov.(ServingController); ok {
+		mux.HandleFunc("/serve/start", s.auth(s.handleServeStart(sc)))
+		mux.HandleFunc("/serve/stop", s.auth(s.handleServeStop(sc)))
+	}
 	return s
 }
 
@@ -528,6 +533,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if ps, ok := s.prov.(PairStatuser); ok {
 		if pair := ps.PairStatus(); pair != nil {
 			body["pair"] = pair
+		}
+	}
+	// The inference API session while the machine serves; absent otherwise. The
+	// status above stays "free": serving never takes the machine off the market.
+	if sc, ok := s.prov.(ServingController); ok {
+		if serving := sc.Serving(); serving != nil {
+			body["serving"] = serving
 		}
 	}
 	// The running rental's usage and the renter's SSH sessions (v0.3.4), for the

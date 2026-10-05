@@ -358,6 +358,10 @@ func main() {
 			runUpdate(args[1:])
 			return
 
+		case "serve":
+			runServe(args[1:])
+			return
+
 		case "update-check":
 			// Run by the previous binary, from a timer, three minutes after an update.
 			runUpdateCheck(args[1:])
@@ -461,6 +465,9 @@ func runStatus(svc service.Service) {
 	}
 	if u := autoUpdateSummary(); u != "" {
 		fmt.Printf("Auto-update:  %s\n", u)
+	}
+	if runtime.GOOS == "linux" {
+		fmt.Printf("Serving:      %s\n", servingSummary())
 	}
 	printProblems()
 
@@ -587,6 +594,8 @@ func printUsage() {
 	fmt.Println("  setup --rental-disk-gb  The disk each rental gets, in GB (0: the agent's choice, up to 500 GB)")
 	fmt.Println("  update           Update the agent to the latest release (--version vX.Y.Z), going back by itself if it does not come up;")
 	fmt.Println("                   --auto off|on pauses or resumes the automatic updates")
+	fmt.Println("  serve off|on     Switch serving the inference API off on this machine, or leave it to the control panel;")
+	fmt.Println("                   serve status shows the switch and each model's weights")
 	fmt.Println("  runtime prepare  Install the microVM runtime (--install-deps) and bake the rental base image")
 	fmt.Println("  remove           Withdraw the listing, revoke relay access and delete the agent completely (--yes)")
 	fmt.Println("  uninstall        Remove the system service only (keys and listing stay; see remove)")
