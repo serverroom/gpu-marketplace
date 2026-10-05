@@ -151,6 +151,19 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 		return err
 	}
 
+	// The machine as it is before the rental, for the teardown to compare
+	// (measure.go).
+	if measured(o) {
+		var gpus []string
+		if !o.NoGPU {
+			gpus = rt.spec.GPUs
+		}
+		st.Measure = beginMeasure(rt.h, rt.spec.Storage(), gpus, st.Disk)
+		if err = save(); err != nil {
+			return err
+		}
+	}
+
 	// The GPU is shared, not taken; give the renter a clean one: close a DGX
 	// Spark's desktop and stop the host's NVIDIA services, both restored on
 	// teardown. A desktop on any other machine is a reason not to host and was
@@ -217,7 +230,15 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 	if o.NoWait {
 		return nil
 	}
-	return rt.waitGuest(name)
+	if err = rt.waitGuest(name); err != nil {
+		return err
+	}
+	// The renter has the machine from here: its teardown leaves a record.
+	if st.Measure != nil {
+		st.Measure.Delivered = true
+		_ = save()
+	}
+	return nil
 }
 
 // runArgs is the hardened `podman run` command line. What is absent matters as
@@ -498,6 +519,13 @@ func (rt *ContainerRuntime) Stop() StopResult {
 		_ = rt.h.Run("umount", st.VolumeMount)
 	}
 
+	// What the rental wrote, read while its volume's mapping still exists
+	// (measure.go).
+	var written *int64
+	if st.Measure != nil && st.Measure.Delivered && gone {
+		written = rentalWritten(rt.h, st)
+	}
+
 	wiped, detail := DestroyDisk(rt.h, st.Disk)
 	res.Wiped = wiped && gone
 	res.Detail = append(res.Detail, detail...)
@@ -531,6 +559,13 @@ func (rt *ContainerRuntime) Stop() StopResult {
 		}
 	}
 	_ = rt.h.RemoveAll(st.Rental.Dir)
+
+	// The machine as the rental left it, beside the reading from before it.
+	var gpus []string
+	if gone {
+		gpus = rt.spec.GPUs
+	}
+	finishMeasure(rt.h, rt.spec.DataDir, rt.spec.Storage(), "container", st, gpus, written, nil, nil)
 
 	if res.Clean() {
 		_ = ClearState(rt.h, rt.spec.DataDir)

@@ -549,6 +549,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			body["rental"] = report
 		}
 	}
+	// What the last rentals did to the machine: the readings from before and
+	// after each of them (v0.3.8); absent when there are none.
+	if mr, ok := s.prov.(MeasurementReporter); ok {
+		if m := mr.Measurements(); m != nil {
+			body["measurements"] = m
+		}
+	}
 	// Provisioning runs in the background, so a rental that did not come up is
 	// reported here rather than on the /provision call that started it.
 	if le, ok := s.prov.(interface{ LastError() string }); ok {
@@ -562,6 +569,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // RentalReporter is a provisioner that can say what its running rental uses
 // and who is connected to it; nil when nothing is rented.
 type RentalReporter interface{ RentalReport() interface{} }
+
+// MeasurementReporter is a provisioner that keeps what it read off the machine
+// before and after its last rentals; nil when it has none.
+type MeasurementReporter interface{ Measurements() interface{} }
 
 type updateReq struct {
 	Version string `json:"version"`

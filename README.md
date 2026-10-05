@@ -73,6 +73,7 @@ sudo gpu-agent start
 | `gpu-agent start` | Start the service |
 | `gpu-agent stop` | Stop the service |
 | `gpu-agent status` | Check the service *and* the registration state |
+| `gpu-agent measurements` | Show what the machine read [before and after its last rentals](#what-a-rental-did-to-your-machine): what each wrote, the drive's wear, the GPU's firmware (JSON) |
 | `gpu-agent speedtest` | Measure download, upload and latency to the speed test server in this machine's location, and post them to the listing (not while rented) |
 | `gpu-agent test-stats` | Collect and display system stats as JSON |
 | `gpu-agent -version` | Print version |
@@ -589,6 +590,57 @@ firewall rules and creating an encrypted disk all need it. Concretely:
 - **ConnectX ports** (a DGX Spark's, or any NVIDIA/Mellanox card's) are only ever brought up briefly, with no address and IPv6 off, for the announcements and checks described under linked pairs — and, while a pair rental waits for its machines, for 20 seconds at the start of each minute once this machine is free, to agree with the other machine on the start — and put back as they were.
 - **Telling you on the machine:** while a rental waits for you, the agent runs `wall` and, for each person logged in to a desktop, `notify-send` as that person (`runuser`, their own session bus). Nothing else touches your sessions or your programs.
 - **Files:** the binary (`/usr/local/bin/gpu-agent`), `/etc/gpu-agent` (the agent's SSH key, control token, registration and tunnel config, all `0600`, and `auto-setup` if you turned the automatic setup off), `/var/lib/gpu-agent` (the rental base image, the test-boot and pair-test results, the last setup attempt, the agents heard on the ConnectX ports, a rental waiting for you to free the machine (`pending.json`, with a pair rental's inter-machine key until it starts) and, while rented, the encrypted rental disk), and the service unit. The installer adds no users, kernel modules or drivers and installs only the OpenSSH client if it is missing. After linking, the automatic setup (or `gpu-agent runtime prepare --install-deps`) additionally installs QEMU, UEFI firmware, `cloud-image-utils`, `cryptsetup-bin`, `nftables`, `iproute2` and `kmod` with apt — nothing else; `sudo gpu-agent setup --off` before linking keeps it from doing so. While a rental runs, the agent also creates the `gpurent0` bridge, one nftables table, and (only if Docker or a firewall has set iptables' FORWARD policy to DROP) two accept rules for that bridge; all of them are removed when the rental ends.
+- **Reads before and after a rental (v0.3.8).** `nvidia-smi` for each rented GPU, the kernel's write counters for the rental's disk and the drive under it, that drive's SMART log (NVMe; the read-only Get Log Page command, sent by the agent itself, so no tool is installed for it), and, while a microVM holds a GPU, the GPU's ROM through sysfs. Nothing is written but `/var/lib/gpu-agent/measurements.json`. [What a rental did to your machine](#what-a-rental-did-to-your-machine) says what is kept and what the marketplace is told.
+
+## What a rental did to your machine
+
+From v0.3.8 the agent reads your machine right before a rental and right after it, and
+keeps the two readings side by side, so you can see what the rental did to it:
+
+- **What the rental wrote to its disk**, in bytes, from its hand-over to its teardown.
+  It is everything that went to your drive because of the rental: the renter's writes,
+  and those of the rental's own system (a filesystem finishing its tables in the
+  background, a guest growing its disk at first boot).
+- **The drive under the rentals**, before and after: what was written to it in all
+  (your own writes included), and for an NVMe drive its own SMART figures: bytes written
+  in its life, the percentage of its rated endurance used, spare capacity left, media
+  errors, warning flags.
+- **Each rented GPU**, before and after: its firmware (VBIOS) version, its InfoROM
+  versions, its operation mode and ECC mode (current, and set for the next restart), the
+  power limits its firmware sets, and its lifetime counters of uncorrectable memory
+  errors and retired memory pages, as `nvidia-smi` reports them (a figure the GPU does
+  not report is absent). For a GPU handed to a microVM, also the SHA-256 of its ROM,
+  read while the GPU is held for the VM and has no driver of its own on it. A GPU that
+  is the machine's boot display gives the firmware's copy of its ROM, which is marked
+  and not compared.
+
+What differs between the two readings that a rental should leave alone is listed, one
+sentence each: a firmware or InfoROM version, the ROM, a setting kept across a restart,
+a power limit, new memory errors or retired pages, new media errors or a SMART warning
+on the drive. Wear is not a difference; it is in the figures.
+
+**It only reads, and it never stands in the way of a rental.** A figure that cannot be
+read is absent, with a note saying why. A machine that does not answer within 30
+seconds is rented, and released, without the reading. A difference is reported; it does
+not hold your machine back from renters. The agent's own test boots are not measured,
+and a rental that never reached its renter leaves no record.
+
+`sudo gpu-agent status` shows the last rental in a few lines:
+
+```
+Last rental:  0f3c9a52-..., ended 2026-10-06 14:02 ('sudo gpu-agent measurements' shows the readings)
+  - it wrote 412.6 GB to its disk
+  - drive nvme0n1: 3% of its rated life used before, 3% after; 431.0 GB written to it in all meanwhile
+  - the GPU came back as it went
+```
+
+`sudo gpu-agent measurements` prints the readings themselves. The last 20 rentals are
+kept in `/var/lib/gpu-agent/measurements.json`, readable by root only, and the last
+three are told to the marketplace with the machine's status, which keeps them with the
+rental. **A card's serial number and UUID never leave the machine, and are not in the
+file either:** the record holds a short fingerprint of the two (the first 16 hex digits
+of their SHA-256), enough to tell that the card that came back is the card that went.
+The drive's model is in the record; its serial number is not read.
 
 ## What a tenant can reach
 

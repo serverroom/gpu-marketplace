@@ -36,3 +36,26 @@ func (p *Provisioner) RentalReport() interface{} {
 	}
 	return &r
 }
+
+// recordReader is a runtime that keeps its rentals' measurements.
+type recordReader interface{ Records() []vmrt.RentalRecord }
+
+// Records are the readings of the machine from before and after its last
+// rentals (vmrt/measure.go), oldest first.
+func (p *Provisioner) Records() []vmrt.RentalRecord {
+	p.mu.Lock()
+	machine := p.machine
+	p.mu.Unlock()
+	if r, ok := machine.(recordReader); ok {
+		return r.Records()
+	}
+	return nil
+}
+
+// Measurements is Records for /status: nil when there are none.
+func (p *Provisioner) Measurements() interface{} {
+	if records := p.Records(); len(records) > 0 {
+		return records
+	}
+	return nil
+}

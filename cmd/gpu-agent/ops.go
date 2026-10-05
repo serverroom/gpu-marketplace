@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"sync"
 	"time"
 
@@ -234,4 +236,37 @@ func printProblems() {
 	for _, e := range active {
 		fmt.Printf("  - [%s] %s\n", e.Area, e.Message)
 	}
+}
+
+// printLastRental says what the last rental did to the machine, from the
+// readings taken before and after it.
+func printLastRental(records []vmrt.RentalRecord) {
+	if len(records) == 0 {
+		return
+	}
+	r := records[len(records)-1]
+	lines := r.Summary()
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Printf("Last rental:  %s, ended %s ('sudo gpu-agent measurements' shows the readings)\n", r.RentalID, time.Unix(r.EndedAt, 0).Format("2006-01-02 15:04"))
+	for _, line := range lines {
+		fmt.Printf("  - %s\n", line)
+	}
+}
+
+// runMeasurements prints the readings of the machine from before and after its
+// last rentals, as the agent keeps them and tells the marketplace.
+func runMeasurements() {
+	records := vmrt.LoadRecords(vmrt.OSHost{}, config.DataDir())
+	if runtime.GOOS != "linux" {
+		// The rentals run in an environment the agent drives; ask its runtime.
+		records = detectProvisioner().Records()
+	}
+	if len(records) == 0 {
+		fmt.Println("No rental has been measured on this machine yet.")
+		return
+	}
+	data, _ := json.MarshalIndent(records, "", "  ")
+	fmt.Println(string(data))
 }

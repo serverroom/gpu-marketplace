@@ -42,6 +42,8 @@ type Host struct {
 	Dial map[string]bool
 	// Downloads is what Download fetches.
 	Downloads map[string][]byte
+	// Smart is each NVMe drive's SMART log, by device node.
+	Smart map[string][]byte
 	// Slept is the total time the code under test asked to sleep.
 	Slept time.Duration
 	// OnSleep, when set, runs after every Sleep: time passing, for anything
@@ -71,6 +73,7 @@ func New() *Host {
 		Links:     map[string]string{},
 		Dial:      map[string]bool{},
 		Downloads: map[string][]byte{},
+		Smart:     map[string][]byte{},
 		home:      map[string]string{},
 		nics:      map[string]*nicDev{},
 	}
@@ -213,10 +216,25 @@ func (h *Host) WriteFile(p string, data []byte, perm os.FileMode) error {
 			h.Links[driverLink(value)] = "../../../bus/pci/drivers/" + home
 			h.raiseNetdev(value)
 		}
+	case strings.HasPrefix(p, pciDevices) && strings.HasSuffix(p, "/rom"):
+		// Enabling or disabling a ROM for reading leaves its content alone.
 	default:
 		h.Files[p] = append([]byte(nil), data...)
 	}
 	return nil
+}
+
+// NVMeSmartLog answers with the SMART log set for a drive (Smart), as the real
+// host reads one from the drive.
+func (h *Host) NVMeSmartLog(dev string) ([]byte, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Calls = append(h.Calls, "smart "+dev)
+	log, ok := h.Smart[dev]
+	if !ok {
+		return nil, fmt.Errorf("%s: no SMART log", dev)
+	}
+	return append([]byte(nil), log...), nil
 }
 
 // PCI registers a device: its current driver, class, and IOMMU group members.

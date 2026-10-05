@@ -393,6 +393,10 @@ func main() {
 			runStatus(svc)
 			return
 
+		case "measurements":
+			runMeasurements()
+			return
+
 		case "register":
 			runRegister(svc, args[1:])
 			return
@@ -470,6 +474,7 @@ func runStatus(svc service.Service) {
 		fmt.Printf("Serving:      %s\n", servingSummary())
 	}
 	printProblems()
+	printLastRental(p.Records())
 
 	st := register.LoadState()
 	switch {
@@ -602,6 +607,7 @@ func printUsage() {
 	fmt.Println("  start            Start the service")
 	fmt.Println("  stop             Stop the service")
 	fmt.Println("  status           Check service status")
+	fmt.Println("  measurements     Show what the machine read before and after its last rentals: what each wrote, the drive's wear, the GPU's firmware (JSON)")
 	fmt.Println("  speedtest        Measure download, upload and latency to this location's speed test server and post them to the listing")
 	fmt.Println("  test-stats       Collect and display system stats")
 	fmt.Println("  -version         Print version")

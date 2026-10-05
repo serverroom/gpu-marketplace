@@ -281,3 +281,37 @@ func TestStatusCarriesTheRentalReport(t *testing.T) {
 		t.Errorf("status = %s, want no rental while none runs", w.Body.String())
 	}
 }
+
+// measuredProv is a provisioner that has (or has not) kept a rental's readings.
+type measuredProv struct {
+	*fakeProv
+	records interface{}
+}
+
+func (m *measuredProv) Measurements() interface{} { return m.records }
+
+// /status tells the marketplace what the last rentals did to the machine, and
+// says nothing of it while there is nothing to tell.
+func TestStatusCarriesTheLastRentalsMeasurements(t *testing.T) {
+	prov := &measuredProv{fakeProv: readyProv()}
+	s := New("127.0.0.1:0", "secret", prov)
+	var body map[string]interface{}
+	w := serve(s, http.MethodGet, "/status", "", "secret")
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("status %d: %v", w.Code, err)
+	}
+	if _, present := body["measurements"]; present {
+		t.Errorf("measurements told with none kept: %v", body["measurements"])
+	}
+
+	prov.records = []map[string]interface{}{{"rental_id": "R1", "written_bytes": 1024}}
+	body = nil
+	w = serve(s, http.MethodGet, "/status", "", "secret")
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := body["measurements"].([]interface{})
+	if len(list) != 1 || list[0].(map[string]interface{})["rental_id"] != "R1" {
+		t.Errorf("measurements: %v", body["measurements"])
+	}
+}

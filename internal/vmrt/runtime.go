@@ -157,6 +157,19 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 		return err
 	}
 
+	// The machine as it is before the rental, for the teardown to compare
+	// (measure.go): read while the GPUs are still on their own driver.
+	if measured(o) {
+		var gpus []string
+		if takesGPUs {
+			gpus = rt.spec.GPUs
+		}
+		st.Measure = beginMeasure(rt.h, rt.spec.Storage(), gpus, st.Disk)
+		if err = save(); err != nil {
+			return err
+		}
+	}
+
 	// A pair rental's card is checked and recorded before anything is taken
 	// from the host: a card that cannot go must not close a desktop first.
 	var nics []string
@@ -175,6 +188,14 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 		}
 		if err != nil {
 			return err
+		}
+		// The GPUs are held for the VM now, with no driver of their own on
+		// them: their ROMs can be read.
+		if st.Measure != nil {
+			st.Measure.Before.SetROMs(ReadROMs(rt.h, rt.spec.GPUs))
+			if err = save(); err != nil {
+				return err
+			}
 		}
 	}
 	// The host keeps the cable until the last moment: the card leaves it after
@@ -195,7 +216,15 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	if o.NoWait {
 		return nil
 	}
-	return rt.waitGuest(r)
+	if err = rt.waitGuest(r); err != nil {
+		return err
+	}
+	// The renter has the machine from here: its teardown leaves a record.
+	if st.Measure != nil {
+		st.Measure.Delivered = true
+		_ = save()
+	}
+	return nil
 }
 
 func (rt *Runtime) writeSeed(r Rental, userData, metaData, networkConfig string) error {
@@ -388,6 +417,16 @@ func (rt *Runtime) Stop() StopResult {
 		res.Detail = append(res.Detail, "the microVM process would not exit")
 	}
 
+	// What the rental wrote, and its GPUs' ROMs, read while its disk and its
+	// hold on the GPUs still exist (measure.go).
+	var written *int64
+	var roms map[string]*ROMReading
+	var romNotes []string
+	if st.Measure != nil && st.Measure.Delivered && vmGone {
+		written = rentalWritten(rt.h, st)
+		roms, romNotes = ReadROMs(rt.h, rt.spec.GPUs)
+	}
+
 	wiped, detail := DestroyDisk(rt.h, st.Disk)
 	res.Wiped = wiped && vmGone
 	res.Detail = append(res.Detail, detail...)
@@ -440,6 +479,14 @@ func (rt *Runtime) Stop() StopResult {
 		}
 	}
 	_ = rt.h.RemoveAll(st.Rental.Dir)
+
+	// The machine as the rental left it, beside the reading from before it.
+	// The vendor tool is asked only about GPUs that are back on their driver.
+	var gpus []string
+	if released && len(st.Devices) > 0 {
+		gpus = rt.spec.GPUs
+	}
+	finishMeasure(rt.h, rt.spec.DataDir, rt.spec.Storage(), "vm", st, gpus, written, roms, romNotes)
 
 	if res.Clean() {
 		_ = ClearState(rt.h, rt.spec.DataDir)

@@ -39,6 +39,10 @@ type State struct {
 	NICBaseline *NICBaseline  `json:"nic_baseline,omitempty"`
 	Pair        *PairOptions  `json:"pair,omitempty"`
 	StartedAt   int64         `json:"started_at"`
+	// Measure is the reading of the machine from before the rental, for the
+	// teardown to compare (measure.go); nil for a test boot, which is not
+	// measured.
+	Measure *MeasureState `json:"measure,omitempty"`
 	// Dirty is set when a teardown did not verify. The state stays on disk, so
 	// the machine refuses the next rental until it is cleaned up.
 	Dirty       bool     `json:"dirty"`
