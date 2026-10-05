@@ -58,9 +58,17 @@ func QEMUArgs(s Spec, r Rental) []string {
 		format = "raw"
 	}
 	args := []string{"-name", "gpu-rental-" + r.ID, "-nodefaults"}
-	if s.Arch == "arm64" {
+	switch {
+	case s.Arch == "arm64":
 		args = append(args, "-machine", "virt,accel=kvm,gic-version=host")
-	} else {
+	case s.Firmware.Secure:
+		// Secure Boot (secureboot.go). SMM, and a variable store only SMM may
+		// write, are what keep the Secure Boot variables out of the reach of
+		// the guest's own kernel; the Secure Boot firmware build does not start
+		// without them.
+		args = append(args, "-machine", "q35,accel=kvm,smm=on",
+			"-global", "driver=cfi.pflash01,property=secure,value=on")
+	default:
 		args = append(args, "-machine", "q35,accel=kvm")
 	}
 	args = append(args,

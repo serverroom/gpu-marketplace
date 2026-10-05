@@ -72,6 +72,13 @@ func printCapability(c control.Capability) {
 	if c.SelfTest != nil {
 		fmt.Printf("Test boot:    %s\n", testBootLine(c))
 	}
+	if g := c.Guest; g != nil && (c.Kind == provisioner.KindQEMUVFIO || c.Kind == provisioner.KindQEMU) {
+		if g.Lockdown {
+			fmt.Println("Locked down:  yes — a rental boots with Secure Boot and a locked-down kernel: root in it cannot write to a device's registers or load an unsigned kernel module")
+		} else if g.NotLockedDown != "" {
+			fmt.Printf("Locked down:  no — %s\n", g.NotLockedDown)
+		}
+	}
 	if c.Ready {
 		fmt.Println("Hosting:      ready — this machine can host a rental")
 		if c.HostBusy != nil {

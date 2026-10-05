@@ -405,7 +405,7 @@ func TestGuestLinkMarkers(t *testing.T) {
 }
 
 func TestBakeInstallsTheRDMATools(t *testing.T) {
-	ud, err := BakeUserData(DefaultDriver, nil)
+	ud, err := BakeUserData(DefaultDriver, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func bakeHost(t *testing.T) *fakehost.Host {
 	h.Downloads[cloudImageBase()+"SHA256SUMS"] = []byte(hex.EncodeToString(sum[:]) + " *" + cloudImageName("amd64") + "\n")
 	h.Downloads[cloudImageBase()+cloudImageName("amd64")] = image
 	delete(h.OnRun, "systemd-run --unit=") // the bake VM powers itself off
-	h.Files[lastSerialLog(dataDir)] = []byte("GPUAGENT-BAKE EXTRA rdma\nGPUAGENT-BAKE DONE\n")
+	h.Files[lastSerialLog(dataDir)] = []byte("GPUAGENT-BAKE BEGIN\nGPUAGENT-BAKE EXTRA rdma\nGPUAGENT-BAKE DONE\n")
 	h.OnRun["qemu-img convert"] = func(h *fakehost.Host, cmd string) { h.SetFile(fakehost.LastField(cmd), []byte("golden")) }
 	return h
 }
@@ -457,7 +457,7 @@ func TestPrepareRecordsTheRDMAExtra(t *testing.T) {
 	// The RDMA step failed inside the bake: the image still serves single
 	// rentals, and does not claim the extra.
 	h = bakeHost(t)
-	h.Files[lastSerialLog(dataDir)] = []byte("GPUAGENT-BAKE DONE\n")
+	h.Files[lastSerialLog(dataDir)] = []byte("GPUAGENT-BAKE BEGIN\nGPUAGENT-BAKE DONE\n")
 	if err := Prepare(h, testSpec(), &fakeFence{h: h}, "v0.2.0-dev", PrepareOptions{}); err != nil {
 		t.Fatal(err)
 	}

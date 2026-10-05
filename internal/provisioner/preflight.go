@@ -214,8 +214,12 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 				"on this system install QEMU, UEFI firmware for it, cloud-image-utils, cryptsetup and nftables with its own package manager", strings.Join(missing, ", "))
 		}
 	}
-	if fw, ok := vmrt.FindFirmware(h, spec.Arch); ok {
+	// The firmware rentals boot with: the Secure Boot build where this machine
+	// can use it (vmrt/secureboot.go). Chosen before the base image and the test
+	// boot are judged, which both depend on it.
+	if fw, ok := vmrt.ChooseFirmware(h, spec.Arch, spec.DataDir, version); ok {
 		rep.Firmware = fw
+		spec.Firmware = fw
 	} else if apt {
 		addKind(ReasonTools, "no UEFI firmware for microVMs is installed; run 'sudo gpu-agent runtime prepare --install-deps'")
 	} else {
@@ -362,6 +366,16 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		}
 		// What the renter gets, from the sizing the VM itself uses.
 		guest = &control.Guest{VCPUs: spec.GuestCPUs(), MemoryGB: spec.GuestMemoryMB() / 1024, DiskGB: spec.DiskGB, CPU: spec.GuestCPUName}
+		// Locked down: rentals boot with Secure Boot here, and the last test
+		// boot said from inside its VM that the lock holds.
+		if spec.Firmware.Secure && rep.SelfTest != nil && rep.SelfTest.Passed && rep.SelfTest.LastFull != nil && rep.SelfTest.LastFull.LockedDown {
+			guest.Lockdown = true
+		} else {
+			guest.NotLockedDown = vmrt.NotLockedDown(h, spec, version)
+			if spec.Firmware.Secure {
+				guest.NotLockedDown = "not proven yet: the next test boot says whether the lock holds"
+			}
+		}
 	}
 	p.midRental = midRental
 	p.capability = control.Capability{

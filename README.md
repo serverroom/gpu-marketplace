@@ -643,6 +643,52 @@ file either:** the record holds a short fingerprint of the two (the first 16 hex
 of their SHA-256), enough to tell that the card that came back is the card that went.
 The drive's model is in the record; its serial number is not read.
 
+## A rental's VM is locked down
+
+From v0.3.10, on an x86 machine, a rental's microVM boots with UEFI Secure Boot, and the
+kernel of its Ubuntu image locks itself down because of it. Root in the VM can then no
+longer map a device's registers, open the machine's memory (`/dev/mem`), use I/O ports,
+write MSRs, or load a kernel module nobody signed. That is how a renter with root would
+write to the firmware of the GPU the VM was handed. A device passed through whole cannot
+be filtered from outside the VM, so the lock is put inside it, on the one program that can
+reach the device.
+
+**What the agent does for it, by itself:**
+
+- It boots rentals with the Secure Boot build of the VM's firmware, which the `ovmf`
+  package already installed beside the plain one, with SMM in the VM: that is what keeps
+  the Secure Boot settings out of the reach of the VM's own kernel.
+- It rebuilds the rental base image once after the update, with Canonical's signed NVIDIA
+  kernel modules (`linux-modules-nvidia-<branch>-generic`) in place of a driver built
+  inside the image, which a locked-down kernel would refuse to load. The image no longer
+  carries a compiler or kernel headers.
+- Its test boot asks the VM itself: is Secure Boot on, is the kernel locked down, and can
+  root open the machine's memory. The machine is shown as locked down only on that answer,
+  and a VM that booted with Secure Boot and is not locked down fails the test.
+
+`sudo gpu-agent check` says which it is:
+
+```
+Locked down:  yes — a rental boots with Secure Boot and a locked-down kernel: root in it cannot write to a device's registers or load an unsigned kernel module
+```
+
+**What a renter can no longer do:** load a kernel module that is not signed, such as an
+NVIDIA driver from NVIDIA's own installer or a module built with DKMS. Another driver
+branch is `apt install linux-modules-nvidia-<branch>-generic nvidia-headless-no-dkms-<branch>`.
+CUDA, containers and everything else in userspace are as before.
+
+**What it is not: a guarantee.** A kernel bug in the guest gives root back what the lockdown
+took. And the VM's firmware trusts every boot loader Microsoft has signed, so a renter can
+replace the image with another signed system. The [readings before and after a
+rental](#what-a-rental-did-to-your-machine) still say whether the GPU came back as it went.
+
+**A machine that cannot boot a VM this way keeps renting as before.** An old KVM without
+SMM, or a firmware package with no Secure Boot build: the agent finds out in its image
+build or its test boot, runs that once more without Secure Boot, records what it found in
+`/var/lib/gpu-agent/secureboot.json`, and says so (`Locked down:  no — ...`). Each new agent
+version tries again. Arm machines are not covered (KVM on Arm has no SMM), and a DGX Spark
+in container mode does not need it: there the renter is not root.
+
 ## What a tenant can reach
 
 Before a microVM boots, the agent loads one nftables table (`inet gpu_rental`)

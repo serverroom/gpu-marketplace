@@ -290,15 +290,28 @@ var RDMAPackages = []string{"rdma-core", "ibverbs-utils", "perftest", "infiniban
 // are in the cloud image's kernel already, but the image ships no firmware and
 // the GPUs do not come up without it. Any other make gets what the kernel has.
 // vendors are PCI vendor IDs.
-func GPUPackages(driver string, vendors []string) []string {
+//
+// signed is the image of a machine whose rentals boot with Secure Boot
+// (secureboot.go): its kernel loads only signed modules, so the NVIDIA driver
+// comes as Canonical's own signed modules for the image's kernel
+// (linux-modules-nvidia-*-generic, which follows the kernel through its
+// updates) with the userspace nvidia-driver-* would have brought, and nothing
+// is built inside the image. Without it the driver is built there (DKMS), as
+// it always was.
+func GPUPackages(driver string, vendors []string, signed bool) []string {
 	var pkgs []string
 	if driver != NoDriver {
-		branch := strings.TrimSuffix(strings.TrimSuffix(driver, "-open"), "-server")
-		utils := "nvidia-utils-" + branch
-		if strings.Contains(driver, "-server") {
-			utils += "-server"
+		// The userspace packages are named by the branch, "-server" included,
+		// whichever kernel modules go with them: 580-server-open -> 580-server.
+		userspace := strings.TrimSuffix(driver, "-open")
+		utils := "nvidia-utils-" + userspace
+		if signed {
+			pkgs = append(pkgs, "linux-modules-nvidia-"+driver+"-generic", "nvidia-headless-no-dkms-"+driver,
+				"libnvidia-gl-"+userspace, "libnvidia-decode-"+userspace, "libnvidia-encode-"+userspace,
+				"libnvidia-extra-"+userspace, utils)
+		} else {
+			pkgs = append(pkgs, "linux-headers-generic", "nvidia-driver-"+driver, utils)
 		}
-		pkgs = append(pkgs, "linux-headers-generic", "nvidia-driver-"+driver, utils)
 	}
 	for _, v := range vendors {
 		switch v {
@@ -316,13 +329,13 @@ func GPUPackages(driver string, vendors []string) []string {
 // image's kernel lacks mlx5_ib), then wipes cloud-init's memory of this boot
 // (so every rental's first boot is a first boot) and powers off. The host reads
 // the result from the serial console.
-func BakeUserData(driver string, vendors []string) (string, error) {
+func BakeUserData(driver string, vendors []string, signed bool) (string, error) {
 	if driver != NoDriver && !ValidDriver(driver) {
 		return "", fmt.Errorf("invalid driver branch %q", driver)
 	}
 	install := "apt-get install -y --no-install-recommends"
 	gpu := "true"
-	if pkgs := GPUPackages(driver, vendors); len(pkgs) > 0 {
+	if pkgs := GPUPackages(driver, vendors, signed); len(pkgs) > 0 {
 		gpu = install + " " + strings.Join(pkgs, " ") + " || ok=0"
 	}
 	var b strings.Builder
@@ -335,7 +348,11 @@ func BakeUserData(driver string, vendors []string) (string, error) {
 	// The RDMA tools are an extra: a bake whose RDMA step fails still makes a
 	// base image every single rental can use, and says so by not reporting
 	// the extra (a linked pair then asks for a rebuild).
+	// BEGIN first: a build whose VM never says it never came up at all, which
+	// is what tells a firmware that cannot boot here from a package that would
+	// not install (Prepare).
 	fmt.Fprintf(&b, "  - [bash, -c, %q]\n", strings.Join([]string{
+		"/usr/local/sbin/gpuagent-say '" + markBake + " BEGIN'",
 		"export DEBIAN_FRONTEND=noninteractive",
 		"ok=1",
 		"rdma=1",
@@ -410,6 +427,16 @@ func selfTestScript(probes []string, gpu bool) (string, error) {
 			"  fi",
 			"fi")
 	}
+	// Whether this VM is locked down (secureboot.go), as the VM itself finds
+	// it: Secure Boot on, the kernel's lockdown mode, and the one thing the
+	// lockdown is for, tried -- root opening the machine's memory.
+	lines = append(lines,
+		"sb=off; f=$(ls /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | head -n 1)",
+		"if [ -n \"$f\" ] && [ \"$(od -An -tu1 -j4 -N1 \"$f\" 2>/dev/null | tr -d ' ')\" = 1 ]; then sb=on; fi",
+		"case \"$(cat /sys/kernel/security/lockdown 2>/dev/null)\" in *'[integrity]'*) ld=integrity ;; *'[confidentiality]'*) ld=confidentiality ;; *) ld=none ;; esac",
+		"if head -c 1 /dev/mem >/dev/null 2>&1; then raw=open; else raw=denied; fi",
+		say+" \""+m+" LOCKDOWN $sb $ld $raw\"",
+	)
 	lines = append(lines,
 		"probe() { timeout \"$2\" bash -c \"exec 3<>/dev/tcp/${1%:*}/${1##*:}\" 2>/dev/null; echo $?; }",
 		"if [ \"$(probe 1.1.1.1:443 10)\" = 0 ]; then "+say+" '"+m+" INTERNET ok'; else "+say+" '"+m+" INTERNET fail'; fi",

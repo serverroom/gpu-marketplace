@@ -97,7 +97,7 @@ func prepareHost(t *testing.T) *fakehost.Host {
 	h.Downloads[base+name] = img
 	h.Downloads[base+"SHA256SUMS"] = []byte(sha(img) + " *" + name + "\n")
 	h.OnRun["systemd-run --unit=gpu-rental-bake"] = func(h *fakehost.Host, _ string) {
-		h.SetFile(NewRental(dataDir, BakeID).SerialLog, []byte("GPUAGENT-BAKE DONE\n"))
+		h.SetFile(NewRental(dataDir, BakeID).SerialLog, []byte("GPUAGENT-BAKE BEGIN\nGPUAGENT-BAKE DONE\n"))
 	}
 	h.OnRun["qemu-img convert"] = func(h *fakehost.Host, cmd string) { h.SetFile(fakehost.LastField(cmd), []byte("golden")) }
 	return h

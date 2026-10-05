@@ -55,6 +55,11 @@ type GoldenInfo struct {
 	// Vendors are the GPU makes (PCI vendor IDs) the image was baked for.
 	// Absent from images built by agents up to v0.2.0.
 	Vendors []string `json:"vendors,omitempty"`
+	// SignedModules: the image carries only signed kernel modules -- its NVIDIA
+	// driver is Canonical's signed build, not one built inside the image -- so
+	// it boots with Secure Boot (secureboot.go). Absent from images built by
+	// agents up to v0.3.9, whose NVIDIA driver was always built inside.
+	SignedModules bool `json:"signed_modules,omitempty"`
 }
 
 // vendors are the makes an image serves. Agents up to v0.2.0 baked the NVIDIA
@@ -149,13 +154,19 @@ func GoldenProblem(h Host, spec Spec) string {
 		v := pcidev.Read(h, gpu).Vendor
 		// NVIDIA's driver is judged by GoldenDriver and GoldenDriverProblem;
 		// here only what the other makes need (their firmware).
-		if len(GPUPackages(NoDriver, []string{v})) > 0 && !has[v] {
+		if len(GPUPackages(NoDriver, []string{v}, false)) > 0 && !has[v] {
 			has[v] = true
 			missing = append(missing, pcidev.VendorName(v))
 		}
 	}
 	if len(missing) > 0 {
 		return "the rental base image was not built for this machine's " + strings.Join(missing, " and ") + " GPU" + rebuild
+	}
+	// A rental that boots with Secure Boot loads only signed kernel modules: an
+	// NVIDIA driver built inside the image is not, and the GPU would sit there
+	// with no driver. The other makes' drivers are the kernel's own.
+	if spec.Firmware.Secure && info.Driver != "" && info.Driver != NoDriver && !info.SignedModules {
+		return "the rental base image carries an NVIDIA driver built inside it, which a rental that boots with Secure Boot cannot load" + rebuild
 	}
 	return ""
 }
@@ -247,10 +258,6 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		o.DriverSource = DriverFromFlag
 	}
 	vendors := machineVendors(h)
-	userData, err := BakeUserData(o.Driver, vendors)
-	if err != nil {
-		return err
-	}
 
 	if o.InstallDeps {
 		if err := InstallPackages(h, spec.Arch, log); err != nil {
@@ -261,11 +268,21 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 		return fmt.Errorf("missing %s; install them with: %s (or rerun with --install-deps)",
 			strings.Join(missing, ", "), InstallHint(spec.Arch))
 	}
-	fw, ok := FindFirmware(h, spec.Arch)
+	fw, ok := ChooseFirmware(h, spec.Arch, spec.DataDir, version)
 	if !ok {
 		return fmt.Errorf("no UEFI firmware for %s; install it with: %s", spec.Arch, InstallHint(spec.Arch))
 	}
 	spec.Firmware = fw
+	// An image for rentals that boot with Secure Boot carries only signed
+	// kernel modules (GPUPackages); it boots without Secure Boot just as well.
+	signed := fw.Secure
+	userData, err := BakeUserData(o.Driver, vendors, signed)
+	if err != nil {
+		return err
+	}
+	if signed && o.Driver != NoDriver {
+		log("Rentals on this machine boot with Secure Boot and a locked-down kernel, so the image gets Canonical's signed NVIDIA modules rather than a driver built inside it.")
+	}
 	if st, err := LoadState(h, spec.DataDir); err != nil || st != nil {
 		if err != nil {
 			return err
@@ -312,82 +329,26 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	}
 
 	bake := path.Join(dir, "bake.qcow2")
-	_ = h.Remove(bake)
-	if err := h.Run("qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", base, bake, "20G"); err != nil {
-		return fmt.Errorf("create bake disk: %w", err)
-	}
 	defer h.Remove(bake)
-
-	r := NewRental(spec.Storage(), BakeID)
-	r.Disk = bake
-	r.DiskFormat = "qcow2"
-	r.MemoryMB = 4096
-	if m := spec.GuestMemoryMB(); m > 0 && m < r.MemoryMB {
-		r.MemoryMB = m
-	}
-	rt := New(h, spec, fence, nil)
-	st := &State{RentalID: BakeID, Rental: r, StartedAt: time.Now().Unix()}
-	save := func() error { return SaveState(h, spec.DataDir, st) }
-	if err := save(); err != nil {
-		return err
-	}
-	stopped := false
-	defer func() {
-		if !stopped {
-			rt.Stop()
-		}
-	}()
-
-	if err := h.MkdirAll(r.Dir, 0700); err != nil {
-		return err
-	}
-	if err := fence.Apply(); err != nil {
-		return fmt.Errorf("isolate network: %w", err)
-	}
-	st.Fenced = true
-	_ = save()
-	st.Net, err = SetupNetwork(h)
-	_ = save()
-	if err != nil {
-		return fmt.Errorf("bake network: %w", err)
-	}
-	if err := rt.writeSeed(r, userData, MetaData(BakeID), NetworkConfig()); err != nil {
-		return err
-	}
-	if err := rt.copyVars(r); err != nil {
-		return err
-	}
-
-	if pkgs := GPUPackages(o.Driver, vendors); len(pkgs) > 0 {
+	if pkgs := GPUPackages(o.Driver, vendors, signed); len(pkgs) > 0 {
 		log("Booting the base image to install %s and the RDMA tools (this takes a while) ...", strings.Join(pkgs, " "))
 	} else {
 		log("Booting the base image to install the RDMA tools; this machine's GPUs need nothing beyond its kernel (this takes a while) ...")
 	}
-	if err := h.Run("systemd-run", LaunchArgs(spec, r)...); err != nil {
-		return fmt.Errorf("boot bake VM: %w", err)
-	}
-	finished := false
-	for waited := time.Duration(0); waited < BakeTimeout && ctx.Err() == nil; waited += pollInterval {
-		if !rt.alive(r) {
-			finished = true
-			break
+	serial, err := bakeOnce(ctx, h, spec, fence, bake, base, userData)
+	if err != nil && spec.Firmware.Secure && errors.Is(err, errNeverBooted) && ctx.Err() == nil {
+		// The VM never came up with Secure Boot. Without it, it may: then this
+		// machine cannot boot a VM that way, says so, and rents as it did.
+		if plain, ok := FindFirmware(h, spec.Arch); ok {
+			why := err.Error()
+			_ = MarkSecureBootUnusable(h, spec.DataDir, version, why)
+			log("The image build's VM never came up with Secure Boot (%s). Building once more without it: this machine's rentals will not be locked down.", why)
+			spec.Firmware = plain
+			serial, err = bakeOnce(ctx, h, spec, fence, bake, base, userData)
 		}
-		h.Sleep(pollInterval)
 	}
-	res := rt.Stop()
-	stopped = true
-	if !finished && ctx.Err() != nil {
-		return fmt.Errorf("the base image build was stopped before it finished: %w", ctx.Err())
-	}
-	if !finished {
-		return fmt.Errorf("the bake VM did not finish within %v", BakeTimeout)
-	}
-	if !res.Clean() {
-		return fmt.Errorf("the bake VM did not tear down cleanly: %s", strings.Join(res.Detail, "; "))
-	}
-	serial, _ := h.ReadFile(lastSerialLog(spec.DataDir))
-	if !strings.Contains(string(serial), markBake+" DONE") {
-		return errors.New("the GPU package install inside the base image did not succeed; see " + lastSerialLog(spec.DataDir))
+	if err != nil {
+		return err
 	}
 
 	log("Flattening into %s ...", spec.GoldenImage)
@@ -402,15 +363,120 @@ func Prepare(h Host, spec Spec, fence Fence, version string, o PrepareOptions) e
 	// rebuild to become half of a pair -- recorded only when that step
 	// succeeded, since a single rental does not need them.
 	var extras []string
-	if strings.Contains(string(serial), markBake+" EXTRA "+ExtraRDMA) {
+	if strings.Contains(serial, markBake+" EXTRA "+ExtraRDMA) {
 		extras = append(extras, ExtraRDMA)
 	} else {
 		log("The RDMA tools could not be installed in the base image; single rentals are unaffected, but this machine cannot be half of a linked pair until a rebuild installs them.")
 	}
 	info, _ := json.MarshalIndent(GoldenInfo{Base: name, BaseSHA256: want, Driver: o.Driver,
 		AgentVersion: version, CreatedAt: time.Now().Unix(), DriverSource: o.DriverSource,
-		HostDriver: host.Describe(), Extras: extras, Vendors: vendors}, "", "  ")
+		HostDriver: host.Describe(), Extras: extras, Vendors: vendors, SignedModules: signed}, "", "  ")
 	_ = h.WriteFile(spec.GoldenImage+".json", info, 0600)
 	log("Golden image ready. Next: sudo gpu-agent check --boot")
 	return nil
+}
+
+// errNeverBooted: a VM that never said a word -- it did not come up at all,
+// which is the firmware's or the hypervisor's doing, not the image's.
+var errNeverBooted = errors.New("the VM never came up")
+
+// BakeBootTimeout is how long an image build's VM booted with Secure Boot may
+// stay silent before it is given up as one that will not come up.
+var BakeBootTimeout = 10 * time.Minute
+
+// bakeOnce boots the base image once, with spec's firmware, lets it install
+// what userData says and power off, and returns what it printed. The result is
+// left in the bake disk.
+func bakeOnce(ctx context.Context, h Host, spec Spec, fence Fence, bake, base, userData string) (string, error) {
+	_ = h.Remove(bake)
+	if err := h.Run("qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", base, bake, "20G"); err != nil {
+		return "", fmt.Errorf("create bake disk: %w", err)
+	}
+
+	r := NewRental(spec.Storage(), BakeID)
+	r.Disk = bake
+	r.DiskFormat = "qcow2"
+	r.MemoryMB = 4096
+	if m := spec.GuestMemoryMB(); m > 0 && m < r.MemoryMB {
+		r.MemoryMB = m
+	}
+	rt := New(h, spec, fence, nil)
+	st := &State{RentalID: BakeID, Rental: r, StartedAt: time.Now().Unix()}
+	save := func() error { return SaveState(h, spec.DataDir, st) }
+	if err := save(); err != nil {
+		return "", err
+	}
+	stopped := false
+	defer func() {
+		if !stopped {
+			rt.Stop()
+		}
+	}()
+
+	if err := h.MkdirAll(r.Dir, 0700); err != nil {
+		return "", err
+	}
+	if err := fence.Apply(); err != nil {
+		return "", fmt.Errorf("isolate network: %w", err)
+	}
+	st.Fenced = true
+	_ = save()
+	var err error
+	st.Net, err = SetupNetwork(h)
+	_ = save()
+	if err != nil {
+		return "", fmt.Errorf("bake network: %w", err)
+	}
+	if err := rt.writeSeed(r, userData, MetaData(BakeID), NetworkConfig()); err != nil {
+		return "", err
+	}
+	if err := rt.copyVars(r); err != nil {
+		return "", err
+	}
+	if err := h.Run("systemd-run", LaunchArgs(spec, r)...); err != nil {
+		return "", fmt.Errorf("boot bake VM: %w", err)
+	}
+	begun := func() bool {
+		data, err := h.ReadFile(r.SerialLog)
+		return err == nil && strings.Contains(string(data), markBake+" BEGIN")
+	}
+	finished, silent := false, false
+	for waited := time.Duration(0); waited < BakeTimeout && ctx.Err() == nil; waited += pollInterval {
+		if !rt.alive(r) {
+			finished = true
+			break
+		}
+		// With Secure Boot, a VM that has said nothing by now is not booting.
+		if spec.Firmware.Secure && waited >= BakeBootTimeout && !begun() {
+			silent = true
+			break
+		}
+		h.Sleep(pollInterval)
+	}
+	res := rt.Stop()
+	stopped = true
+	if !finished && !silent && ctx.Err() != nil {
+		return "", fmt.Errorf("the base image build was stopped before it finished: %w", ctx.Err())
+	}
+	if !res.Clean() {
+		return "", fmt.Errorf("the bake VM did not tear down cleanly: %s", strings.Join(res.Detail, "; "))
+	}
+	data, _ := h.ReadFile(lastSerialLog(spec.DataDir))
+	serial := string(data)
+	if !strings.Contains(serial, markBake+" BEGIN") {
+		how := "it exited without a word"
+		if silent {
+			how = fmt.Sprintf("it said nothing in %v", BakeBootTimeout)
+		} else if !finished {
+			how = fmt.Sprintf("it said nothing in %v", BakeTimeout)
+		}
+		return "", fmt.Errorf("%w (the image build's VM: %s; see %s)", errNeverBooted, how, lastSerialLog(spec.DataDir))
+	}
+	if !finished {
+		return "", fmt.Errorf("the bake VM did not finish within %v", BakeTimeout)
+	}
+	if !strings.Contains(serial, markBake+" DONE") {
+		return "", errors.New("the GPU package install inside the base image did not succeed; see " + lastSerialLog(spec.DataDir))
+	}
+	return serial, nil
 }

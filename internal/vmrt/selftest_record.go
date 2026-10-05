@@ -160,7 +160,9 @@ func FullTestCurrent(res *SelfTestResult, fp Fingerprint) bool {
 		return false
 	}
 	f := res.LastFull
-	return f != nil && f.Passed && f.AgentVersion == fp.Version && f.basis().problem(fp) == ""
+	// And with the firmware rentals boot with now: a pass without Secure Boot
+	// says nothing of a rental that boots with it, nor the other way round.
+	return f != nil && f.Passed && f.AgentVersion == fp.Version && f.LockedDown == fp.Secure && f.basis().problem(fp) == ""
 }
 
 // VerifiedGPUs are the GPUs as the last test that took them saw them, for
@@ -210,7 +212,45 @@ func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTest
 // SelfTestWith is SelfTestContext shaped by o: without the GPUs (they stay
 // with the host, which is using them; everything else a rental goes through
 // is tested), or with a smaller VM (the host is using the memory).
+//
+// A machine whose rentals boot with Secure Boot is tested that way, and the
+// test passes only when the VM says it is locked down. When the VM never came
+// up at all with it, the test is run once more with the plain firmware: a pass
+// there is this machine saying it cannot boot a VM with Secure Boot, which is
+// recorded (SecureBootRecord) so that it keeps renting as it did, not locked
+// down, rather than not at all.
 func (rt *Runtime) SelfTestWith(ctx context.Context, version string, o TestOptions) SelfTestResult {
+	res := rt.selfTestOnce(ctx, version, o)
+	if !rt.spec.Firmware.Secure || res.Passed || !res.neverBooted || res.Stopped || res.InUse != "" || ctx.Err() != nil {
+		return res
+	}
+	plain, ok := FindFirmware(rt.h, rt.spec.Arch)
+	if !ok || rt.Present() {
+		return res
+	}
+	spec := rt.spec
+	spec.Firmware = plain
+	again := New(rt.h, spec, rt.fence, rt.verifyGPU).selfTestOnce(ctx, version, o)
+	if !again.Passed {
+		// It does not boot either way: the first failure stands.
+		if !res.Stopped && res.InUse == "" {
+			_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
+		}
+		return res
+	}
+	why := "the test rental never came up"
+	if len(res.Problems) > 0 {
+		why = res.Problems[0]
+	}
+	_ = MarkSecureBootUnusable(rt.h, rt.spec.DataDir, version, why)
+	again.Notes = append(again.Notes, "a test rental did not come up with Secure Boot on this machine ("+why+
+		"), and did without it: this machine's rentals are not locked down")
+	_ = SaveSelfTest(rt.h, rt.spec.DataDir, again)
+	return again
+}
+
+// selfTestOnce is one test boot with the runtime's firmware.
+func (rt *Runtime) selfTestOnce(ctx context.Context, version string, o TestOptions) SelfTestResult {
 	now := time.Now().Unix()
 	// Read before the VM takes the GPUs: once on vfio-pci their host driver is
 	// gone, and the names are wanted in the verdict.
@@ -259,10 +299,14 @@ func (rt *Runtime) SelfTestWith(ctx context.Context, version string, o TestOptio
 			return res
 		}
 		problem := "the test VM did not start: " + err.Error()
+		dirty := false
 		if st, _ := LoadState(rt.h, rt.spec.DataDir); st != nil && st.Dirty {
+			dirty = true
 			problem += "; and its cleanup did not verify, so this machine refuses rentals until that is fixed"
 		}
-		return fail(problem)
+		res := fail(problem)
+		res.neverBooted = !dirty
+		return res
 	}
 
 	r := NewRental(rt.spec.Storage(), id)
@@ -284,6 +328,22 @@ func (rt *Runtime) SelfTestWith(ctx context.Context, version string, o TestOptio
 	stopped := ctx.Err() != nil && !(rep.End && sshOpened)
 	stop := rt.Stop()
 	res := stamp(Evaluate(rep, host, probes, sshOpened, stop, version, now))
+	res.neverBooted = !rep.Begin
+	if rep.SecureBoot != "" {
+		res.Lockdown = rep.SecureBoot + " " + rep.Lockdown + " " + rep.RawMemory
+	}
+	// A rental that boots with Secure Boot is locked down, or the test fails:
+	// the lock is the point, and only the VM can say it holds.
+	if rt.spec.Firmware.Secure && rep.End {
+		if rep.LockedDown() {
+			res.LockedDown = true
+		} else {
+			res.Passed, res.GPUVerified = false, false
+			res.Problems = append(res.Problems, fmt.Sprintf("the test VM booted with the Secure Boot firmware but is not locked down "+
+				"(it says Secure Boot %s, kernel lockdown %s, the machine's memory %s to root)",
+				orUnknown(rep.SecureBoot), orUnknown(rep.Lockdown), orUnknown(rep.RawMemory)))
+		}
+	}
 	if res.WithoutGPU && res.Passed {
 		res.Notes = append(res.Notes, "the GPU was in use on this machine, so this test ran without it; "+
 			"its handover to a rental is tested when the GPU is free, and always before a rental starts")

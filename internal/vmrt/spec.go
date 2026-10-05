@@ -22,6 +22,9 @@ const (
 type Firmware struct {
 	Code string `json:"code"`
 	Vars string `json:"vars"`
+	// Secure: a Secure Boot build, whose variable store has the keys enrolled
+	// and Secure Boot on (secureboot.go). The VM then runs with SMM.
+	Secure bool `json:"secure,omitempty"`
 }
 
 // Spec is what this machine can give a rental.

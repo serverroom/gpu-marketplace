@@ -67,7 +67,7 @@ func TestSelfTestWithoutAGPU(t *testing.T) {
 }
 
 func TestBakeWithoutTheDriver(t *testing.T) {
-	ud, err := BakeUserData(NoDriver, nil)
+	ud, err := BakeUserData(NoDriver, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -40,6 +40,19 @@ type SerialReport struct {
 	Internet  string // "ok", "fail", or "" when never reported
 	Blocked   []string
 	Reached   []string
+	// What the VM found of its own lockdown (secureboot.go): Secure Boot "on"
+	// or "off", the kernel's lockdown mode ("none", "integrity",
+	// "confidentiality"), and whether root could open the machine's memory
+	// ("open", "denied"). All "" from a VM that did not say.
+	SecureBoot string
+	Lockdown   string
+	RawMemory  string
+}
+
+// LockedDown reports whether the VM said it booted with Secure Boot, with its
+// kernel locked down, and root refused the machine's memory.
+func (r SerialReport) LockedDown() bool {
+	return r.SecureBoot == "on" && (r.Lockdown == "integrity" || r.Lockdown == "confidentiality") && r.RawMemory == "denied"
 }
 
 // HostGPU is a GPU this machine passes through, as the host knows it.
@@ -157,6 +170,10 @@ func ParseSerial(log string) SerialReport {
 		case "REACHED":
 			target, _, _ := strings.Cut(rest, " ")
 			rep.Reached = append(rep.Reached, target)
+		case "LOCKDOWN":
+			if f := strings.Fields(rest); len(f) == 3 {
+				rep.SecureBoot, rep.Lockdown, rep.RawMemory = f[0], f[1], f[2]
+			}
 		}
 	}
 	return rep
@@ -197,6 +214,11 @@ type SelfTestResult struct {
 	// TestMemoryMB is the test VM's memory when it was sized below a rental's
 	// because the host was using the machine's memory.
 	TestMemoryMB int `json:"test_memory_mb,omitempty"`
+	// LockedDown: the test VM booted with Secure Boot and said, from inside,
+	// that its kernel was locked down (secureboot.go). Lockdown is what it
+	// said: "on integrity denied".
+	LockedDown bool   `json:"locked_down,omitempty"`
+	Lockdown   string `json:"lockdown,omitempty"`
 	// LastFull is the last test that took the GPUs (on a machine without a
 	// GPU, the last test), kept across the tests run without them.
 	LastFull *TestVerdict `json:"last_full_test,omitempty"`
@@ -208,6 +230,9 @@ type SelfTestResult struct {
 	// held when it came to it (the refusal). Nothing was recorded: the GPU
 	// was never handed to a VM. Never written to selftest.json.
 	InUse string `json:"-"`
+	// neverBooted: the test VM did not start, or never began its report: it
+	// did not come up at all. Never written to selftest.json.
+	neverBooted bool
 	// legacy: written before v0.2.3, which recorded no driver or image (as
 	// is any record without an image).
 	legacy bool
@@ -223,13 +248,16 @@ type TestVerdict struct {
 	BaseImage    string     `json:"base_image"`
 	GPUs         []GuestGPU `json:"gpus,omitempty"`
 	Problems     []string   `json:"problems,omitempty"`
-	legacy       bool
+	// LockedDown: the test VM was locked down (SelfTestResult.LockedDown).
+	LockedDown bool `json:"locked_down,omitempty"`
+	legacy     bool
 }
 
 // verdict is the result in brief.
 func (r SelfTestResult) verdict() *TestVerdict {
 	return &TestVerdict{Passed: r.Passed, AgentVersion: r.AgentVersion, At: r.At, HostGPUs: r.HostGPUs,
-		HostDriver: r.HostDriver, BaseImage: r.BaseImage, GPUs: r.GPUs, Problems: r.Problems, legacy: r.legacy}
+		HostDriver: r.HostDriver, BaseImage: r.BaseImage, GPUs: r.GPUs, Problems: r.Problems,
+		LockedDown: r.LockedDown, legacy: r.legacy}
 }
 
 // basis is what a verdict holds for.
@@ -259,11 +287,14 @@ type Fingerprint struct {
 	BaseImage  string
 	// ImageBuiltAt is when the base image was built (0: unknown).
 	ImageBuiltAt int64
+	// Secure: this machine's rentals boot with Secure Boot (spec.Firmware).
+	Secure bool
 }
 
 // MachineFingerprint reads the fingerprint of this machine for spec's GPUs.
 func MachineFingerprint(h Host, spec Spec, version string) Fingerprint {
-	fp := Fingerprint{Version: version, GPUs: append([]string(nil), spec.GPUs...), HostDriver: HostGPUDriver(h, spec.DataDir, spec.GPUs)}
+	fp := Fingerprint{Version: version, GPUs: append([]string(nil), spec.GPUs...),
+		HostDriver: HostGPUDriver(h, spec.DataDir, spec.GPUs), Secure: spec.Firmware.Secure}
 	if info, err := LoadGoldenInfo(h, spec); err == nil {
 		fp.BaseImage = imageBuild(info)
 		fp.ImageBuiltAt = info.CreatedAt

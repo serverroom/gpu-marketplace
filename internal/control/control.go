@@ -210,6 +210,13 @@ type Guest struct {
 	MemoryGB int    `json:"memory_gb"`
 	DiskGB   int    `json:"disk_gb"`
 	CPU      string `json:"cpu"`
+	// Lockdown: a rental's VM boots with Secure Boot and its kernel locked down,
+	// proven by this machine's last test boot (v0.3.10): root in the VM cannot
+	// reach a device's registers or load an unsigned kernel module, and so
+	// cannot write to the firmware of the GPU it was handed. NotLockedDown says
+	// why not, where it is not.
+	Lockdown      bool   `json:"lockdown,omitempty"`
+	NotLockedDown string `json:"not_locked_down,omitempty"`
 }
 
 // GPU is one GPU a rental gets, as the rental's own VM saw it.
