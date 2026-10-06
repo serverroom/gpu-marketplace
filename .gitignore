@@ -7,6 +7,21 @@
 *.test
 *.out
 
+# Rust
+target/
+**/target/
+**/*.rs.bk
+
+# Compiled binaries, libraries and debug symbols
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.obj
+*.bin
+*.pdb
+
 # IDE
 .idea/
 .vscode/
@@ -25,3 +40,6 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+
+# Logs
+*.log
