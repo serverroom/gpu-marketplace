@@ -253,6 +253,36 @@ func TestARentalTornDownTwiceKeepsOneRecord(t *testing.T) {
 	}
 }
 
+func TestARentalsRecordLeavesTheMachineThreeYearsAfterItEnded(t *testing.T) {
+	h := fakehost.New()
+	now := time.Now().Unix()
+	year := int64(365 * 24 * 3600)
+	old := []RentalRecord{
+		{RentalID: "four-years", EndedAt: now - 4*year},
+		{RentalID: "one-year", EndedAt: now - year},
+		{RentalID: "no-end"},
+	}
+	if err := writeRecords(h, dataDir, old); err != nil {
+		t.Fatal(err)
+	}
+	// An idle machine: nothing is rented, something only reads the records.
+	got := LoadRecords(h, dataDir)
+	if len(got) != 2 || got[0].RentalID != "one-year" || got[1].RentalID != "no-end" {
+		t.Fatalf("after three years a record should be gone and the others kept: %+v", got)
+	}
+	data, err := h.ReadFile(RecordsPath(dataDir))
+	if err != nil || strings.Contains(string(data), "four-years") {
+		t.Errorf("the old record is still in the file (%v): %s", err, data)
+	}
+	// And a new rental does not bring it back.
+	if err := keepRecord(h, dataDir, RentalRecord{RentalID: "today", EndedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadRecords(h, dataDir); len(got) != 3 || got[2].RentalID != "today" {
+		t.Errorf("records after a new rental: %+v", got)
+	}
+}
+
 func TestOnlyTheLastRentalsAreKept(t *testing.T) {
 	h := fakehost.New()
 	for i := 0; i < maxRecords+5; i++ {

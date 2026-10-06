@@ -657,6 +657,12 @@ func short(sum string) string {
 // maxRecords is how many rentals' measurements the machine keeps.
 const maxRecords = 20
 
+// maxRecordAge is how long a rental's measurements stay on the machine: three
+// years after the rental ended, which is how long the marketplace keeps its
+// own copy. The count alone kept them for good on a machine that is not
+// rented again.
+const maxRecordAge = 3 * 365 * 24 * time.Hour
+
 // ReportedRecords is how many of them /status tells the marketplace: the
 // latest, so one is still told after an agent restart or a missed answer.
 const ReportedRecords = 3
@@ -665,7 +671,9 @@ const ReportedRecords = 3
 func RecordsPath(dataDir string) string { return path.Join(dataDir, "measurements.json") }
 
 // LoadRecords returns the kept measurements, oldest first; none when the file
-// is absent or unreadable.
+// is absent or unreadable. A record past maxRecordAge is dropped here, from
+// the answer and from the file, so an idle machine sheds its old rentals the
+// next time anything asks: the marketplace reads them every half minute.
 func LoadRecords(h Host, dataDir string) []RentalRecord {
 	data, err := h.ReadFile(RecordsPath(dataDir))
 	if err != nil {
@@ -675,7 +683,26 @@ func LoadRecords(h Host, dataDir string) []RentalRecord {
 	if json.Unmarshal(data, &records) != nil {
 		return nil
 	}
-	return records
+	kept := fresh(records, time.Now().Unix())
+	if len(kept) != len(records) {
+		// Best effort: a file that cannot be written is read and cut again next time.
+		_ = writeRecords(h, dataDir, kept)
+	}
+	return kept
+}
+
+// fresh leaves out the records of rentals that ended more than maxRecordAge
+// before now. A record with no end time cannot be aged and is kept.
+func fresh(records []RentalRecord, now int64) []RentalRecord {
+	cut := now - int64(maxRecordAge/time.Second)
+	kept := make([]RentalRecord, 0, len(records))
+	for _, r := range records {
+		if r.EndedAt != 0 && r.EndedAt < cut {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept
 }
 
 // LatestRecords are the last n kept measurements, oldest first.
@@ -700,6 +727,11 @@ func keepRecord(h Host, dataDir string, rec RentalRecord) error {
 	if len(records) > maxRecords {
 		records = records[len(records)-maxRecords:]
 	}
+	return writeRecords(h, dataDir, records)
+}
+
+// writeRecords replaces the kept measurements with these.
+func writeRecords(h Host, dataDir string, records []RentalRecord) error {
 	data, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
 		return err

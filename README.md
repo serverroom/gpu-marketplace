@@ -641,7 +641,8 @@ three are told to the marketplace with the machine's status, which keeps them wi
 rental. **A card's serial number and UUID never leave the machine, and are not in the
 file either:** the record holds a short fingerprint of the two (the first 16 hex digits
 of their SHA-256), enough to tell that the card that came back is the card that went.
-The drive's model is in the record; its serial number is not read.
+The drive's model is in the record; its serial number is not read. A rental's readings are dropped from that file three years after the rental ended,
+whether or not the machine is rented again.
 
 ## A rental's VM is locked down
 
