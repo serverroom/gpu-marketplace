@@ -13,8 +13,8 @@ import (
 // biggest internal disk with room, or --data-dir), else the agent's data
 // directory. Reading "/" instead showed a board that keeps its OS on a small
 // eMMC or SD partition and its NVMe elsewhere with the OS partition's 7 GB
-// beside a 207 GB rental disk (DifraTech's RK3588 nodes, 2026-10-02). On a
-// machine with one filesystem it is "/" either way.
+// beside a 207 GB rental disk. On a machine with one filesystem it is "/"
+// either way.
 var storageDir = config.StorageDir
 
 func collectDisk() (DiskInfo, error) {
