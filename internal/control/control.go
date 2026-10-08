@@ -217,6 +217,13 @@ type Guest struct {
 	// why not, where it is not.
 	Lockdown      bool   `json:"lockdown,omitempty"`
 	NotLockedDown string `json:"not_locked_down,omitempty"`
+	// CoresNote says, on a machine with two types of core, where the wider
+	// layout stands: the VM has a vCPU on a core of each type (CPU
+	// then names both, "4× Cortex-A76 + 2× Cortex-A55", and VCPUs counts
+	// both), its next test boot tries that, or why it runs on the fastest
+	// cores only (the host's kernel, a test that did not pass). Absent on a
+	// machine with one core type.
+	CoresNote string `json:"cores_note,omitempty"`
 }
 
 // GPU is one GPU a rental gets, as the rental's own VM saw it.

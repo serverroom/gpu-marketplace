@@ -162,7 +162,10 @@ func FullTestCurrent(res *SelfTestResult, fp Fingerprint) bool {
 	f := res.LastFull
 	// And with the firmware rentals boot with now: a pass without Secure Boot
 	// says nothing of a rental that boots with it, nor the other way round.
-	return f != nil && f.Passed && f.AgentVersion == fp.Version && f.LockedDown == fp.Secure && f.basis().problem(fp) == ""
+	// The same for the cores they run on: a pass on one core type says nothing
+	// of a rental with a vCPU on each of two.
+	return f != nil && f.Passed && f.AgentVersion == fp.Version && f.LockedDown == fp.Secure && f.Cores == fp.Cores &&
+		f.basis().problem(fp) == ""
 }
 
 // VerifiedGPUs are the GPUs as the last test that took them saw them, for
@@ -219,8 +222,21 @@ func (rt *Runtime) SelfTestContext(ctx context.Context, version string) SelfTest
 // there is this machine saying it cannot boot a VM with Secure Boot, which is
 // recorded (SecureBootRecord) so that it keeps renting as it did, not locked
 // down, rather than not at all.
+//
+// A machine with two core types is tested in the wider layout (layout.go) when
+// it rents in it, and also when it has not tried it yet -- unless o.Standing.
+// The wider layout is only ever an attempt: a test that does not pass in it is
+// run again on the fastest cores alone, as the machine always rented, and a
+// pass there is what is recorded, with the wider layout marked as one this
+// machine cannot use (LayoutRecord).
 func (rt *Runtime) SelfTestWith(ctx context.Context, version string, o TestOptions) SelfTestResult {
-	res := rt.selfTestOnce(ctx, version, o)
+	switch {
+	case rt.spec.EachOnOne():
+		return rt.selfTestWider(ctx, version, o, rt.spec)
+	case len(rt.spec.TrialCores) > 0 && !o.Standing:
+		return rt.selfTestWider(ctx, version, o, rt.spec.Wider())
+	}
+	res := rt.selfTestOnce(ctx, version, o, true)
 	if !rt.spec.Firmware.Secure || res.Passed || !res.neverBooted || res.Stopped || res.InUse != "" || ctx.Err() != nil {
 		return res
 	}
@@ -230,7 +246,7 @@ func (rt *Runtime) SelfTestWith(ctx context.Context, version string, o TestOptio
 	}
 	spec := rt.spec
 	spec.Firmware = plain
-	again := New(rt.h, spec, rt.fence, rt.verifyGPU).selfTestOnce(ctx, version, o)
+	again := New(rt.h, spec, rt.fence, rt.verifyGPU).selfTestOnce(ctx, version, o, true)
 	if !again.Passed {
 		// It does not boot either way: the first failure stands.
 		if !res.Stopped && res.InUse == "" {
@@ -249,8 +265,54 @@ func (rt *Runtime) SelfTestWith(ctx context.Context, version string, o TestOptio
 	return again
 }
 
-// selfTestOnce is one test boot with the runtime's firmware.
-func (rt *Runtime) selfTestOnce(ctx context.Context, version string, o TestOptions) SelfTestResult {
+// selfTestWider is a test boot in the wider layout, wide, and the way back from
+// it. The attempt itself is not recorded as the machine's test boot unless it
+// is the verdict: a pass, or a teardown that did not verify.
+func (rt *Runtime) selfTestWider(ctx context.Context, version string, o TestOptions, wide Spec) SelfTestResult {
+	dir := rt.spec.DataDir
+	res := New(rt.h, wide, rt.fence, rt.verifyGPU).selfTestOnce(ctx, version, o, false)
+	switch {
+	case res.Passed:
+		_ = MarkLayout(rt.h, dir, version, wide.GuestCores, true, "")
+		_ = SaveSelfTest(rt.h, dir, res)
+		return res
+	case rt.Present():
+		// Its teardown did not verify: that keeps the machine from renting in
+		// any layout, and is what stands, however the test ended.
+		_ = SaveSelfTest(rt.h, dir, res)
+		return res
+	case res.Stopped || res.InUse != "" || ctx.Err() != nil:
+		// Nothing was learned of the layout, and nothing is recorded.
+		return res
+	}
+	why := "the test rental never came up"
+	if len(res.Problems) > 0 {
+		why = res.Problems[0]
+	}
+	narrow := wide.OneCoreType()
+	again := New(rt.h, narrow, rt.fence, rt.verifyGPU).SelfTestWith(ctx, version, o)
+	if !again.Passed {
+		// It passes neither way, so the layout is not what is wrong: the
+		// machine's own failure stands, and the wider layout is tried again
+		// once that is mended.
+		return again
+	}
+	_ = MarkLayout(rt.h, dir, version, wide.GuestCores, false, why)
+	again.Notes = append(again.Notes, fmt.Sprintf("a test rental on %s, each vCPU on a core of its own, did not pass on this machine (%s), "+
+		"and one on its %s cores alone did: this machine's rentals run on those", wide.GuestCPUName, why, narrow.GuestCPUName))
+	_ = SaveSelfTest(rt.h, dir, again)
+	return again
+}
+
+// selfTestOnce is one test boot with the runtime's firmware and cores. record
+// false leaves selftest.json alone: the caller decides what the machine's
+// verdict is.
+func (rt *Runtime) selfTestOnce(ctx context.Context, version string, o TestOptions, record bool) SelfTestResult {
+	save := func(res SelfTestResult) {
+		if record {
+			_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
+		}
+	}
 	now := time.Now().Unix()
 	// Read before the VM takes the GPUs: once on vfio-pci their host driver is
 	// gone, and the names are wanted in the verdict.
@@ -265,6 +327,7 @@ func (rt *Runtime) selfTestOnce(ctx context.Context, version string, o TestOptio
 		res.HostDriver, res.BaseImage = fp.HostDriver, fp.BaseImage
 		res.WithoutGPU = o.NoGPU && len(rt.spec.GPUs) > 0
 		res.TestMemoryMB = o.MemoryMB
+		res.Cores = rt.spec.widerCores()
 		if res.WithoutGPU {
 			res.GPUVerified = false
 		}
@@ -272,7 +335,7 @@ func (rt *Runtime) selfTestOnce(ctx context.Context, version string, o TestOptio
 	}
 	fail := func(problem string) SelfTestResult {
 		res := stamp(SelfTestResult{Problems: []string{problem}})
-		_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
+		save(res)
 		return res
 	}
 	if ctx.Err() != nil {
@@ -329,6 +392,15 @@ func (rt *Runtime) selfTestOnce(ctx context.Context, version string, o TestOptio
 	stop := rt.Stop()
 	res := stamp(Evaluate(rep, host, probes, sshOpened, stop, version, now))
 	res.neverBooted = !rep.Begin
+	res.GuestCPUs, res.GuestMemoryMB = rep.CPUCount, rep.MemoryMB
+	// A VM in the wider layout has every CPU it was given, each the type of
+	// the core it was pinned to, or the layout did not hold.
+	if rt.spec.EachOnOne() && rep.End {
+		if problem := widerProblem(rep, coreTypes(rt.h, rt.spec.GuestCores)); problem != "" {
+			res.Passed, res.GPUVerified = false, false
+			res.Problems = append(res.Problems, problem)
+		}
+	}
 	if rep.SecureBoot != "" {
 		res.Lockdown = rep.SecureBoot + " " + rep.Lockdown + " " + rep.RawMemory
 	}
@@ -359,6 +431,33 @@ func (rt *Runtime) selfTestOnce(ctx context.Context, version string, o TestOptio
 			return res
 		}
 	}
-	_ = SaveSelfTest(rt.h, rt.spec.DataDir, res)
+	save(res)
 	return res
+}
+
+// widerProblem says what a test VM in the wider layout reported of its CPUs
+// that is not what it was given, or "": want is the core type of the host CPU
+// each vCPU was pinned to, in order.
+func widerProblem(rep SerialReport, want []string) string {
+	switch {
+	case rep.CPUCount == 0:
+		return "the test VM did not say which CPUs it has"
+	case rep.CPUCount != len(want) || len(rep.CPUTypes) != len(want):
+		return fmt.Sprintf("the test VM came up with %d CPUs (%d named by type), and was given %d", rep.CPUCount, len(rep.CPUTypes), len(want))
+	}
+	for i, t := range want {
+		if t == "" || rep.CPUTypes[i] != t {
+			return fmt.Sprintf("the test VM's CPU %d is a %s, and it was pinned to a %s core", i, coreTypeName(rep.CPUTypes[i]), coreTypeName(t))
+		}
+	}
+	return ""
+}
+
+// coreTypeName is a core type ("0x41/0xd0b") in words ("Cortex-A76").
+func coreTypeName(t string) string {
+	impl, part, ok := strings.Cut(t, "/")
+	if !ok {
+		return "core of an unknown type"
+	}
+	return stats.CoreName(impl, part)
 }

@@ -437,6 +437,16 @@ func selfTestScript(probes []string, gpu bool) (string, error) {
 		"if head -c 1 /dev/mem >/dev/null 2>&1; then raw=open; else raw=denied; fi",
 		say+" \""+m+" LOCKDOWN $sb $ld $raw\"",
 	)
+	// What the VM has: its CPUs, its memory in MB, and on Arm each CPU's core
+	// type in order ("0x41/0xd0b,..."), which is how a VM whose vCPUs are
+	// pinned to two types of core (layout.go) shows that each is where it
+	// was put.
+	lines = append(lines,
+		"cpus=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)",
+		"types=$(awk -F': *' '/^CPU implementer/{i=$2} /^CPU part/{printf \"%s%s/%s\", s, i, $2; s=\",\"}' /proc/cpuinfo 2>/dev/null)",
+		"mem=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)",
+		say+" \""+m+" CPUS ${cpus:-0} ${mem:-0} ${types:--}\"",
+	)
 	lines = append(lines,
 		"probe() { timeout \"$2\" bash -c \"exec 3<>/dev/tcp/${1%:*}/${1##*:}\" 2>/dev/null; echo $?; }",
 		"if [ \"$(probe 1.1.1.1:443 10)\" = 0 ]; then "+say+" '"+m+" INTERNET ok'; else "+say+" '"+m+" INTERNET fail'; fi",

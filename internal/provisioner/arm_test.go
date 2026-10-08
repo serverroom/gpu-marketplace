@@ -1,6 +1,7 @@
 package provisioner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,8 @@ func rk3588(t *testing.T) *fakehost.Host {
 		h.Files[fmt.Sprintf("/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu)] = []byte(khz + "\n")
 	}
 	h.Files["/dev/kvm"] = nil
+	// Rockchip's vendor kernel, as most RK3588 boards run it.
+	h.Files["/proc/sys/kernel/osrelease"] = []byte(vendorKernel + "\n")
 	h.Files["/etc/os-release"] = []byte("PRETTY_NAME=\"Armbian 25.8 bookworm\"\nID=debian\nVERSION_ID=\"12\"\n")
 	h.Files["/usr/share/AAVMF/AAVMF_CODE.fd"] = nil
 	h.Files["/usr/share/AAVMF/AAVMF_VARS.fd"] = nil
@@ -68,19 +71,286 @@ func TestAnRK3588BoardHosts(t *testing.T) {
 	if !c.Ready || c.Kind != KindQEMU || c.GPUCount == nil || *c.GPUCount != 0 {
 		t.Fatalf("capability = %+v", c)
 	}
-	// The renter gets the four Cortex-A76 cores, pinned; the host keeps the A55s.
-	if c.Guest == nil || *c.Guest != (control.Guest{VCPUs: 4, MemoryGB: 11, DiskGB: 500, CPU: "Cortex-A76"}) {
+	// The renter gets the four Cortex-A76 cores, pinned; the host keeps the
+	// A55s. On a vendor kernel that is all a VM can have, and the host is told
+	// why, with the kernel named.
+	note := "a rental runs on the 4 Cortex-A76 cores only: this machine's kernel (Linux " + vendorKernel +
+		") cannot run one VM on two types of core, which takes Linux 6.3 or later"
+	if c.Guest == nil || *c.Guest != (control.Guest{VCPUs: 4, MemoryGB: 11, DiskGB: 500, CPU: "Cortex-A76", CoresNote: note}) {
 		t.Errorf("guest = %+v", c.Guest)
 	}
-	if got := p.Runtime().Spec().GuestCores; fmt.Sprint(got) != "[4 5 6 7]" {
-		t.Errorf("pinned to %v", got)
+	spec := p.Runtime().Spec()
+	if got := spec.GuestCores; fmt.Sprint(got) != "[4 5 6 7]" || spec.EachOnOne() || len(spec.TrialCores) != 0 {
+		t.Errorf("spec = %+v", spec)
+	}
+	if c.RetestPending {
+		t.Errorf("a machine with nothing to try owes a test boot")
 	}
 	data, _ := json.Marshal(c)
-	if !strings.Contains(string(data), `"guest":{"vcpus":4,"memory_gb":11,"disk_gb":500,"cpu":"Cortex-A76"}`) {
+	if !strings.Contains(string(data), `"guest":{"vcpus":4,"memory_gb":11,"disk_gb":500,"cpu":"Cortex-A76","cores_note":"a rental runs on the 4 Cortex-A76 cores only`) {
 		t.Errorf("capability JSON = %s", data)
 	}
 	if c.Identity == nil || c.Identity.ConfirmedDGXSpark {
 		t.Errorf("identity = %+v", c.Identity)
+	}
+}
+
+const (
+	vendorKernel   = "6.1.84-vendor-rk35xx"
+	mainlineKernel = "6.12.41-current-rockchip64"
+	widerCPU       = "4× Cortex-A76 + 2× Cortex-A55"
+)
+
+// On a kernel that can run a VM on two types of core, the board is still
+// offered as it always was until its own test boot has tried the wider layout:
+// that test is owed, and the host is told it is coming.
+func TestAnRK3588OnAKernelThatCanOwesATestOfTheWiderLayout(t *testing.T) {
+	h := rk3588(t)
+	h.Files["/proc/sys/kernel/osrelease"] = []byte(mainlineKernel + "\n")
+	p := detectARM(t, h)
+	c := p.Capability()
+	if !c.Ready || c.Guest == nil || c.Guest.VCPUs != 4 || c.Guest.CPU != "Cortex-A76" ||
+		!strings.Contains(c.Guest.CoresNote, "next test boot tries "+widerCPU) {
+		t.Fatalf("capability = %+v guest = %+v", c, c.Guest)
+	}
+	if !c.RetestPending {
+		t.Errorf("the wider layout's test boot is not owed")
+	}
+	spec := p.Runtime().Spec()
+	if spec.EachOnOne() || fmt.Sprint(spec.GuestCores) != "[4 5 6 7]" || fmt.Sprint(spec.TrialCores) != "[4 5 6 7 2 3]" || spec.TrialCPUName != widerCPU {
+		t.Errorf("spec = %+v", spec)
+	}
+}
+
+// Proven by its test boot, the board is offered with both core types, named as
+// both: six vCPUs are never six of one kind.
+func TestAnRK3588ThatProvedTheWiderLayoutIsOfferedWithBothCoreTypes(t *testing.T) {
+	h := rk3588(t)
+	h.Files["/proc/sys/kernel/osrelease"] = []byte(mainlineKernel + "\n")
+	if err := vmrt.MarkLayout(h, dataDir, version, []int{4, 5, 6, 7, 2, 3}, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	pass, _ := json.Marshal(vmrt.SelfTestResult{Passed: true, AgentVersion: version, Cores: "4,5,6,7,2,3"})
+	h.Files[vmrt.SelfTestPath(dataDir)] = pass
+	p := detectARM(t, h)
+	c := p.Capability()
+	if !c.Ready || c.RetestPending || c.Guest == nil || c.Guest.VCPUs != 6 || c.Guest.CPU != widerCPU || c.Guest.MemoryGB != 11 ||
+		!strings.Contains(c.Guest.CoresNote, "each vCPU runs on one core of its own") {
+		t.Fatalf("capability = %+v guest = %+v", c, c.Guest)
+	}
+	spec := p.Runtime().Spec()
+	if !spec.EachOnOne() || fmt.Sprint(spec.GuestCores) != "[4 5 6 7 2 3]" || fmt.Sprint(spec.HomeCores) != "[4 5 6 7]" || len(spec.TrialCores) != 0 {
+		t.Errorf("spec = %+v", spec)
+	}
+	data, _ := json.Marshal(c)
+	if !strings.Contains(string(data), `"guest":{"vcpus":6,"memory_gb":11,"disk_gb":500,"cpu":"4× Cortex-A76 + 2× Cortex-A55","cores_note":`) {
+		t.Errorf("capability JSON = %s", data)
+	}
+
+	// A pass on one core type does not count for it: the full test is owed.
+	old, _ := json.Marshal(vmrt.SelfTestResult{Passed: true, AgentVersion: version})
+	h.Files[vmrt.SelfTestPath(dataDir)] = old
+	if c = detectARM(t, h).Capability(); !c.Ready || !c.RetestPending {
+		t.Errorf("a pass on one core type counted for the wider layout: %+v", c)
+	}
+}
+
+// A test boot that did not pass in the wider layout leaves the board exactly
+// as it was offered before, with the reason for the host.
+func TestAnRK3588WhoseWiderLayoutDidNotPassRentsAsBefore(t *testing.T) {
+	h := rk3588(t)
+	h.Files["/proc/sys/kernel/osrelease"] = []byte(mainlineKernel + "\n")
+	if err := vmrt.MarkLayout(h, dataDir, version, []int{4, 5, 6, 7, 2, 3}, false, "the VM did not take a reset"); err != nil {
+		t.Fatal(err)
+	}
+	p := detectARM(t, h)
+	c := p.Capability()
+	if !c.Ready || c.RetestPending || c.Guest == nil || c.Guest.VCPUs != 4 || c.Guest.CPU != "Cortex-A76" ||
+		!strings.Contains(c.Guest.CoresNote, "did not pass on this machine (the VM did not take a reset)") {
+		t.Fatalf("capability = %+v guest = %+v", c, c.Guest)
+	}
+	if spec := p.Runtime().Spec(); spec.EachOnOne() || len(spec.TrialCores) != 0 || fmt.Sprint(spec.GuestCores) != "[4 5 6 7]" {
+		t.Errorf("spec = %+v", spec)
+	}
+}
+
+// The test right before a rental is of the machine as it is about to be
+// rented: a wider layout the machine has not proven is not tried then.
+func TestTheTestBeforeARentalIsAStandingOne(t *testing.T) {
+	h := rk3588(t)
+	h.Files["/proc/sys/kernel/osrelease"] = []byte(mainlineKernel + "\n")
+	p := detectARM(t, h)
+	if len(p.Runtime().Spec().TrialCores) == 0 {
+		t.Fatalf("spec = %+v", p.Runtime().Spec())
+	}
+	var got []vmrt.TestOptions
+	p.testBoot = func(_ context.Context, o vmrt.TestOptions) vmrt.SelfTestResult {
+		got = append(got, o)
+		return vmrt.SelfTestResult{Passed: true, GPUVerified: true}
+	}
+	res, busy := p.runPreRentalTest(context.Background())
+	if !res.Passed || busy != "" || len(got) != 1 || !got[0].Standing {
+		t.Fatalf("result = %+v, busy %q, options %+v", res, busy, got)
+	}
+}
+
+// provenRK3588 is the board read as renting in the wider layout: a kernel that
+// can, the record of a test boot that passed that way, and that test boot.
+func provenRK3588(t *testing.T) (*fakehost.Host, *Provisioner) {
+	t.Helper()
+	h := rk3588(t)
+	h.Files["/proc/sys/kernel/osrelease"] = []byte(mainlineKernel + "\n")
+	if err := vmrt.MarkLayout(h, dataDir, version, []int{4, 5, 6, 7, 2, 3}, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	pass, _ := json.Marshal(vmrt.SelfTestResult{Passed: true, AgentVersion: version, Cores: "4,5,6,7,2,3"})
+	h.Files[vmrt.SelfTestPath(dataDir)] = pass
+	p := detectARM(t, h)
+	if c := p.Capability(); !c.Ready || c.Guest == nil || c.Guest.VCPUs != 6 {
+		t.Fatalf("capability = %+v guest = %+v", c, c.Guest)
+	}
+	return h, p
+}
+
+// asBefore checks that the board is offered as it was before there was a wider
+// layout: four Cortex-A76, on one core type, ready.
+func asBefore(t *testing.T, p *Provisioner) {
+	t.Helper()
+	c := p.Capability()
+	if !c.Ready || c.Guest == nil || c.Guest.VCPUs != 4 || c.Guest.CPU != "Cortex-A76" {
+		t.Errorf("capability = %+v guest = %+v", c, c.Guest)
+	}
+	if spec := p.Runtime().Spec(); spec.EachOnOne() || len(spec.TrialCores) != 0 || fmt.Sprint(spec.GuestCores) != "[4 5 6 7]" {
+		t.Errorf("spec = %+v", spec)
+	}
+}
+
+// unpinnable is a machine whose rental cannot be put in the wider layout: the
+// start fails as the runtime's does, having recorded that the layout is gone.
+type unpinnable struct {
+	fakeMachine
+	h *fakehost.Host
+}
+
+func (m *unpinnable) Start(o vmrt.StartOptions) error {
+	m.started++
+	_ = vmrt.MarkLayout(m.h, dataDir, version, []int{4, 5, 6, 7, 2, 3}, false, "a rental did not start that way: pin vCPU 4 to CPU 2")
+	return fmt.Errorf("%w: pin vCPU 4 to CPU 2", vmrt.ErrLayout)
+}
+
+// A rental that cannot start in the wider layout fails, as any start that
+// fails does -- and the machine is read again at once, so that it is offered
+// on one core type from then on and its next rental starts.
+func TestARentalThatCannotStartInTheWiderLayoutPutsTheMachineBack(t *testing.T) {
+	h, p := provenRK3588(t)
+	changed := 0
+	p.OnCapabilityChange(func() { changed++ })
+	withFakeForward(t, nil)
+	p.machine, p.async = &unpinnable{h: h, fakeMachine: fakeMachine{stopRes: clean()}}, false
+	err := p.Provision("R1", renterKey(t))
+	if err == nil || !errors.Is(err, vmrt.ErrLayout) || p.Status() != StatusFree {
+		t.Fatalf("Provision = %v, status %s", err, p.Status())
+	}
+	asBefore(t, p)
+	if changed != 1 {
+		t.Errorf("the marketplace was told %d times that the machine changed", changed)
+	}
+	// Its last test boot was in the layout it gave up: the one on its fastest
+	// cores is owed, and is run before the next rental as any owed test is.
+	if !p.Capability().RetestPending || p.fullTestIsCurrent() {
+		t.Errorf("the test boot on one core type is not owed")
+	}
+	// And with that passed it rents: the machine Detect built is the one the
+	// next rental gets.
+	p.machine, p.async = &fakeMachine{stopRes: clean()}, false
+	p.fullTestCurrent = func() bool { return true }
+	if err := p.Provision("R2", renterKey(t)); err != nil || p.Status() != StatusRented {
+		t.Fatalf("the next rental: %v, status %s", err, p.Status())
+	}
+}
+
+// The test before a rental passed on one core type only, on a machine offered
+// with two: the rental, ordered as what the machine no longer is, does not
+// start, and the machine is offered as it is.
+func TestATestBeforeARentalThatGaveUpTheWiderLayoutFailsTheRental(t *testing.T) {
+	h, p := provenRK3588(t)
+	withFakeForward(t, nil)
+	m := &fakeMachine{stopRes: clean()}
+	p.machine, p.async = m, false
+	p.fullTestCurrent = func() bool { return false }
+	p.preRentalTest = func(context.Context) (vmrt.SelfTestResult, string) {
+		// What the runtime's own test does when the wider layout stops passing.
+		_ = vmrt.MarkLayout(h, dataDir, version, []int{4, 5, 6, 7, 2, 3}, false, "the VM did not take a reset")
+		return vmrt.SelfTestResult{Passed: true, GPUVerified: true}, ""
+	}
+	p.notify = func(string, string) ([]string, []string) { return nil, nil }
+	err := p.Provision("R1", renterKey(t))
+	if err == nil || !strings.Contains(err.Error(), "no longer boots a rental with a vCPU on each of its two types of core") || m.started != 0 {
+		t.Fatalf("Provision = %v, started %d", err, m.started)
+	}
+	if got := p.PendingRental(); got == nil || got.State != control.PendingFailed {
+		t.Errorf("pending = %+v", got)
+	}
+	asBefore(t, p)
+
+	// A test that passed in the layout the machine is offered with starts the
+	// rental as always.
+	_, p = provenRK3588(t)
+	m = &fakeMachine{stopRes: clean()}
+	p.machine, p.async = m, false
+	p.fullTestCurrent = func() bool { return false }
+	p.preRentalTest = func(context.Context) (vmrt.SelfTestResult, string) {
+		return vmrt.SelfTestResult{Passed: true, GPUVerified: true}, ""
+	}
+	if err := p.Provision("R2", renterKey(t)); err != nil || m.started != 1 || p.Status() != StatusRented {
+		t.Fatalf("Provision = %v, started %d, status %s", err, m.started, p.Status())
+	}
+}
+
+// A machine with a GPU keeps the one core type it always rented on, on any
+// kernel and whatever its record says: as a microVM, and as a container.
+func TestAMachineWithAGPUKeepsOneCoreType(t *testing.T) {
+	gb10 := func() *fakehost.Host {
+		h := sparkMachine(t, "58:a2:e1:00:00:0")
+		h.Files["/proc/cpuinfo"] = statsFixture(t, "cpuinfo-gb10")
+		h.Files["/proc/sys/kernel/osrelease"] = []byte("6.14.0-1013-nvidia\n")
+		for cpu := 0; cpu < 20; cpu++ {
+			khz := "2808000"
+			if cpu < 10 {
+				khz = "3900000"
+			}
+			h.Files[fmt.Sprintf("/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu)] = []byte(khz + "\n")
+		}
+		wide := vmrt.ChooseGuestCPUs(h, "arm64").WideCores
+		if len(wide) != 18 {
+			t.Fatalf("the fixture has no wider layout to leave alone: %v", wide)
+		}
+		if err := vmrt.MarkLayout(h, dataDir, version, wide, true, ""); err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	p := detectARM(t, gb10())
+	c := p.Capability()
+	if c.Kind != KindQEMUVFIO || c.Guest == nil || c.Guest.VCPUs != 10 || c.Guest.CPU != "Cortex-X925" || c.Guest.CoresNote != "" || c.RetestPending {
+		t.Fatalf("microVM: capability = %+v guest = %+v", c, c.Guest)
+	}
+	if spec := p.Runtime().Spec(); spec.EachOnOne() || len(spec.TrialCores) != 0 || len(spec.GuestCores) != 10 {
+		t.Errorf("microVM spec = %+v", spec)
+	}
+
+	t.Setenv("GPU_AGENT_FORCE_CONTAINER", "1")
+	p = detectARM(t, gb10())
+	c = p.Capability()
+	if c.Kind != KindContainer || c.Guest == nil || c.Guest.VCPUs != 10 || c.Guest.CPU != "Cortex-X925" || c.Guest.CoresNote != "" {
+		t.Fatalf("container: capability = %+v guest = %+v", c, c.Guest)
+	}
+	crt := p.ContainerRuntime()
+	if crt == nil {
+		t.Fatal("not a container runtime")
+	}
+	if spec := crt.Spec(); spec.EachOnOne() || len(spec.TrialCores) != 0 || fmt.Sprint(spec.GuestCores) != "[0 1 2 3 4 5 6 7 8 9]" {
+		t.Errorf("container spec = %+v", spec)
 	}
 }
 

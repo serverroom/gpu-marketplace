@@ -198,6 +198,8 @@ func (p *Provisioner) runPreRentalTest(ctx context.Context) (vmrt.SelfTestResult
 	}
 	// A DGX Spark's desktop closes for the rental anyway: it may for its test.
 	plan := vmrt.PlanTest(p.host, rt.Spec(), true)
+	// The machine as it is about to be rented, and no wider layout on trial.
+	plan.Standing = true
 	switch {
 	case plan.Wait != "":
 		return vmrt.SelfTestResult{}, plan.Wait
@@ -209,12 +211,39 @@ func (p *Provisioner) runPreRentalTest(ctx context.Context) (vmrt.SelfTestResult
 		return vmrt.SelfTestResult{}, err.Error()
 	}
 	defer release()
-	res := rt.SelfTestWith(ctx, p.version, plan.TestOptions)
+	boot := rt.SelfTestWith
+	if p.testBoot != nil {
+		boot = func(ctx context.Context, _ string, o vmrt.TestOptions) vmrt.SelfTestResult { return p.testBoot(ctx, o) }
+	}
+	res := boot(ctx, p.version, plan.TestOptions)
 	if res.InUse != "" {
 		// The host took the GPU back as the test came to it: no verdict.
 		return vmrt.SelfTestResult{}, res.InUse
 	}
 	return res, ""
+}
+
+// layoutGone reports whether this machine was read as renting in the wider
+// layout of two core types (vmrt/layout.go) and has since found that it
+// cannot: a test boot, or a rental's start, went back to one core type.
+func (p *Provisioner) layoutGone() bool {
+	rt := p.Runtime()
+	if p.host == nil || rt == nil || !rt.Spec().EachOnOne() {
+		return false
+	}
+	spec := rt.Spec()
+	return len(vmrt.ChooseLayout(p.host, spec.Arch, spec.DataDir, p.version).Home) == 0
+}
+
+// relayout reads the machine again after its layout changed under it, and
+// reports what it is now.
+func (p *Provisioner) relayout() {
+	p.mu.Lock()
+	redo, notify := p.redetect, p.onChange
+	p.mu.Unlock()
+	if redo != nil && p.Adopt(redo()) && notify != nil {
+		notify()
+	}
 }
 
 // startingLocked: a rental is starting on a free machine. A failed record of
@@ -245,7 +274,8 @@ func (p *Provisioner) refreshTestView() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.capability.SelfTest = selfTestSummary(res)
-	p.capability.RetestPending = p.capability.Ready && vmrt.SelfTestProblem(res, fp) == "" && !vmrt.FullTestCurrent(res, fp)
+	p.capability.RetestPending = p.capability.Ready && vmrt.SelfTestProblem(res, fp) == "" &&
+		(!vmrt.FullTestCurrent(res, fp) || len(rt.Spec().TrialCores) > 0)
 	if len(fp.GPUs) > 0 && len(gpus) > 0 {
 		p.capability.GPUs = gpus
 	}
@@ -370,6 +400,14 @@ func (p *Provisioner) startPending(ctx context.Context, cancel context.CancelFun
 			detail := strings.Join(res.Problems, "; ")
 			p.failPending(rec, control.PendingReasonGPU, detail)
 			return errors.New(control.PendingReasonGPU + ": " + detail)
+		case p.layoutGone():
+			// The test passed on the fastest cores only, on a machine that was
+			// offered with more (vmrt/layout.go): this rental was ordered as
+			// what the machine no longer is. failPending reads the machine
+			// again, and it is offered as it is from here on.
+			detail := "this machine no longer boots a rental with a vCPU on each of its two types of core; it is offered on its fastest cores from now on"
+			p.failPending(rec, control.PendingReasonStart, detail)
+			return errors.New(control.PendingReasonStart + ": " + detail)
 		}
 		p.refreshTestView()
 	}

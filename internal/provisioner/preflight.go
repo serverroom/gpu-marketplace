@@ -271,7 +271,9 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 			rep.Unified = rep.Unified || g.Unified
 		}
 	}
-	rep.RetestPending = current && len(rep.Reasons) == 0 && !vmrt.FullTestCurrent(res, fp)
+	// A wider layout the machine has not tried yet is owed a test boot too:
+	// that test is the only thing that ever puts it on offer.
+	rep.RetestPending = current && len(rep.Reasons) == 0 && (!vmrt.FullTestCurrent(res, fp) || len(spec.TrialCores) > 0)
 	// What the host is using now: not while a rental or test boot is here,
 	// whose own VM holds the GPU and the memory.
 	if st, serr := vmrt.LoadState(h, spec.DataDir); serr == nil && st == nil {
@@ -302,10 +304,19 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	if storage != dataDir {
 		spec.StorageDir = storage
 	}
+	var layout vmrt.Layout
 	if goos == "linux" {
-		// One core type on a machine with big and little cores.
-		cpus := vmrt.ChooseGuestCPUs(h, arch)
-		spec.GuestCores, spec.GuestCPUName = cpus.Cores, cpus.Name
+		// One core type on a machine with big and little cores -- or, once its
+		// own test boot has proven it, some of the slower cores too, each vCPU
+		// on a core of its own (vmrt/layout.go).
+		layout = vmrt.ChooseLayout(h, arch, dataDir, version)
+		if len(pcidev.Display(h)) > 0 {
+			// The wider layout is for a machine that rents its CPUs. One with
+			// a GPU on its PCI bus (a GB10) rents on one core type, as it
+			// always did, whether its rental is a microVM or a container.
+			layout = layout.OneCoreType()
+		}
+		layout.Apply(&spec)
 	}
 	rep := Preflight(h, goos, spec, version)
 	spec.GPUs = rep.BDFs
@@ -318,7 +329,9 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 	// in a hardened container instead of a microVM (container.go). Every
 	// VFIO-capable machine stays on the microVM path below.
 	if goos == "linux" && rep.Vendor == VendorPCI && containerFallback(h, rep.BDFs) {
-		return detectContainer(h, goos, arch, dataDir, version, spec, rep)
+		// A container rental keeps the one core type it always had: the wider
+		// layout is the microVM's.
+		return detectContainer(h, goos, arch, dataDir, version, spec.OneCoreType(), rep)
 	}
 
 	// The pair checks never change whether this machine can host a single
@@ -365,7 +378,8 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 			kind = KindQEMU
 		}
 		// What the renter gets, from the sizing the VM itself uses.
-		guest = &control.Guest{VCPUs: spec.GuestCPUs(), MemoryGB: spec.GuestMemoryMB() / 1024, DiskGB: spec.DiskGB, CPU: spec.GuestCPUName}
+		guest = &control.Guest{VCPUs: spec.GuestCPUs(), MemoryGB: spec.GuestMemoryMB() / 1024, DiskGB: spec.DiskGB, CPU: spec.GuestCPUName,
+			CoresNote: layout.Note}
 		// Locked down: rentals boot with Secure Boot here, and the last test
 		// boot said from inside its VM that the lock holds.
 		if spec.Firmware.Secure && rep.SelfTest != nil && rep.SelfTest.Passed && rep.SelfTest.LastFull != nil && rep.SelfTest.LastFull.LockedDown {

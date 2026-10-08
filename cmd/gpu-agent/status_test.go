@@ -43,6 +43,46 @@ func TestIdleReasonNamesTheNextCommand(t *testing.T) {
 	}
 }
 
+// A machine with two types of core says which a rental runs on, and why; a
+// machine with one says nothing.
+func TestRentalCPUsLine(t *testing.T) {
+	for name, c := range map[string]struct {
+		guest *control.Guest
+		want  string
+	}{
+		"a vendor kernel": {&control.Guest{VCPUs: 4, CPU: "Cortex-A76", CoresNote: "a rental runs on the 4 Cortex-A76 cores only: this machine's kernel (Linux 6.1.84-vendor-rk35xx) cannot run one VM on two types of core, which takes Linux 6.3 or later"},
+			"Rental CPUs:  4, Cortex-A76. A rental runs on the 4 Cortex-A76 cores only: this machine's kernel (Linux 6.1.84-vendor-rk35xx) cannot run one VM on two types of core, which takes Linux 6.3 or later"},
+		"both core types": {&control.Guest{VCPUs: 6, CPU: "4× Cortex-A76 + 2× Cortex-A55", CoresNote: "each vCPU runs on one core of its own, as this machine's test boot proved"},
+			"Rental CPUs:  6, 4× Cortex-A76 + 2× Cortex-A55. Each vCPU runs on one core of its own, as this machine's test boot proved"},
+		"one core type": {&control.Guest{VCPUs: 14, CPU: "AMD Ryzen 9 7950X 16-Core Processor"}, ""},
+		"no guest":      {nil, ""},
+	} {
+		if got := rentalCPUsLine(c.guest); got != c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+// How a machine's memory is split, with what the machine uses of its own share
+// when that can be read.
+func TestRentalMemoryLine(t *testing.T) {
+	for name, c := range map[string]struct {
+		total, guest, avail int
+		want                string
+	}{
+		"a 16 GB board, idle": {15718, 11622, 13084,
+			"Rental memory: 11.3 GB of this machine's 15.3 GB; the machine keeps 4.0 GB for itself beside a rental, and its own system uses 2.6 GB of that now"},
+		"while a rental holds memory": {15718, 11622, -1,
+			"Rental memory: 11.3 GB of this machine's 15.3 GB; the machine keeps 4.0 GB for itself beside a rental"},
+		"too small to rent": {3000, 0, 2000, ""},
+		"unknown":           {0, 0, -1, ""},
+	} {
+		if got := rentalMemoryLine(c.total, c.guest, c.avail); got != c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+	}
+}
+
 // "not registered" and "registered but stuck" are the two states that used to
 // look identical from outside; they must not produce the same line.
 func TestIdleReasonDistinguishesUnregisteredFromStuck(t *testing.T) {

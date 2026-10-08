@@ -237,6 +237,29 @@ func (h *Host) NVMeSmartLog(dev string) ([]byte, error) {
 	return append([]byte(nil), log...), nil
 }
 
+// QMP is a VM's monitor (vmrt.Monitor): each command is recorded as "run qmp
+// <command>", fails when Fail names it ("qmp <command>"), runs OnRun's side
+// effects and is answered from Outputs ("qmp <command>"). A VM nobody gave
+// answers to answers nothing.
+func (h *Host) QMP(socket string, commands ...string) ([]string, error) {
+	out := make([]string, 0, len(commands))
+	for _, c := range commands {
+		k := "qmp " + c
+		err, effects := h.command(k)
+		if err != nil {
+			return out, err
+		}
+		for _, fn := range effects {
+			fn(h, k)
+		}
+		h.mu.Lock()
+		ans, _ := longestPrefix(h.Outputs, k)
+		h.mu.Unlock()
+		out = append(out, ans)
+	}
+	return out, nil
+}
+
 // PCI registers a device: its current driver, class, and IOMMU group members.
 func (h *Host) PCI(bdf, driver, class string, group ...string) {
 	h.mu.Lock()

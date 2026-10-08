@@ -213,6 +213,20 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	if err = rt.h.Run("systemd-run", LaunchArgs(rt.spec, r)...); err != nil {
 		return fmt.Errorf("boot microVM: %w", err)
 	}
+	// The wider layout: the VM started paused, and runs only once every vCPU
+	// is on its own core.
+	if rt.spec.EachOnOne() {
+		if perr := rt.pinVCPUs(r); perr != nil {
+			err = &layoutError{perr}
+			if o.Probes == nil {
+				// A renter's VM, on a machine whose test boot had passed this
+				// way: it does not any more, and goes back to one core type
+				// (a test boot records its own verdict).
+				rt.widerFailed(perr.Error())
+			}
+			return err
+		}
+	}
 	if o.NoWait {
 		return nil
 	}

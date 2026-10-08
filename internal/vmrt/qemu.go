@@ -58,6 +58,11 @@ func QEMUArgs(s Spec, r Rental) []string {
 		format = "raw"
 	}
 	args := []string{"-name", "gpu-rental-" + r.ID, "-nodefaults"}
+	if s.EachOnOne() {
+		// The wider layout (layout.go): the VM starts paused, so that no vCPU
+		// runs a single guest instruction before it is pinned to its core.
+		args = append(args, "-S")
+	}
 	switch {
 	case s.Arch == "arm64":
 		args = append(args, "-machine", "virt,accel=kvm,gic-version=host")
@@ -112,9 +117,11 @@ func LaunchArgs(s Spec, r Rental) []string {
 	args := []string{"--unit=" + r.Unit, "--collect", "--property=Type=exec",
 		"--property=TimeoutStopSec=30"}
 	// Pinned to one core type: the QEMU process and every thread it starts,
-	// its vCPUs included, inherit the affinity.
-	if len(s.GuestCores) > 0 {
-		args = append(args, "--property=CPUAffinity="+cpuList(s.GuestCores))
+	// its vCPUs included, inherit the affinity. In the wider layout that is
+	// still the fastest cluster, and each vCPU is then moved to its own core
+	// before the guest runs (pinVCPUs).
+	if cores := s.LaunchCores(); len(cores) > 0 {
+		args = append(args, "--property=CPUAffinity="+cpuList(cores))
 	}
 	args = append(args, s.QEMUBinary())
 	return append(args, QEMUArgs(s, r)...)

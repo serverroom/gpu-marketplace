@@ -198,6 +198,9 @@ type Provisioner struct {
 	// preRentalTest runs the full test boot right before a rental; busy
 	// says why it cannot run now. nil: the runtime's.
 	preRentalTest func(ctx context.Context) (res vmrt.SelfTestResult, busy string)
+	// testBoot runs the test boot of preRentalTest's own steps; nil: the
+	// runtime's.
+	testBoot func(ctx context.Context, o vmrt.TestOptions) vmrt.SelfTestResult
 	// fullTestCurrent says whether the running agent has passed a full test
 	// boot on this machine as it is; nil: selftest.json against the machine.
 	fullTestCurrent func() bool
@@ -582,6 +585,11 @@ func (p *Provisioner) start(machine Machine, o vmrt.StartOptions) error {
 func (p *Provisioner) startNoting(machine Machine, o vmrt.StartOptions, noteInUse bool) error {
 	id := o.ID
 	err := machine.Start(o)
+	if errors.Is(err, vmrt.ErrLayout) {
+		// The machine went back to one core type (vmrt/layout.go): once this
+		// start is recorded below, it is read again and offered as it is.
+		defer p.relayout()
+	}
 	var fwd stopper
 	if err == nil {
 		fwd, err = p.openForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
