@@ -103,6 +103,12 @@ type HostReport struct {
 	HostUse vmrt.HostUse
 }
 
+// socLeftOut is the line that says a system-on-chip's own GPU or NPU is not
+// part of a rental, and why.
+func socLeftOut(part string) string {
+	return part + " is built into the processor: a rental runs in a virtual machine, which cannot use it"
+}
+
 // Preflight checks, without changing anything, whether this machine can host a
 // rental: a Linux KVM host, with the IOMMU on and GPUs of any make that can be
 // passed through on their own when it has GPUs (a machine without one, or with
@@ -165,6 +171,11 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 			continue
 		}
 		cards = append(cards, d)
+	}
+	// An ARM system-on-chip's own GPU and NPU are on no PCI bus, and a microVM
+	// cannot be handed one: they stay with the host, and the host is told.
+	for _, part := range stats.SoCLeftOut(h) {
+		excluded = append(excluded, socLeftOut(part))
 	}
 	// A DGX Spark's desktop closes for a rental and comes back after -- as long
 	// as the agent can close it, through the display manager.

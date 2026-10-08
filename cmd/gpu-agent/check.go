@@ -64,7 +64,7 @@ func printCapability(c control.Capability) {
 		fmt.Println("GPU memory:   unified — the GPU has no memory of its own; the machine's memory is one pool used by both CPU and GPU, and a rental gets that pool")
 	}
 	if len(c.Excluded) > 0 {
-		fmt.Println("Left out:     GPUs on this machine that rentals do not take:")
+		fmt.Println("Left out:     what this machine has that rentals do not take:")
 		for _, e := range c.Excluded {
 			fmt.Printf("                - %s\n", e)
 		}
