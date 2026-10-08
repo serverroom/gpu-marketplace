@@ -73,6 +73,11 @@ func printCapability(c control.Capability) {
 		fmt.Printf("Test boot:    %s\n", testBootLine(c))
 	}
 	if g := c.Guest; g != nil && (c.Kind == provisioner.KindQEMUVFIO || c.Kind == provisioner.KindQEMU) {
+		// A machine with two types of core: which of them a rental's vCPUs
+		// run on, and where the wider layout stands.
+		if line := rentalCPUsLine(g); line != "" {
+			fmt.Println(line)
+		}
 		if g.Lockdown {
 			fmt.Println("Locked down:  yes — a rental boots with Secure Boot and a locked-down kernel: root in it cannot write to a device's registers or load an unsigned kernel module")
 		} else if g.NotLockedDown != "" {
@@ -101,6 +106,33 @@ func printCapability(c control.Capability) {
 			fmt.Println("Linked pair:  not ready — 'sudo gpu-agent check --pair' says what is missing")
 		}
 	}
+}
+
+// rentalCPUsLine says, on a machine with two types of core, which of them a
+// rental's vCPUs run on and where the wider layout stands; "" on any other
+// machine.
+func rentalCPUsLine(g *control.Guest) string {
+	if g == nil || g.CoresNote == "" {
+		return ""
+	}
+	return fmt.Sprintf("Rental CPUs:  %d, %s. %s%s", g.VCPUs, g.CPU, strings.ToUpper(g.CoresNote[:1]), g.CoresNote[1:])
+}
+
+// rentalMemoryLine says how a machine's memory is split between a rental and
+// the machine itself, and how much of its own share the machine is using now:
+// the figure that says whether a rental could be given more. availMB is the
+// memory free for new work now, -1 when it is not known or a rental holds some.
+func rentalMemoryLine(totalMB, guestMB, availMB int) string {
+	if totalMB <= 0 || guestMB <= 0 || guestMB >= totalMB {
+		return ""
+	}
+	gb := func(mb int) float64 { return float64(mb) / 1024 }
+	line := fmt.Sprintf("Rental memory: %.1f GB of this machine's %.1f GB; the machine keeps %.1f GB for itself beside a rental",
+		gb(guestMB), gb(totalMB), gb(totalMB-guestMB))
+	if availMB >= 0 && availMB <= totalMB {
+		line += fmt.Sprintf(", and its own system uses %.1f GB of that now", gb(totalMB-availMB))
+	}
+	return line
 }
 
 // hostBusyLine is what `status` says while the host uses what a rental would
@@ -188,6 +220,17 @@ func runCheck(svc service.Service, args []string) {
 	p := detectProvisioner()
 	c := p.Capability()
 	printCapability(c)
+	// What a microVM rental gets of the machine's memory, and what the machine
+	// itself uses of the rest now (not read while a rental's VM holds memory).
+	if spec, ok := p.RuntimeSpec(); ok && runtime.GOOS == "linux" && (c.Kind == provisioner.KindQEMUVFIO || c.Kind == provisioner.KindQEMU) {
+		avail := -1
+		if !p.RentalPresent() {
+			avail = vmrt.MemAvailableMB(vmrt.OSHost{})
+		}
+		if line := rentalMemoryLine(spec.TotalMemMB, spec.GuestMemoryMB(), avail); line != "" {
+			fmt.Println(line)
+		}
+	}
 	printPending(p)
 	printSetup()
 
@@ -289,6 +332,11 @@ func runSelfTest(svc service.Service, yes bool) {
 	if plan.MemoryMB > 0 {
 		fmt.Printf("  - the test VM gets %.1f GB of memory, less than a rental's, because this machine's memory is in use\n", float64(plan.MemoryMB)/1024)
 	}
+	if spec := rt.Spec(); len(spec.TrialCores) > 0 {
+		fmt.Printf("  - this machine has two types of core: the test is first run with a vCPU on each of %s, every vCPU on a core of its own;\n"+
+			"    if that does not pass it is run again on the %s cores alone, as rentals run now, and that is what is recorded\n",
+			spec.TrialCPUName, spec.GuestCPUName)
+	}
 	if !yes && !confirm("Run the test boot? [y/N]: ") {
 		fmt.Println("Nothing was changed.")
 		return
@@ -320,6 +368,12 @@ func runSelfTest(svc service.Service, yes bool) {
 				strings.Join(res.GuestGPUs, "; "), strings.Join(res.Blocked, ", "))
 		default:
 			fmt.Printf("PASSED: the VM booted, reached the internet, and could not reach %s.\n", strings.Join(res.Blocked, ", "))
+		}
+		if res.GuestCPUs > 0 {
+			fmt.Printf("  The VM had %d CPUs and %.1f GB of memory.\n", res.GuestCPUs, float64(res.GuestMemoryMB)/1024)
+		}
+		if res.Cores != "" {
+			fmt.Printf("  Each vCPU ran on a core of its own (host CPUs %s): rentals on this machine get both types of core from now on.\n", res.Cores)
 		}
 		for _, note := range res.Notes {
 			fmt.Printf("  Note: %s\n", note)

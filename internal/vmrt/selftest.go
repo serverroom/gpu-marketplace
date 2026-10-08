@@ -47,6 +47,13 @@ type SerialReport struct {
 	SecureBoot string
 	Lockdown   string
 	RawMemory  string
+	// What the VM has, as it counts it: its CPUs, each one's core type in
+	// order ("0x41/0xd0b"; none on x86), and its memory. A VM in the wider
+	// layout (layout.go) has to have every CPU, each of the type of the core
+	// it was pinned to. CPUCount 0: the VM did not say.
+	CPUCount int
+	CPUTypes []string
+	MemoryMB int
 }
 
 // LockedDown reports whether the VM said it booted with Secure Boot, with its
@@ -174,6 +181,14 @@ func ParseSerial(log string) SerialReport {
 			if f := strings.Fields(rest); len(f) == 3 {
 				rep.SecureBoot, rep.Lockdown, rep.RawMemory = f[0], f[1], f[2]
 			}
+		case "CPUS":
+			if f := strings.Fields(rest); len(f) == 3 {
+				rep.CPUCount, _ = strconv.Atoi(f[0])
+				rep.MemoryMB, _ = strconv.Atoi(f[1])
+				if f[2] != "-" {
+					rep.CPUTypes = strings.Split(strings.ToLower(f[2]), ",")
+				}
+			}
 		}
 	}
 	return rep
@@ -219,6 +234,13 @@ type SelfTestResult struct {
 	// said: "on integrity denied".
 	LockedDown bool   `json:"locked_down,omitempty"`
 	Lockdown   string `json:"lockdown,omitempty"`
+	// Cores: the test VM ran in the wider layout of a machine with two core
+	// types (layout.go), on these host CPUs, one vCPU each ("4,5,6,7,2,3");
+	// "" in every other layout.
+	Cores string `json:"cores,omitempty"`
+	// GuestCPUs and GuestMemoryMB are what the test VM counted of its own.
+	GuestCPUs     int `json:"guest_cpus,omitempty"`
+	GuestMemoryMB int `json:"guest_memory_mb,omitempty"`
 	// LastFull is the last test that took the GPUs (on a machine without a
 	// GPU, the last test), kept across the tests run without them.
 	LastFull *TestVerdict `json:"last_full_test,omitempty"`
@@ -250,14 +272,16 @@ type TestVerdict struct {
 	Problems     []string   `json:"problems,omitempty"`
 	// LockedDown: the test VM was locked down (SelfTestResult.LockedDown).
 	LockedDown bool `json:"locked_down,omitempty"`
-	legacy     bool
+	// Cores: the wider layout the test VM ran in (SelfTestResult.Cores).
+	Cores  string `json:"cores,omitempty"`
+	legacy bool
 }
 
 // verdict is the result in brief.
 func (r SelfTestResult) verdict() *TestVerdict {
 	return &TestVerdict{Passed: r.Passed, AgentVersion: r.AgentVersion, At: r.At, HostGPUs: r.HostGPUs,
 		HostDriver: r.HostDriver, BaseImage: r.BaseImage, GPUs: r.GPUs, Problems: r.Problems,
-		LockedDown: r.LockedDown, legacy: r.legacy}
+		LockedDown: r.LockedDown, Cores: r.Cores, legacy: r.legacy}
 }
 
 // basis is what a verdict holds for.
@@ -289,12 +313,15 @@ type Fingerprint struct {
 	ImageBuiltAt int64
 	// Secure: this machine's rentals boot with Secure Boot (spec.Firmware).
 	Secure bool
+	// Cores: this machine's rentals run in the wider layout, on these host
+	// CPUs (SelfTestResult.Cores); "" in every other layout.
+	Cores string
 }
 
 // MachineFingerprint reads the fingerprint of this machine for spec's GPUs.
 func MachineFingerprint(h Host, spec Spec, version string) Fingerprint {
 	fp := Fingerprint{Version: version, GPUs: append([]string(nil), spec.GPUs...),
-		HostDriver: HostGPUDriver(h, spec.DataDir, spec.GPUs), Secure: spec.Firmware.Secure}
+		HostDriver: HostGPUDriver(h, spec.DataDir, spec.GPUs), Secure: spec.Firmware.Secure, Cores: spec.widerCores()}
 	if info, err := LoadGoldenInfo(h, spec); err == nil {
 		fp.BaseImage = imageBuild(info)
 		fp.ImageBuiltAt = info.CreatedAt

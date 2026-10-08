@@ -522,6 +522,45 @@ gets the memory the board does not keep, and the disk. The agent reports exactly
 to the marketplace (`guest`: vCPUs, memory, disk and the core type), and names the
 machine by its SoC ("Rockchip RK3588") and board ("Radxa ROCK 5B").
 
+**More of the board's cores, where its kernel allows it.** A board that rents its
+CPUs (no GPU on its PCI bus) can give a rental some of its slower cores as well:
+on an RK3588 the four Cortex-A76 and two of the four Cortex-A55, six vCPUs, with
+two Cortex-A55 kept for the board. Each vCPU is then held on one physical core for
+the life of the VM, so none ever changes type, and the rental is named as what it
+is, "4× Cortex-A76 + 2× Cortex-A55", never as six cores of one kind. Two things
+decide whether a board gets this:
+
+- **Linux 6.3 or later.** Before it, KVM tied a vCPU's cache registers to whichever
+  physical core a thread happened to be on, and QEMU fails with "Failed to put
+  registers ... Invalid argument" as soon as one VM has vCPUs on two core types, at
+  the start or at the guest's first reboot. Rockchip's 5.10 and 6.1 vendor kernels
+  are before it; mainline kernels (Armbian "current" and "edge") and Rockchip's 6.6
+  and 6.12 ones are not.
+- **The board's own test boot.** The agent tries this layout in a test rental first:
+  the VM starts paused, every vCPU is pinned to its core, the paused VM is reset
+  once (the write an older kernel refuses, and what a renter's own reboot does), and
+  the test VM has to come up and report every CPU as the core type it was pinned to.
+  Only a pass puts it on offer. If it does not pass, the test is run again on the
+  Cortex-A76 cores alone and the board rents exactly as before; the finding is kept
+  (`cpu-layout.json`) until the agent, the kernel or the cores change.
+
+`gpu-agent check` says which it is, and why ("Rental CPUs: ..."). What a renter
+should know about such a rental: the VM's own scheduler cannot tell its slower CPUs
+from its faster ones (QEMU passes no CPU capacities to a guest), so a job spread
+evenly over every CPU is held back by the slow ones. `lscpu` shows both types, the
+fast ones first (CPUs 0 to 3 on an RK3588), and `taskset -c 0-3` keeps a job on
+them. A DGX Spark and any other machine with a GPU keep one core type, as does every
+rental in a container.
+
+**Memory.** A rental gets the board's memory less what the board keeps for itself: a
+tenth, and never under 4 GB, so 11.3 GB of a 16 GB board's 15.3. That share is not
+spare: the board's own system, QEMU's own memory beside the VM's, and the kernel's
+buffers for the rental's disk and network all come out of it, and a VM uses all of
+its memory in time. `gpu-agent check` says how much of its share the board is using
+when idle ("Rental memory: ..."). A board whose own system uses 2.6 GB, as a desktop
+image does, has about a gigabyte left over; one running a minimal, headless image
+uses a few hundred megabytes.
+
 **The Mali GPU and the NPU are listed, and not included.** The agent reads both from
 the board's device tree (a node the device tree switched off is left out) and puts
 them in the machine's specs: the GPU in `gpus`, marked `integrated`, and the NPU in

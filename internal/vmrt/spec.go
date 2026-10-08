@@ -46,10 +46,23 @@ type Spec struct {
 	CPUs            int
 	DiskGB          int
 	// GuestCores pins the VM to these host CPUs (one core type on a machine
-	// with big and little cores, ChooseGuestCPUs); nil: not pinned.
+	// with big and little cores, ChooseGuestCPUs, unless HomeCores says they
+	// are the wider layout); nil: not pinned.
 	GuestCores []int
 	// GuestCPUName is the guest's CPU in words, for what the renter is told.
 	GuestCPUName string
+	// HomeCores, when set, makes GuestCores the wider layout of a machine with
+	// two core types (layout.go): one vCPU per core of GuestCores, in order,
+	// each pinned to its core for the life of the VM. HomeCores is the fastest
+	// cluster, GuestCores' first cores: QEMU's own threads run there, as they
+	// do in the one-core-type layout the machine goes back to if the wider one
+	// fails (HomeCPUName is its CPU in words).
+	HomeCores   []int
+	HomeCPUName string
+	// TrialCores is the wider layout this machine has not tried yet: its next
+	// test boot tries it, and it is on offer only once that passed.
+	TrialCores   []int
+	TrialCPUName string
 	// StorageDir holds the base image and the rentals' disks; "" is DataDir.
 	StorageDir string
 	// SharedGPU: the GPUs reach the rental through the host OS's GPU
@@ -117,6 +130,48 @@ func (s Spec) GuestCPUs() int {
 		n = 1
 	}
 	return n
+}
+
+// EachOnOne reports whether every vCPU is pinned to a core of its own: the
+// wider layout of a machine with two core types.
+func (s Spec) EachOnOne() bool { return len(s.HomeCores) > 0 }
+
+// widerCores names the wider layout s is in ("4,5,6,7,2,3"), "" when it is in
+// any other.
+func (s Spec) widerCores() string {
+	if !s.EachOnOne() {
+		return ""
+	}
+	return cpuList(s.GuestCores)
+}
+
+// LaunchCores are the host CPUs QEMU starts on, and its own threads stay on:
+// the fastest cluster in the wider layout (where every register a vCPU starts
+// with is read on one core type, as it always was), else GuestCores.
+func (s Spec) LaunchCores() []int {
+	if s.EachOnOne() {
+		return s.HomeCores
+	}
+	return s.GuestCores
+}
+
+// OneCoreType is s as the machine rents on its fastest cores only: what the
+// wider layout falls back to. A spec that is not the wider layout is returned
+// without its trial.
+func (s Spec) OneCoreType() Spec {
+	if s.EachOnOne() {
+		s.GuestCores, s.GuestCPUName = s.HomeCores, s.HomeCPUName
+	}
+	s.HomeCores, s.HomeCPUName, s.TrialCores, s.TrialCPUName = nil, "", nil, ""
+	return s
+}
+
+// Wider is s with the wider layout it has not tried yet in place of its own.
+func (s Spec) Wider() Spec {
+	s.HomeCores, s.HomeCPUName = s.GuestCores, s.GuestCPUName
+	s.GuestCores, s.GuestCPUName = s.TrialCores, s.TrialCPUName
+	s.TrialCores, s.TrialCPUName = nil, ""
+	return s
 }
 
 var firmwareCandidates = map[string][]Firmware{

@@ -108,6 +108,10 @@ type TestOptions struct {
 	NoGPU bool
 	// MemoryMB sizes the test VM below a rental's (0: a rental's size).
 	MemoryMB int
+	// Standing tests the machine as it rents now and nothing more: the test
+	// right before a rental does not first try a wider layout the machine has
+	// not proven yet (layout.go), which the rental would not get anyway.
+	Standing bool
 }
 
 // TestPlan is what a test boot can do now without interrupting the host.
