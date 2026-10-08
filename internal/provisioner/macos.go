@@ -101,7 +101,7 @@ func detectMacOS(osHost vmrt.Host, arch, dataDir, version string) *Provisioner {
 	if disk < 0 {
 		disk = 0
 	}
-	spec := vmrt.Spec{Arch: arch, DataDir: MacVMDataDir, TotalMemMB: f.TotalMemMB, CPUs: f.CPUs, DiskGB: disk}
+	spec := vmrt.Spec{Arch: arch, DataDir: MacVMDataDir, TotalMemMB: f.TotalMemMB, CPUs: f.CPUs, DiskGB: disk, AgentVersion: version}
 
 	machine := f.Machine
 	if machine == nil {
@@ -155,6 +155,7 @@ func detectMacOS(osHost vmrt.Host, arch, dataDir, version string) *Provisioner {
 		VMUser:       "renter",
 	}
 	if f.Ready {
+		cap.Notes = machineNotes(machine, spec)
 		if t, err := vmrt.LoadContainerTest(machine, spec.DataDir); err == nil && t != nil {
 			cap.SelfTest = &control.SelfTestSummary{Passed: t.Passed, GPUVerified: t.GPUVerified, At: t.At, AgentVersion: t.AgentVersion}
 		}

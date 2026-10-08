@@ -143,7 +143,7 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 
 	// The renter's writable space: the same dm-crypt volume as a microVM disk,
 	// formatted with a filesystem and mounted, rather than a golden image.
-	st.Disk, st.VolumeMount, err = createEncryptedVolume(rt.h, r.Dir, o.ID, rt.spec.DiskGB)
+	st.Disk, st.VolumeMount, err = createEncryptedVolume(rt.h, rt.spec, r.Dir, o.ID)
 	if serr := save(); err == nil {
 		err = serr
 	}
@@ -517,6 +517,9 @@ func (rt *ContainerRuntime) Stop() StopResult {
 	}
 	if st.VolumeMount != "" {
 		_ = rt.h.Run("umount", st.VolumeMount)
+	} else if vol := volumeDir(st.Rental.Dir); st.Rental.Dir != "" && rt.h.Exists(vol) {
+		// Mounted, perhaps, by an agent that was stopped before it recorded it.
+		_ = rt.h.Run("umount", vol)
 	}
 
 	// What the rental wrote, read while its volume's mapping still exists
@@ -526,7 +529,7 @@ func (rt *ContainerRuntime) Stop() StopResult {
 		written = rentalWritten(rt.h, st)
 	}
 
-	wiped, detail := DestroyDisk(rt.h, st.Disk)
+	wiped, detail := DestroyDisk(rt.h, rt.spec, knownDisk(rt.h, st.Disk, st.Rental.Dir, st.RentalID))
 	res.Wiped = wiped && gone
 	res.Detail = append(res.Detail, detail...)
 

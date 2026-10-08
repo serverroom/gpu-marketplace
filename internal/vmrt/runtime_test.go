@@ -337,7 +337,7 @@ func TestGroupProblems(t *testing.T) {
 func TestDestroyDiskNoticesALoopStillAttached(t *testing.T) {
 	h := fakehost.New()
 	h.Outputs["losetup -j"] = "/dev/loop7: []: (/var/lib/gpu-agent/rentals/R1/disk.img)\n"
-	wiped, detail := DestroyDisk(h, DiskState{File: "/x/disk.img", Loop: "/dev/loop7"})
+	wiped, detail := DestroyDisk(h, Spec{}, DiskState{File: "/x/disk.img", Loop: "/dev/loop7"})
 	if wiped || len(detail) == 0 {
 		t.Fatalf("a still-attached loop device counted as wiped")
 	}

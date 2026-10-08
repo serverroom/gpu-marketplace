@@ -58,6 +58,10 @@ type Spec struct {
 	// desktop here to close: the programs using them are the host's own, read
 	// on the host.
 	SharedGPU bool
+	// AgentVersion is the running agent's version. A finding this machine made
+	// about itself holds for the version that made it, and a rental's disk is
+	// made and removed by what the running version found (dmudev.go).
+	AgentVersion string
 }
 
 // Storage is where the base image and the rentals' disks live.

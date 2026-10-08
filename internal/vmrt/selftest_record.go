@@ -344,6 +344,9 @@ func (rt *Runtime) selfTestOnce(ctx context.Context, version string, o TestOptio
 				orUnknown(rep.SecureBoot), orUnknown(rep.Lockdown), orUnknown(rep.RawMemory)))
 		}
 	}
+	if note := DMUdevNote(rt.h, rt.spec.DataDir, rt.spec.AgentVersion); note != "" && res.Passed {
+		res.Notes = append(res.Notes, note)
+	}
 	if res.WithoutGPU && res.Passed {
 		res.Notes = append(res.Notes, "the GPU was in use on this machine, so this test ran without it; "+
 			"its handover to a rental is tested when the GPU is free, and always before a rental starts")

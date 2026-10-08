@@ -80,6 +80,12 @@ type Capability struct {
 	// SelfTest is the last test boot in brief; absent before one ran, and
 	// before v0.2.3.
 	SelfTest *SelfTestSummary `json:"selftest,omitempty"`
+	// Notes are what the host should know about this machine that is not a
+	// reason it cannot rent: something the agent found on it and handles by
+	// itself (a udev that does not confirm device-mapper devices, so a
+	// rental's disk is made without waiting for it). Absent when there is
+	// nothing to say, and from agents up to v0.3.10.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // HostBusy is what the host is using of what a rental would take, and since

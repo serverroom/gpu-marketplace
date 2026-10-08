@@ -106,6 +106,37 @@ func (w ExecHost) Output(name string, args ...string) (string, error) {
 	return string(out), err
 }
 
+// The exit codes of timeout(1) for a command it had to end: 124, and from
+// GNU's, 128+9 when it ended it with KILL.
+const (
+	timeoutCode     = 124
+	timeoutKillCode = 137
+)
+
+// RunLimited has timeout(1) inside the environment end the command: nothing
+// on this side of it can.
+func (w ExecHost) RunLimited(limit time.Duration, env []string, stdin []byte, name string, args ...string) (string, error) {
+	secs := int((limit + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	argv := []string{"timeout", "-s", "KILL", strconv.Itoa(secs)}
+	if len(env) > 0 {
+		argv = append(append(argv, "env"), env...)
+	}
+	argv = append(append(argv, name), args...)
+	out, errOut, code, err := w.exec(stdin, argv...)
+	switch {
+	case err != nil:
+		return string(out), fmt.Errorf("%s: %w", describe(name, args), err)
+	case code == timeoutCode || code == timeoutKillCode:
+		return string(out), timedOut(name, args, limit)
+	case code != 0:
+		return string(out), fmt.Errorf("%s: exit status %d: %s", describe(name, args), code, strings.TrimSpace(string(errOut)+" "+string(out)))
+	}
+	return string(out), nil
+}
+
 func (w ExecHost) LookPath(name string) (string, error) {
 	out, code, err := w.sh(nil, `command -v -- "$1"`, name)
 	if err != nil || code != 0 {

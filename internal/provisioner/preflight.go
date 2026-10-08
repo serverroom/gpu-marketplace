@@ -299,6 +299,7 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		CPUs:        runtime.NumCPU(),
 		DiskGB:      rentalDiskGB(h, storage, RentalDiskChoice()),
 	}
+	spec.AgentVersion = version
 	if storage != dataDir {
 		spec.StorageDir = storage
 	}
@@ -384,6 +385,7 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		GPUCount:      gpuCount,
 		Guest:         guest,
 		Reasons:       rep.Reasons,
+		Notes:         machineNotes(h, spec),
 		AgentVersion:  version,
 		UnifiedMemory: rep.Unified,
 		VMUser:        vmrt.VMUser,

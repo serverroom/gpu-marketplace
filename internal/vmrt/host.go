@@ -12,6 +12,7 @@ package vmrt
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -32,6 +33,12 @@ type Host interface {
 	Run(name string, args ...string) error
 	RunInput(stdin []byte, name string, args ...string) error
 	Output(name string, args ...string) (string, error)
+	// RunLimited runs a command that must not be waited for longer than limit,
+	// with stdin (nil: none) and with env ("NAME=value") added to its
+	// environment, and returns what it wrote to stdout. A command that has not
+	// finished when the limit runs out is killed, and the error is one
+	// errors.Is finds ErrTimedOut in.
+	RunLimited(limit time.Duration, env []string, stdin []byte, name string, args ...string) (string, error)
 	LookPath(name string) (string, error)
 	ReadFile(path string) ([]byte, error)
 	// ReadTail reads at most the last max bytes of a file: a guest's serial
@@ -59,8 +66,20 @@ type OSHost struct{}
 // not hang the agent with it.
 const sysfsWriteTimeout = 30 * time.Second
 
+// ErrTimedOut: a command given a time limit (RunLimited) had not finished when
+// the limit ran out, and was killed.
+var ErrTimedOut = errors.New("did not finish in time")
+
+// killWait is how long a killed command's output is waited for.
+const killWait = 2 * time.Second
+
 func describe(name string, args []string) string {
 	return strings.TrimSpace(name + " " + strings.Join(args, " "))
+}
+
+// timedOut is the error for a command killed at its limit.
+func timedOut(name string, args []string, limit time.Duration) error {
+	return fmt.Errorf("%s: %w (%v)", describe(name, args), ErrTimedOut, limit)
 }
 
 func (OSHost) Run(name string, args ...string) error {
@@ -91,6 +110,39 @@ func (OSHost) Output(name string, args ...string) (string, error) {
 		return string(out), fmt.Errorf("%s: %w", describe(name, args), err)
 	}
 	return string(out), nil
+}
+
+func (OSHost) RunLimited(limit time.Duration, env []string, stdin []byte, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	// A killed command is not waited for either: not for something it started
+	// that still holds its output open, and not for a kill that does not end
+	// it (a command stuck inside the kernel).
+	cmd.WaitDelay = killWait
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(limit + 2*killWait):
+		return "", timedOut(name, args, limit)
+	}
+	switch {
+	case err == nil:
+		return stdout.String(), nil
+	case ctx.Err() == context.DeadlineExceeded:
+		return stdout.String(), timedOut(name, args, limit)
+	}
+	return stdout.String(), fmt.Errorf("%s: %w: %s", describe(name, args), err, strings.TrimSpace(stderr.String()+" "+stdout.String()))
 }
 
 func (OSHost) LookPath(name string) (string, error) { return exec.LookPath(name) }

@@ -142,7 +142,7 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 		return fmt.Errorf("rental network: %w", err)
 	}
 
-	st.Disk, err = CreateDisk(rt.h, r.Dir, o.ID, rt.spec.DiskGB, rt.spec.GoldenImage)
+	st.Disk, err = CreateDisk(rt.h, rt.spec, r.Dir, o.ID)
 	if serr := save(); err == nil {
 		err = serr
 	}
@@ -427,7 +427,7 @@ func (rt *Runtime) Stop() StopResult {
 		roms, romNotes = ReadROMs(rt.h, rt.spec.GPUs)
 	}
 
-	wiped, detail := DestroyDisk(rt.h, st.Disk)
+	wiped, detail := DestroyDisk(rt.h, rt.spec, knownDisk(rt.h, st.Disk, st.Rental.Dir, st.RentalID))
 	res.Wiped = wiped && vmGone
 	res.Detail = append(res.Detail, detail...)
 

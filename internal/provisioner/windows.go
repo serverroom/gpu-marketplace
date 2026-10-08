@@ -155,7 +155,7 @@ func detectWindows(osHost vmrt.Host, arch, dataDir, version string) *Provisioner
 	}
 	spec := vmrt.Spec{
 		Arch: arch, DataDir: WSLDataDir, TotalMemMB: f.TotalMemMB, CPUs: f.CPUs, DiskGB: disk,
-		SharedGPU: true,
+		SharedGPU: true, AgentVersion: version,
 	}
 	for _, g := range f.GPUs {
 		spec.GPUs = append(spec.GPUs, g.BusID)
@@ -233,6 +233,7 @@ func detectWindows(osHost vmrt.Host, arch, dataDir, version string) *Provisioner
 		cap.GPUs = append(cap.GPUs, control.GPU{Model: g.Name, PCIID: g.DeviceID, MemoryMB: g.MemoryMB, Driver: "nvidia"})
 	}
 	if f.Ready {
+		cap.Notes = machineNotes(machine, spec)
 		if t, err := vmrt.LoadContainerTest(machine, spec.DataDir); err == nil && t != nil {
 			cap.SelfTest = &control.SelfTestSummary{Passed: t.Passed, GPUVerified: t.GPUVerified, At: t.At, AgentVersion: t.AgentVersion}
 		}

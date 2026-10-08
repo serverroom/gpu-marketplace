@@ -129,6 +129,16 @@ func (p *Provisioner) openForward(listen, target string) (stopper, error) {
 // SSHListen is where the renter's SSH arrives from the relay tunnel.
 var SSHListen = net.JoinHostPort("127.0.0.1", strconv.Itoa(register.MicroVMSSHPort))
 
+// machineNotes is what the host should know about this machine that does not
+// keep it from renting (control.Capability.Notes).
+func machineNotes(h vmrt.Host, spec vmrt.Spec) []string {
+	var notes []string
+	if note := vmrt.DMUdevNote(h, spec.DataDir, spec.AgentVersion); note != "" {
+		notes = append(notes, note)
+	}
+	return notes
+}
+
 // Provisioner implements control.Provisioner.
 type Provisioner struct {
 	mu         sync.Mutex

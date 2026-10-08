@@ -534,10 +534,14 @@ func MapperWritten(h Host, mapper string) (int64, bool) {
 	if mapper == "" {
 		return 0, false
 	}
+	// The node is a link to the device where udev made it, and a device node
+	// of its own where libdevmapper did (dmudev.go): then sysfs names the device.
 	name := ""
 	if link, err := h.Readlink(mapper); err == nil {
 		name = path.Base(link)
-	} else if out, err := h.Output("dmsetup", "info", "-c", "--noheadings", "-o", "blkdevname", path.Base(mapper)); err == nil {
+	} else if dev, _ := dmDevice(h, path.Base(mapper)); dev != "" {
+		name = dev
+	} else if out, err := h.RunLimited(dmLimit, nil, nil, "dmsetup", "info", "-c", "--noheadings", "-o", "blkdevname", path.Base(mapper)); err == nil {
 		name = strings.TrimSpace(out)
 	}
 	if !strings.HasPrefix(name, "dm-") {

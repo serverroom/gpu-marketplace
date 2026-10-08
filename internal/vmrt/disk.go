@@ -22,12 +22,12 @@ type DiskState struct {
 // teardown therefore destroys the only copy, and what is left on the physical
 // disk is ciphertext nobody can read -- which is what makes the wipe a wipe.
 // The base image is then written through the mapping.
-func CreateDisk(h Host, dir, id string, sizeGB int, golden string) (DiskState, error) {
-	ds, err := openEncrypted(h, dir, id, sizeGB)
+func CreateDisk(h Host, spec Spec, dir, id string) (DiskState, error) {
+	ds, err := openEncrypted(h, spec, dir, id)
 	if err != nil {
 		return ds, err
 	}
-	if err := h.Run("qemu-img", "convert", "-n", "-O", "raw", golden, ds.Mapper); err != nil {
+	if err := h.Run("qemu-img", "convert", "-n", "-O", "raw", spec.GoldenImage, ds.Mapper); err != nil {
 		return ds, fmt.Errorf("write base image: %w", err)
 	}
 	return ds, nil
@@ -39,9 +39,12 @@ func CreateDisk(h Host, dir, id string, sizeGB int, golden string) (DiskState, e
 // of the mapping. Closing the mapping at teardown destroys the only copy, which
 // is what makes the wipe a wipe. Shared by CreateDisk (which then writes the
 // golden image through it) and createEncryptedVolume (which formats it).
-func openEncrypted(h Host, dir, id string, sizeGB int) (DiskState, error) {
+//
+// The mapping is made within a time limit, and without waiting for udev on a
+// machine whose udev does not answer (dmudev.go).
+func openEncrypted(h Host, spec Spec, dir, id string) (DiskState, error) {
 	ds := DiskState{File: path.Join(dir, "disk.img")}
-	if err := h.Run("truncate", "-s", mib(sizeGB), ds.File); err != nil {
+	if err := h.Run("truncate", "-s", mib(spec.DiskGB), ds.File); err != nil {
 		return ds, fmt.Errorf("allocate disk: %w", err)
 	}
 	// Direct I/O: without it every block the rental reads or writes is cached
@@ -76,16 +79,16 @@ func openEncrypted(h Host, dir, id string, sizeGB int) (DiskState, error) {
 		return ds, fmt.Errorf("disk key: %w", err)
 	}
 	name := MapperName(id)
-	err = h.RunInput(key, "cryptsetup", "open", "--type", "plain",
-		"--cipher", "aes-xts-plain64", "--key-size", "512",
-		"--key-file", "-", "--keyfile-size", "64", ds.Loop, name)
+	// Recorded before the attempt: a command ended at its limit may have made
+	// the mapping first, and the teardown has to look for it either way.
+	ds.Mapper = "/dev/mapper/" + name
+	err = mappingsOn(h, spec).open(key, ds.Loop, name)
 	for i := range key {
 		key[i] = 0
 	}
 	if err != nil {
 		return ds, fmt.Errorf("encrypt disk: %w", err)
 	}
-	ds.Mapper = "/dev/mapper/" + name
 	return ds, nil
 }
 
@@ -93,15 +96,15 @@ func openEncrypted(h Host, dir, id string, sizeGB int) (DiskState, error) {
 // same dm-crypt device, formatted ext4 and mounted under the rental directory.
 // Returns the disk pieces (for DestroyDisk) and the mount point. The caller
 // unmounts it before DestroyDisk at teardown.
-func createEncryptedVolume(h Host, dir, id string, sizeGB int) (DiskState, string, error) {
-	ds, err := openEncrypted(h, dir, id, sizeGB)
+func createEncryptedVolume(h Host, spec Spec, dir, id string) (DiskState, string, error) {
+	ds, err := openEncrypted(h, spec, dir, id)
 	if err != nil {
 		return ds, "", err
 	}
 	if err := h.Run("mkfs.ext4", "-q", "-m", "0", ds.Mapper); err != nil {
 		return ds, "", fmt.Errorf("format volume: %w", err)
 	}
-	mount := path.Join(dir, "vol")
+	mount := volumeDir(dir)
 	if err := h.MkdirAll(mount, 0700); err != nil {
 		return ds, "", fmt.Errorf("volume mount point: %w", err)
 	}
@@ -111,11 +114,46 @@ func createEncryptedVolume(h Host, dir, id string, sizeGB int) (DiskState, strin
 	return ds, mount, nil
 }
 
+// volumeDir is where a container rental's volume is mounted.
+func volumeDir(dir string) string { return path.Join(dir, "vol") }
+
+// knownDisk is a rental's disk as its teardown looks for it: the pieces the
+// state recorded and, for each it did not, the place that piece would be. The
+// pieces are recorded when the disk has been made. An agent stopped while it
+// was being made (or, before these commands had a time limit, stopped by a
+// person because cryptsetup never returned) left a mapping and a loop device
+// behind that no record names, and a teardown that goes by the record alone
+// would call that disk wiped.
+func knownDisk(h Host, ds DiskState, dir, id string) DiskState {
+	if dir == "" || id == "" {
+		return ds
+	}
+	if ds.Mapper == "" {
+		ds.Mapper = "/dev/mapper/" + MapperName(id)
+	}
+	if ds.File == "" {
+		ds.File = path.Join(dir, "disk.img")
+	}
+	if ds.Loop == "" {
+		if held, err := h.Output("losetup", "-j", ds.File); err == nil {
+			if dev, _, ok := strings.Cut(strings.TrimSpace(held), ":"); ok && strings.HasPrefix(dev, "/dev/loop") {
+				ds.Loop = dev
+			}
+		}
+	}
+	return ds
+}
+
 // DestroyDisk closes the mapping (the key is gone), detaches the loop device
 // and deletes the file, then checks that none of the three is still there.
-func DestroyDisk(h Host, ds DiskState) (wiped bool, detail []string) {
+//
+// The mapping is closed within a time limit, and without waiting for udev
+// where udev does not answer (dmudev.go). Whether it is gone is asked of the
+// kernel: on such a machine its node in /dev/mapper says nothing either way.
+func DestroyDisk(h Host, spec Spec, ds DiskState) (wiped bool, detail []string) {
+	name := path.Base(ds.Mapper)
 	if ds.Mapper != "" {
-		if err := h.Run("cryptsetup", "close", path.Base(ds.Mapper)); err != nil && h.Exists(ds.Mapper) {
+		if err := mappingsOn(h, spec).close(name); err != nil && mapped(h, name) {
 			detail = append(detail, fmt.Sprintf("close %s: %v", ds.Mapper, err))
 		}
 	}
@@ -128,7 +166,7 @@ func DestroyDisk(h Host, ds DiskState) (wiped bool, detail []string) {
 		}
 	}
 	wiped = true
-	if ds.Mapper != "" && h.Exists(ds.Mapper) {
+	if ds.Mapper != "" && mapped(h, name) {
 		wiped = false
 		detail = append(detail, ds.Mapper+" is still open")
 	}

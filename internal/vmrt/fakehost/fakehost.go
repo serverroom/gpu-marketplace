@@ -2,6 +2,12 @@
 // command and write, answers commands from Outputs, fails the ones named in
 // Fail, and simulates just enough of sysfs's PCI driver binding for the VFIO
 // code to run against it.
+//
+// A command run with extra environment (RunLimited) is known by its
+// environment and its text together, as a shell would write it:
+// "DM_DISABLE_UDEV=1 cryptsetup close x". Calls, Fail, OnRun, OnFail and
+// Outputs all see it that way, so a test can make a command do one thing with
+// a variable set and another without it.
 package fakehost
 
 import (
@@ -33,6 +39,12 @@ type Host struct {
 	// OnRun runs after a successful command whose text starts with the key; it
 	// is given the full command.
 	OnRun map[string]func(h *Host, cmd string)
+	// OnFail runs after a failed command whose text starts with the key: what
+	// the command did to the machine before it failed, or before it was killed
+	// at its time limit.
+	OnFail map[string]func(h *Host, cmd string)
+	// Limits is the time limit each RunLimited was given, by command.
+	Limits map[string]time.Duration
 	// Files and Links are the filesystem.
 	Files map[string][]byte
 	Links map[string]string
@@ -69,6 +81,8 @@ func New() *Host {
 		Outputs:   map[string]string{},
 		Fail:      map[string]error{},
 		OnRun:     map[string]func(*Host, string){},
+		OnFail:    map[string]func(*Host, string){},
+		Limits:    map[string]time.Duration{},
 		Files:     map[string][]byte{},
 		Links:     map[string]string{},
 		Dial:      map[string]bool{},
@@ -99,10 +113,17 @@ func (h *Host) command(k string) (error, []func(*Host, string)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.Calls = append(h.Calls, "run "+k)
-	if err, ok := longestPrefix(h.Fail, k); ok {
-		return err, nil
-	}
 	var effects []func(*Host, string)
+	if err, ok := longestPrefix(h.Fail, k); ok {
+		if err != nil {
+			for prefix, fn := range h.OnFail {
+				if strings.HasPrefix(k, prefix) {
+					effects = append(effects, fn)
+				}
+			}
+		}
+		return err, effects
+	}
 	for prefix, fn := range h.OnRun {
 		if strings.HasPrefix(k, prefix) {
 			effects = append(effects, fn)
@@ -114,13 +135,10 @@ func (h *Host) command(k string) (error, []func(*Host, string)) {
 func (h *Host) Run(name string, args ...string) error {
 	k := text(name, args)
 	err, effects := h.command(k)
-	if err != nil {
-		return err
-	}
 	for _, fn := range effects {
 		fn(h, k)
 	}
-	return nil
+	return err
 }
 
 func (h *Host) RunInput(stdin []byte, name string, args ...string) error {
@@ -145,18 +163,38 @@ func (h *Host) Input(prefix string) string {
 }
 
 func (h *Host) Output(name string, args ...string) (string, error) {
-	k := text(name, args)
+	return h.output(text(name, args))
+}
+
+func (h *Host) output(k string) (string, error) {
 	err, effects := h.command(k)
-	if err != nil {
-		return "", err
-	}
 	for _, fn := range effects {
 		fn(h, k)
+	}
+	if err != nil {
+		return "", err
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	out, _ := longestPrefix(h.Outputs, k)
 	return out, nil
+}
+
+// RunLimited records the limit and the stdin and runs the command as Output
+// does, known by its environment and its text together. A test has a command
+// run out of its time by failing it with an error that wraps vmrt.ErrTimedOut.
+func (h *Host) RunLimited(limit time.Duration, env []string, stdin []byte, name string, args ...string) (string, error) {
+	k := text(name, args)
+	if len(env) > 0 {
+		k = strings.Join(env, " ") + " " + k
+	}
+	h.mu.Lock()
+	h.Limits[k] = limit
+	if stdin != nil {
+		h.Inputs = append(h.Inputs, k+"\n"+string(stdin))
+	}
+	h.mu.Unlock()
+	return h.output(k)
 }
 
 func (h *Host) LookPath(name string) (string, error) {

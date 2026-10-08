@@ -386,6 +386,21 @@ second step, and the one-time code is already spent by then. `gpu-agent status`
 shows `registered, no tunnel configured`; run `sudo gpu-agent select-location` —
 it does not need a new code — then restart the service.
 
+**The setup stood still at its test rental (`cryptsetup open` never returned).** A
+rental's disk is a dm-crypt mapping, and `cryptsetup` does not return until udev has
+confirmed the new device. On a system image whose udev is running but never confirms
+device-mapper devices (some board makers' images), that wait has no end, and agents up
+to v0.3.10 waited with it. The agent now gives every such command 20 seconds. One that
+runs out of them is ended, what it left is removed, and the same is done with
+`DM_DISABLE_UDEV=1`, which has libdevmapper make the device node itself and wait for
+nobody. The machine remembers what it found (`/var/lib/gpu-agent/dm-udev.json`, for
+that agent version: the next version asks udev once more, so a udev that was put right
+is used again without anyone doing anything), `gpu-agent check` says it in a `Note:`
+line, and the machine rents as any other. The end of a rental is covered the same way,
+and whether a rental's disk is really closed is read from the kernel, not from
+`/dev/mapper`. A systemd drop-in that sets `DM_DISABLE_UDEV=1` for the agent's service
+keeps working and is no longer needed.
+
 ## Can this machine host a rental?
 
 `sudo gpu-agent check` answers that without changing anything, and `status`

@@ -79,6 +79,9 @@ func printCapability(c control.Capability) {
 			fmt.Printf("Locked down:  no — %s\n", g.NotLockedDown)
 		}
 	}
+	for _, note := range c.Notes {
+		fmt.Printf("Note:         %s\n", note)
+	}
 	if c.Ready {
 		fmt.Println("Hosting:      ready — this machine can host a rental")
 		if c.HostBusy != nil {

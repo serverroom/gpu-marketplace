@@ -62,6 +62,35 @@ func detectARM(t *testing.T, h *fakehost.Host) *Provisioner {
 	return Detect(h, "linux", "arm64", dataDir, version)
 }
 
+// A board whose udev never confirms device-mapper devices hosts as any other,
+// and its capability says what the agent found and does about it.
+func TestABoardWhoseUdevDoesNotAnswerHostsAndSaysSo(t *testing.T) {
+	h := rk3588(t)
+	if c := detectARM(t, h).Capability(); !c.Ready || len(c.Notes) != 0 {
+		t.Fatalf("a board whose udev answers: ready %v, notes %v", c.Ready, c.Notes)
+	}
+	if err := vmrt.MarkDMUdevUnconfirmed(h, dataDir, version, "cryptsetup open was still waiting for udev after 20s"); err != nil {
+		t.Fatal(err)
+	}
+	c := detectARM(t, h).Capability()
+	if !c.Ready || len(c.Reasons) != 0 {
+		t.Fatalf("it is no reason not to rent: ready %v, reasons %v", c.Ready, c.Reasons)
+	}
+	if len(c.Notes) != 1 || !strings.Contains(c.Notes[0], "does not confirm device-mapper devices") || !strings.Contains(c.Notes[0], "nothing for you to do") {
+		t.Fatalf("notes = %v", c.Notes)
+	}
+	if data, _ := json.Marshal(c); !strings.Contains(string(data), `"notes":["this machine's udev`) {
+		t.Errorf("the report does not carry it: %s", data)
+	}
+	// Another agent version's finding is not this one's.
+	if err := vmrt.MarkDMUdevUnconfirmed(h, dataDir, "v0.0.1", "cryptsetup open was still waiting for udev after 20s"); err != nil {
+		t.Fatal(err)
+	}
+	if c := detectARM(t, h).Capability(); len(c.Notes) != 0 {
+		t.Errorf("notes = %v", c.Notes)
+	}
+}
+
 func TestAnRK3588BoardHosts(t *testing.T) {
 	p := detectARM(t, rk3588(t))
 	c := p.Capability()

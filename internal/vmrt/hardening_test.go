@@ -203,7 +203,7 @@ func TestTheRentalDiskUsesDirectIO(t *testing.T) {
 	h := fakehost.New()
 	h.OnRun["truncate -s"] = func(h *fakehost.Host, cmd string) { h.SetFile(fakehost.LastField(cmd), nil) }
 	h.Outputs["losetup --direct-io=on --find --show"] = "/dev/loop3\n"
-	ds, err := openEncrypted(h, "/r", "R1", 10)
+	ds, err := openEncrypted(h, Spec{DiskGB: 10}, "/r", "R1")
 	if err != nil || ds.Loop != "/dev/loop3" {
 		t.Fatalf("openEncrypted = %+v, %v", ds, err)
 	}
@@ -212,7 +212,7 @@ func TestTheRentalDiskUsesDirectIO(t *testing.T) {
 	h.OnRun["truncate -s"] = func(h *fakehost.Host, cmd string) { h.SetFile(fakehost.LastField(cmd), nil) }
 	h.Fail["losetup --direct-io=on"] = errors.New("failed to set direct io: Invalid argument")
 	h.Outputs["losetup -j"] = "/dev/loop4: []: (/r/disk.img)\n"
-	if ds, err = openEncrypted(h, "/r", "R1", 10); err != nil || ds.Loop != "/dev/loop4" || h.Ran("run losetup --find --show") {
+	if ds, err = openEncrypted(h, Spec{DiskGB: 10}, "/r", "R1"); err != nil || ds.Loop != "/dev/loop4" || h.Ran("run losetup --find --show") {
 		t.Errorf("attached without direct I/O: %+v, %v; want /dev/loop4 reused, not a second device", ds, err)
 	}
 
@@ -220,7 +220,7 @@ func TestTheRentalDiskUsesDirectIO(t *testing.T) {
 	h.OnRun["truncate -s"] = func(h *fakehost.Host, cmd string) { h.SetFile(fakehost.LastField(cmd), nil) }
 	h.Fail["losetup --direct-io=on"] = errors.New("unsupported")
 	h.Outputs["losetup --find --show"] = "/dev/loop5\n"
-	if ds, err = openEncrypted(h, "/r", "R1", 10); err != nil || ds.Loop != "/dev/loop5" {
+	if ds, err = openEncrypted(h, Spec{DiskGB: 10}, "/r", "R1"); err != nil || ds.Loop != "/dev/loop5" {
 		t.Errorf("no direct I/O at all: %+v, %v; want the plain loop device", ds, err)
 	}
 }

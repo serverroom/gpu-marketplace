@@ -202,6 +202,7 @@ func detectContainer(h vmrt.Host, goos, arch, dataDir, version string, spec vmrt
 		GPUCount:      &count,
 		Guest:         guest,
 		Reasons:       reasons,
+		Notes:         machineNotes(h, spec),
 		AgentVersion:  version,
 		UnifiedMemory: rep.Unified,
 		VMUser:        "renter",
