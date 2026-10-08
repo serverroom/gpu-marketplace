@@ -40,6 +40,10 @@ type GPUInfo struct {
 	// Integrated: the processor's own GPU, which rentals never take (listed so
 	// the marketplace can say it is not included). Absent before v0.2.3.
 	Integrated bool `json:"integrated,omitempty"`
+	// Driver is the kernel driver the host runs a SoC's own GPU with ("mali" on
+	// a board maker's kernel, "panthor" or "panfrost" on mainline); omitted for
+	// every other GPU, when none is bound, and by agents up to v0.3.10.
+	Driver string `json:"driver,omitempty"`
 	// bdf is the GPU's PCI address, where the source says it.
 	bdf string
 }
@@ -65,6 +69,11 @@ type SystemStats struct {
 	Status        string     `json:"status"`
 	UptimeSeconds int64      `json:"uptime_seconds"`
 	CollectedAt   string     `json:"collected_at"`
+	// Accelerators are what an ARM SoC carries beside its cores and its GPU:
+	// its NPU (npu_soc.go). No rental is given one; they are listed so the
+	// marketplace can name them and say they are not included. Omitted on a
+	// machine that has none, and by agents up to v0.3.10.
+	Accelerators []Accelerator `json:"accelerators,omitempty"`
 }
 
 // Collect gathers all system stats.
@@ -84,8 +93,10 @@ func Collect() (*SystemStats, error) {
 	gpus := gatedGPUs(collectGPUs)
 	fillUnifiedMemory(gpus, mem)
 	board := ""
+	var accelerators []Accelerator
 	if runtime.GOOS == "linux" {
 		board = linuxBoard()
+		accelerators = socAccelerators(pcidev.OS{})
 		cpu.TempC = hottestZone()
 		if runtime.GOARCH == "arm64" {
 			var models []string
@@ -112,6 +123,8 @@ func Collect() (*SystemStats, error) {
 		Disk:        disk,
 		Status:      "free",
 		CollectedAt: time.Now().UTC().Format(time.RFC3339),
+		// The SoC's NPU (npu_soc.go).
+		Accelerators: accelerators,
 	}, nil
 }
 

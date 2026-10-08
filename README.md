@@ -363,7 +363,8 @@ the GPU is free, 6 hours later or at the agent's next start, or by hand with
 `sudo gpu-agent check --boot`.
 
 The machine's specs list the processor's own GPU too (marked `integrated`), so the
-marketplace can say it is not included; rentals never take it.
+marketplace can say it is not included; rentals never take it. An ARM board's NPU is
+listed the same way, under `accelerators` (see [ARM boards](#arm-boards-rk3588)).
 
 The capability the agent reports carries `host_busy` (what you are using, and since when),
 `retest_pending` (the full test is still owed) and `selftest` (the last test: passed,
@@ -505,6 +506,27 @@ is the Cortex-X925 cores; on a server with one core type, all but one or two. Th
 gets the memory the board does not keep, and the disk. The agent reports exactly that
 to the marketplace (`guest`: vCPUs, memory, disk and the core type), and names the
 machine by its SoC ("Rockchip RK3588") and board ("Radxa ROCK 5B").
+
+**The Mali GPU and the NPU are listed, and not included.** The agent reads both from
+the board's device tree (a node the device tree switched off is left out) and puts
+them in the machine's specs: the GPU in `gpus`, marked `integrated`, and the NPU in
+`accelerators`, with its maker's rating where the agent knows it:
+
+```json
+"gpus": [{"model": "Arm Mali-G610 MP4", "integrated": true, "unified_memory": true, "driver": "mali"}],
+"accelerators": [{"kind": "npu", "model": "Rockchip RK3588 NPU", "tops": 6, "cores": 3, "driver": "RKNPU"}]
+```
+
+`driver` is the kernel driver your board runs each with, when one is bound. The
+marketplace shows both on the machine's card as "Not included", and `gpu-agent status`
+lists them under "Left out". A rental does not get them because a rental is a virtual
+machine, and a virtual machine can only be handed a device that sits on a bus of its
+own behind an IOMMU, as a PCI card does. A SoC's GPU and NPU are parts of the
+processor: they share its clocks and power controls with everything else on the chip,
+and the Mali has no IOMMU in front of it, so a VM that drove it could reach the
+board's memory. The other way to give them to a renter, sharing the board's own
+drivers into a container, would put the renter on your board's kernel through those
+drivers. The agent does not do that on these boards.
 
 **Steps:** install the agent, link it (`sudo gpu-agent register --code <code>`), and
 wait: the automatic setup installs the runtime, builds the rental image (no NVIDIA

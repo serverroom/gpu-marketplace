@@ -64,7 +64,9 @@ type Capability struct {
 	// Excluded names the GPUs on this machine that rentals leave out, and why:
 	// the host is using one, it is already given to a VM of the host's own, it
 	// is the processor's integrated GPU or the host's console, or it cannot be
-	// passed through on its own. Absent before v0.2.2.
+	// passed through on its own. Absent before v0.2.2. An ARM system-on-chip's
+	// own GPU and NPU are named here too (agents after v0.3.10): a rental's
+	// virtual machine cannot be given either.
 	Excluded []string `json:"excluded,omitempty"`
 	// HostBusy: the host itself is using what a rental would take -- its own
 	// programs hold the GPU, or the memory the rental's VM needs is in use.

@@ -8,10 +8,10 @@ import (
 
 // An ARM board's GPU is part of its SoC and sits on no PCI bus: an RK3588's
 // Mali-G610 is a device-tree node (gpu@fb000000), so the PCI scan never saw it
-// and the marketplace listed such a machine with no GPU at all (DifraTech's
-// Radxa ZAKU2 nodes, 2026-10-02). Like an x86 processor's own GPU it is never
-// rented -- a microVM cannot be handed a SoC's GPU -- so it is listed marked
-// integrated, and the marketplace says it is not included.
+// and the marketplace listed such a machine with no GPU at all. Like an x86
+// processor's own GPU it is never rented -- a microVM cannot be handed a SoC's
+// GPU -- so it is listed marked integrated, and the marketplace says it is not
+// included.
 
 // socGPUPatterns are where a SoC's GPU node sits in the device tree: at its
 // root (Rockchip) or under its soc bus (most others).
@@ -98,17 +98,15 @@ func socGPUs(fs pcidev.FS) []GPUInfo {
 				continue
 			}
 			seen[node] = true
-			if status, err := fs.ReadFile(node + "/status"); err == nil {
-				if s := dtStrings(status); len(s) > 0 && s[0] != "okay" && s[0] != "ok" {
-					continue
-				}
+			if !dtEnabled(fs, node) {
+				continue
 			}
 			compatible, err := fs.ReadFile(path)
 			if err != nil {
 				continue
 			}
 			if name := socGPUName(compatible, root); name != "" {
-				out = append(out, GPUInfo{Model: name, Integrated: true, UnifiedMemory: true})
+				out = append(out, GPUInfo{Model: name, Integrated: true, UnifiedMemory: true, Driver: socDriver(fs, node)})
 			}
 		}
 	}
