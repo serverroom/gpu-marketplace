@@ -1,8 +1,7 @@
 package hostctl
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/rsa"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +15,7 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/control"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/update"
+	"github.com/serverroom/gpu-marketplace/internal/update/updatetest"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt/fakehost"
 )
@@ -56,9 +56,8 @@ func newAgent(t *testing.T) *agent {
 	if err := os.WriteFile(bin, []byte("gpu-agent v0.1.10"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256(newBinary)
 	files := map[string][]byte{
-		"https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/checksums.txt":         []byte(hex.EncodeToString(sum[:]) + "  gpu-agent-linux-amd64\n"),
+		"https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/release.json":          updatetest.Release("v0.1.11", map[string][]byte{"gpu-agent-linux-amd64": newBinary}),
 		"https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/gpu-agent-linux-amd64": newBinary,
 	}
 	a := &agent{m: &fakeMachine{status: provisioner.StatusFree}, h: fakehost.New(), release: make(chan struct{})}
@@ -79,6 +78,7 @@ func newAgent(t *testing.T) *agent {
 		Later: func(f func()) { f() },
 		Updater: &update.Updater{
 			GOOS: "linux", GOARCH: "amd64", Current: "v0.1.10", Binary: bin, DataDir: filepath.Join(dir, "data"),
+			Keys: []*rsa.PublicKey{updatetest.Public(1)},
 			Get: func(url string) ([]byte, error) {
 				<-a.release
 				if b, ok := files[url]; ok {

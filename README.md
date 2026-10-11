@@ -180,7 +180,7 @@ seconds carries the same offer. When a newer release is named, the agent install
 **only when the machine is idle** — not rented, no leftover of a rental, no setup, test
 boot or pair test running — and otherwise waits for the next offer. It installs it
 exactly as "Update agent" does (below): from the release address it builds itself,
-checked against `checksums.txt`, with the automatic rollback. After an update the machine
+checked against the release's signature, with the automatic rollback. After an update the machine
 stays on the market on its last passing test boot, and the new version runs its own when
 the GPU is free (and before a rental starts). A rental waiting for you to free the machine
 holds an update back, as a running one does.
@@ -216,8 +216,13 @@ the background, and the panel follows it:
 1. **downloading** the release for this machine from
    `github.com/serverroom/gpu-marketplace/releases` — the agent builds that address
    itself; only the version comes from the panel;
-2. **verifying** it against the release's `checksums.txt` (the installers' rule) and
-   by running it: it must say it is the version asked for;
+2. **verifying** it against the release's signed `release.json` (from v0.3.13): the
+   release must be signed by one of the Server Room release keys compiled into the
+   agent, for exactly this version, and the download must have the size and SHA-256
+   the signature vouches for. `checksums.txt` alone is never enough -- it sits beside
+   the binaries, so whoever could replace one could replace the other -- and a release
+   without a valid signature is refused, whoever offers it. Then the agent runs it: it
+   must say it is the version asked for;
 3. **restarting**: the running binary is kept as `gpu-agent.prev`, the new one is moved
    into its place in one step, and the agent restarts a few seconds later.
 

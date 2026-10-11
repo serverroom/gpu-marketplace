@@ -4,14 +4,15 @@
 //
 // Where the new binary comes from is never up to the caller: the URL is built
 // from Repo and the version, the version must be a plain vX.Y.Z newer than the
-// running one, and the download must match the release's checksums.txt -- the
-// same rule the installers use -- and report the requested version when run.
+// running one, the release must carry a release.json signed by a release key
+// compiled into this binary (release.go) whose manifest vouches for the
+// download's size and SHA-256 -- checksums.txt alone never suffices -- and the
+// download must report the requested version when run.
 package update
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -154,6 +155,9 @@ type Updater struct {
 	// Readlink reads a symlink (a process's /proc/<pid>/exe).
 	Readlink func(path string) (string, error)
 	Now      func() time.Time
+	// Keys are the release keys a release must be signed by; nil means the
+	// ones compiled into this binary (PinnedKeys). Only tests set it.
+	Keys []*rsa.PublicKey
 
 	mu      sync.Mutex
 	running bool
@@ -179,6 +183,13 @@ func (u *Updater) get(url string) ([]byte, error) {
 		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+}
+
+func (u *Updater) keys() ([]*rsa.PublicKey, error) {
+	if u.Keys != nil {
+		return u.Keys, nil
+	}
+	return PinnedKeys()
 }
 
 func (u *Updater) exec(name string, args ...string) (string, error) {
@@ -275,16 +286,6 @@ func (u *Updater) Check(to string) error {
 	return nil
 }
 
-func sumFor(sums, name string) string {
-	for _, line := range strings.Split(sums, "\n") {
-		f := strings.Fields(line)
-		if len(f) == 2 && (f[1] == name || f[1] == "*"+name) {
-			return strings.ToLower(f[0])
-		}
-	}
-	return ""
-}
-
 // Begin checks and records an update to `to` (status downloading) and claims
 // the updater, so a second request is refused at once. Run does the rest.
 func (u *Updater) Begin(to string) (Record, error) {
@@ -324,7 +325,7 @@ func (u *Updater) Start(to string) (Record, error) {
 }
 
 // Run downloads release rec.To for this platform, verifies it against the
-// release's checksums.txt and by running it, keeps the running binary as
+// release's signed release.json (release.go) and by running it, keeps the running binary as
 // <binary>.prev, moves the new one into place in one rename, and schedules the
 // restart and the check. Progress goes to update.json. A failure before the
 // rename leaves the running agent exactly as it was (status failed).
@@ -343,13 +344,21 @@ func (u *Updater) Run(rec Record) Record {
 
 	step(StatusDownloading)
 	asset := AssetName(u.GOOS, u.GOARCH)
-	sums, err := u.get(releaseURL(rec.To, "checksums.txt"))
+	keys, err := u.keys()
 	if err != nil {
-		return fail("download checksums.txt for %s: %v", rec.To, err)
+		return fail("this agent cannot check release signatures (%v); refusing to update", err)
 	}
-	want := sumFor(string(sums), asset)
-	if want == "" {
-		return fail("checksums.txt for %s lists no %s", rec.To, asset)
+	raw, err := u.get(releaseURL(rec.To, ReleaseFile))
+	if err != nil {
+		return fail("download the signed %s for %s: %v; a release without a valid signature is never installed", ReleaseFile, rec.To, err)
+	}
+	manifest, err := OpenRelease(raw, keys)
+	if err != nil {
+		return fail("%s for %s: %v; refusing it", ReleaseFile, rec.To, err)
+	}
+	entry, err := manifest.For(rec.To, asset)
+	if err != nil {
+		return fail("%s for %s: %v; refusing it", ReleaseFile, rec.To, err)
 	}
 	bin, err := u.get(releaseURL(rec.To, asset))
 	if err != nil {
@@ -357,9 +366,8 @@ func (u *Updater) Run(rec Record) Record {
 	}
 
 	step(StatusVerifying)
-	sum := sha256.Sum256(bin)
-	if got := hex.EncodeToString(sum[:]); got != want {
-		return fail("the downloaded %s does not match the published checksum (expected %s, got %s); refusing it", asset, want, got)
+	if err := entry.Matches(bin); err != nil {
+		return fail("the downloaded %s %s is not the signed release (%v); refusing it", asset, rec.To, err)
 	}
 	next := u.Binary + ".new"
 	_ = os.Remove(next)

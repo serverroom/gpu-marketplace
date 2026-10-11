@@ -43,16 +43,11 @@ jobs:
           # worst place to discover a toolchain mismatch.
           go-version-file: go.mod
 
+      # The same script, flags and toolchain the release signer uses
+      # (RELEASING.md): it rebuilds these binaries itself and signs only when
+      # every one matches GitHub's byte for byte.
       - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          VERSION=${GITHUB_REF_NAME}
-          go build -ldflags "-s -w -X main.version=${VERSION}" \
-            -o gpu-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} \
-            ./cmd/gpu-agent/
+        run: sh scripts/release/build.sh "${GITHUB_REF_NAME}" . "${{ matrix.goos }}/${{ matrix.goarch }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -69,34 +64,25 @@ jobs:
         with:
           merge-multiple: true
 
-      # The installers refuse to install a binary they cannot verify, so this
-      # file is not optional — a release without it installs nowhere.
+      # The installers, and agents before v0.3.13, refuse a binary that does
+      # not match this file, so it is not optional -- but it vouches for
+      # nothing on its own: it sits in the same release as the binaries.
+      # What an agent trusts is release.json, signed off GitHub (RELEASING.md).
       - name: Generate checksums
         run: sha256sum gpu-agent-* > checksums.txt
 
-      # An annotated tag whose message says [prerelease] is published as a
-      # pre-release: installable by name ('gpu-agent update --version vX.Y.Z'),
-      # never the latest release the marketplace offers to every agent. Promote
-      # it with 'gh release edit vX.Y.Z --prerelease=false --latest'.
-      - name: Release kind
-        id: kind
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          pre=false
-          ref=$(gh api "repos/${{ github.repository }}/git/ref/tags/${{ github.ref_name }}" --jq '.object.type + " " + .object.sha')
-          if [ "${ref%% *}" = "tag" ]; then
-            msg=$(gh api "repos/${{ github.repository }}/git/tags/${ref#* }" --jq '.message')
-            case "$msg" in *"[prerelease]"*) pre=true ;; esac
-          fi
-          echo "pre=$pre" >> "$GITHUB_OUTPUT"
-
+      # EVERY RELEASE STARTS AS A PRE-RELEASE (from v0.3.13). An agent from
+      # v0.3.13 installs only a release whose release.json is signed by a
+      # release key, and the keys never leave DEVEL61 -- so nothing this
+      # workflow makes can be installed by itself. The release becomes the
+      # latest (the one the marketplace offers every agent) only after it is
+      # signed, release.json is uploaded and checked: RELEASING.md.
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          prerelease: ${{ steps.kind.outputs.pre == 'true' }}
-          make_latest: ${{ steps.kind.outputs.pre == 'true' && 'false' || 'true' }}
+          prerelease: true
+          make_latest: 'false'
           files: |
             gpu-agent-*
             checksums.txt

@@ -1,6 +1,7 @@
 package update
 
 import (
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/serverroom/gpu-marketplace/internal/update/updatetest"
 )
 
 var newBinary = []byte("#!gpu-agent v0.1.11 for linux/amd64")
@@ -43,6 +46,9 @@ func newRig(t *testing.T) *rig {
 	r := &rig{
 		files: map[string][]byte{
 			"https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/gpu-agent-linux-amd64": newBinary,
+			"https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/release.json": updatetest.Release("v0.1.11",
+				map[string][]byte{"gpu-agent-linux-amd64": newBinary, "gpu-agent-linux-arm64": []byte("other")}),
+			// What the agents before v0.3.13 checked: never consulted any more.
 			"https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/checksums.txt": []byte(
 				sum([]byte("other")) + "  gpu-agent-linux-arm64\n" + sum(newBinary) + "  gpu-agent-linux-amd64\n"),
 		},
@@ -51,6 +57,7 @@ func newRig(t *testing.T) *rig {
 	}
 	r.u = &Updater{
 		GOOS: "linux", GOARCH: "amd64", Current: "v0.1.10", Binary: bin, DataDir: filepath.Join(dir, "data"),
+		Keys: []*rsa.PublicKey{updatetest.Public(1), updatetest.Public(2)},
 		Get: func(url string) ([]byte, error) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
@@ -162,7 +169,7 @@ func TestTheURLIsBuiltOnlyFromTheConstant(t *testing.T) {
 	rec, _ := r.u.Begin("v0.1.11")
 	r.u.Run(rec)
 	want := []string{
-		"https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/checksums.txt",
+		"https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/release.json",
 		"https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/gpu-agent-linux-amd64",
 	}
 	if strings.Join(r.urls, " ") != strings.Join(want, " ") {
@@ -179,12 +186,31 @@ func TestTheURLIsBuiltOnlyFromTheConstant(t *testing.T) {
 	}
 }
 
+// refused checks that a refused update changed nothing on the machine.
+func (r *rig) refused(t *testing.T, rec Record, why string) {
+	t.Helper()
+	if rec.Status != StatusFailed || !strings.Contains(rec.Error, why) {
+		t.Fatalf("Run = %+v, want a failure saying %q", rec, why)
+	}
+	if read(t, r.u.Binary) != "the running v0.1.10" {
+		t.Error("the running binary was replaced")
+	}
+	for _, f := range []string{".prev", ".new"} {
+		if _, err := os.Stat(r.u.Binary + f); !os.IsNotExist(err) {
+			t.Errorf("%s left for a refused update", f)
+		}
+	}
+	if r.ran("systemd-run") || r.ran("gpu-agent.new") {
+		t.Error("a refused binary was run or a restart scheduled")
+	}
+}
+
 func TestAChecksumMismatchIsRefusedAndNothingChanges(t *testing.T) {
 	r := newRig(t)
 	r.files["https://github.com/serverroom/gpu-marketplace/releases/download/v0.1.11/gpu-agent-linux-amd64"] = []byte("tampered")
 	rec, _ := r.u.Begin("v0.1.11")
 	rec = r.u.Run(rec)
-	if rec.Status != StatusFailed || !strings.Contains(rec.Error, "does not match the published checksum") {
+	if rec.Status != StatusFailed || !strings.Contains(rec.Error, "is not the signed release") {
 		t.Fatalf("Run = %+v", rec)
 	}
 	if read(t, r.u.Binary) != "the running v0.1.10" {
@@ -201,11 +227,11 @@ func TestAChecksumMismatchIsRefusedAndNothingChanges(t *testing.T) {
 	}
 }
 
-func TestAnAssetMissingFromTheChecksumsIsRefused(t *testing.T) {
+func TestAnAssetMissingFromTheManifestIsRefused(t *testing.T) {
 	r := newRig(t)
 	r.u.GOARCH = "riscv64"
 	rec, _ := r.u.Begin("v0.1.11")
-	if rec = r.u.Run(rec); rec.Status != StatusFailed || !strings.Contains(rec.Error, "lists no gpu-agent-linux-riscv64") {
+	if rec = r.u.Run(rec); rec.Status != StatusFailed || !strings.Contains(rec.Error, "names no gpu-agent-linux-riscv64") {
 		t.Errorf("Run = %+v", rec)
 	}
 }
