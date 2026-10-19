@@ -194,7 +194,24 @@ func (g *Guard) Apply() error {
 	return nil
 }
 
-// Remove deletes the agent's table and with it every rule the agent added.
+// Remove deletes the agent's table and with it every rule the agent added. A
+// table that is not there is already removed: a teardown run again, after one
+// that took the table away but did not verify for another reason (a GPU), must
+// not fail on it, nor tell the host "No such file or directory" beside the
+// real reason. Only a table that is there and will not go is an error.
 func (g *Guard) Remove() error {
+	if out, err := g.runner.Output("nft", "list", "tables"); err == nil && !hasTable(out) {
+		return nil
+	}
 	return g.runner.Run("nft", "delete", "table", "inet", Table)
+}
+
+// hasTable reports whether `nft list tables` lists the agent's table.
+func hasTable(listing string) bool {
+	for _, line := range strings.Split(listing, "\n") {
+		if strings.TrimSpace(line) == "table inet "+Table {
+			return true
+		}
+	}
+	return false
 }
