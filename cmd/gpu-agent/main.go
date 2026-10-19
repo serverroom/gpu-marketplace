@@ -99,6 +99,7 @@ func (a *gpuAgent) Start(s service.Service) error {
 	a.prov.OnCapabilityChange(a.kickReport)
 	a.prov.RecoverPorts()
 	a.prov.Resume()
+	a.prov.RetryDirty()
 	a.syncFindings()
 	a.noteUpdateRecord()
 	if c := a.prov.Capability(); c.Ready {

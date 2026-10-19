@@ -308,6 +308,29 @@ func (p *Provisioner) OnCapabilityChange(f func()) {
 // afterRental reads the machine again once a rental has left it: the ConnectX
 // ports are back on the host, and checks that ran while the rental held the
 // GPU could not see it.
+// RetryDirty runs a dirty machine's teardown once more, in the background,
+// when the agent starts: the full wipe and the GPU check again, and the
+// machine is free only if they verify. What kept it dirty is often what a
+// reboot fixes (an NVIDIA driver updated under the loaded one,
+// nvidiadriver.go), and the host who rebooted as told should not then have to
+// run a command as well. A teardown that still does not verify leaves the
+// machine dirty exactly as before.
+func (p *Provisioner) RetryDirty() {
+	p.mu.Lock()
+	dirty := p.status == StatusDirty
+	p.mu.Unlock()
+	if !dirty {
+		return
+	}
+	go func() {
+		if err := p.Teardown("agent-start-recheck"); err != nil {
+			log.Printf("the dirty machine's teardown, tried again at start, did not verify: %v", err)
+			return
+		}
+		log.Printf("the dirty machine's teardown, tried again at start, verified clean: the machine is free again")
+	}()
+}
+
 func (p *Provisioner) afterRental() {
 	p.mu.Lock()
 	redo, again, notify := p.redetect, p.midRental, p.onChange
@@ -737,7 +760,8 @@ func (p *Provisioner) Teardown(rentalID string) error {
 // Resume picks up whatever rental state the agent finds when it starts: a VM
 // still running (its unit outlives the agent) gets its SSH forward back; a
 // rental whose VM is gone -- the machine rebooted -- is torn down now; a dirty
-// leftover keeps the machine quarantined.
+// leftover keeps the machine quarantined (RetryDirty tries its teardown once
+// more, and only a teardown that verifies lifts it).
 func (p *Provisioner) Resume() {
 	if p.resume() {
 		p.afterRental()

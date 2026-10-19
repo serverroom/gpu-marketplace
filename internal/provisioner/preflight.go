@@ -150,6 +150,11 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	// proves the GPU gets there. nvidia-smi, where the host has it, adds names
 	// and says which GPUs share the machine's memory (a GB10).
 	nv := hostNVIDIA(h)
+	// An NVIDIA driver updated under the loaded one: every rental would end
+	// with a GPU nobody can check, and the machine dirty (nvidiadriver.go).
+	if why := NVIDIADriverMismatch(h); why != "" {
+		add("%s", why)
+	}
 	var nvNames []string
 	for _, bdf := range sortedKeys(nv) {
 		nvNames = append(nvNames, nv[bdf].name)
@@ -355,6 +360,7 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 
 	fence := netguard.New(h, netguard.Bridge, vmrt.GuestSubnet, netguard.HostNetworks)
 	rt := vmrt.New(h, spec, fence, gpuVerifier(h))
+	rt.SetGPUExplainer(func() string { return NVIDIADriverMismatch(h) })
 	p := New(rt, rep.Vendor, rep.BDFs, rep.Unified)
 	p.runtime = rt
 	p.findings = rep.Findings

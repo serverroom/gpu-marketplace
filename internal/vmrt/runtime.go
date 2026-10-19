@@ -36,11 +36,31 @@ type Runtime struct {
 	// back to, as the rental recorded them -- not what the host shows now, which
 	// after an agent restart mid-rental is vfio-pci.
 	verifyGPU func(returned []BoundDevice) bool
+	// explainGPU says why the GPU could not be checked when the machine itself
+	// is the reason (an NVIDIA driver updated under the loaded one); "" when it
+	// knows of none. Optional: SetGPUExplainer.
+	explainGPU func() string
 	// usageCPU is the last CPU reading of the rental, for Usage's rate.
 	usageCPU cpuSample
 }
 
 // New builds a runtime.
+// SetGPUExplainer gives the teardown a way to say why the GPU could not be
+// checked, when the machine itself is the reason.
+func (rt *Runtime) SetGPUExplainer(f func() string) { rt.explainGPU = f }
+
+// gpuNotClean is the teardown's line for a GPU that did not verify, with the
+// machine's own reason when there is one: "the GPU did not verify clean"
+// alone sends a host looking at the GPU when the fix is a reboot.
+func gpuNotClean(line string, explain func() string) string {
+	if explain != nil {
+		if why := explain(); why != "" {
+			return line + ": " + why
+		}
+	}
+	return line
+}
+
 func New(h Host, spec Spec, fence Fence, verifyGPU func(returned []BoundDevice) bool) *Runtime {
 	return &Runtime{h: h, spec: spec, fence: fence, verifyGPU: verifyGPU}
 }
@@ -456,7 +476,7 @@ func (rt *Runtime) Stop() StopResult {
 	res.GPUClean = released && vmGone
 	if len(st.Devices) > 0 && res.GPUClean && rt.verifyGPU != nil && !rt.verifyGPU(st.Devices) {
 		res.GPUClean = false
-		res.Detail = append(res.Detail, "the GPU did not verify clean after the rental")
+		res.Detail = append(res.Detail, gpuNotClean("the GPU did not verify clean after the rental", rt.explainGPU))
 	}
 	// The desktop comes back once the GPU is back with its driver. A GPU still
 	// on vfio-pci has nothing to draw it; the record stays with the dirty state

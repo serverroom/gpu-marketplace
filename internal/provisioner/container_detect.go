@@ -126,7 +126,10 @@ func containerReasons(h vmrt.Host, spec vmrt.Spec, version string, findings []Fi
 	if _, err := h.LookPath("nvidia-ctk"); gpu && err != nil && !h.Exists("/etc/cdi/nvidia.yaml") && !h.Exists("/var/run/cdi/nvidia.yaml") {
 		add(ReasonTools, "the NVIDIA Container Toolkit (nvidia-ctk) and its CDI spec are missing, so the GPU cannot be shared into a container; install nvidia-container-toolkit and run 'nvidia-ctk cdi generate'")
 	}
-	if gpu && len(vmrt.CDIDeviceRefs(h)) == 0 {
+	if why := NVIDIADriverMismatch(h); gpu && why != "" {
+		// Before the next check: it is why nvidia-smi lists nothing, and the fix is a reboot (nvidiadriver.go).
+		add(ReasonHuman, "%s", why)
+	} else if gpu && len(vmrt.CDIDeviceRefs(h)) == 0 {
 		add(ReasonHuman, "nvidia-smi does not list a usable GPU, so none can be shared into a container")
 	}
 	// The CDI spec names the GPU's DRM nodes by number, which can change from
@@ -178,6 +181,7 @@ func detectContainer(h vmrt.Host, goos, arch, dataDir, version string, spec vmrt
 	// The GPU is shared with the host, not handed over: the host's own
 	// programs stay on it, so the teardown check is sharedGPUVerifier's.
 	crt := vmrt.NewContainer(h, spec, fence, vmrt.ContainerImageRef, cdi, sharedGPUVerifier(h))
+	crt.SetGPUExplainer(func() string { return NVIDIADriverMismatch(h) })
 
 	findings := containerReasons(h, spec, version, nil, true)
 	var reasons []string

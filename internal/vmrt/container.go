@@ -43,6 +43,8 @@ type ContainerRuntime struct {
 	// is left on the GPUs. The provisioner supplies it (gpuVerifier), given the
 	// rented GPUs as BoundDevice{Driver:"nvidia"} -- the GPU never left nvidia.
 	verifyGPU func(returned []BoundDevice) bool
+	// explainGPU: Runtime's, for the container.
+	explainGPU func() string
 	// extraProbes are more addresses the test boot must find blocked: on
 	// Windows, the Windows machine's own LAN address and gateway, which the
 	// Linux inside WSL does not see as its networks.
@@ -76,6 +78,9 @@ func (rt *ContainerRuntime) AddProbes(probes ...string) {
 }
 
 // NewContainer builds a container runtime.
+// SetGPUExplainer: Runtime's, for the container.
+func (rt *ContainerRuntime) SetGPUExplainer(f func() string) { rt.explainGPU = f }
+
 func NewContainer(h Host, spec Spec, fence Fence, image string, cdiDevices []string, verifyGPU func([]BoundDevice) bool) *ContainerRuntime {
 	return &ContainerRuntime{h: h, spec: spec, fence: fence, image: image, cdiDevices: cdiDevices, verifyGPU: verifyGPU}
 }
@@ -554,7 +559,7 @@ func (rt *ContainerRuntime) Stop() StopResult {
 		}
 		if !rt.verifyGPU(returned) {
 			res.GPUClean = false
-			res.Detail = append(res.Detail, "the GPU did not verify clear after the rental")
+			res.Detail = append(res.Detail, gpuNotClean("the GPU did not verify clear after the rental", rt.explainGPU))
 		}
 	}
 
