@@ -34,3 +34,26 @@ func TestTheRentalReport(t *testing.T) {
 		t.Errorf("report = %+v", r)
 	}
 }
+
+// keyMachine is a Machine whose rental has its SSH host keys.
+type keyMachine struct {
+	Machine
+	k *vmrt.HostKeys
+}
+
+func (m keyMachine) HostKeys() *vmrt.HostKeys { return m.k }
+
+// The rental's host keys are in the report while it runs, even when nothing
+// else is: they are what its renter checks the first connection against.
+func TestTheRentalReportCarriesTheHostKeys(t *testing.T) {
+	k := &vmrt.HostKeys{RentalID: "R1", Keys: []string{"ssh-ed25519 AAAA"}, At: 1}
+	p := New(keyMachine{k: k}, VendorContainerNV, nil, true)
+	if p.RentalReport() != nil {
+		t.Error("a free machine reports no rental")
+	}
+	p.status = StatusRented
+	r, ok := p.RentalReport().(*RentalReport)
+	if !ok || r.HostKeys != k || r.Usage != nil {
+		t.Errorf("report = %+v", r)
+	}
+}

@@ -5,13 +5,19 @@ import "github.com/serverroom/gpu-marketplace/internal/vmrt"
 // RentalReport is what a running rental uses and who is connected to it, for
 // the staff's view of live rentals (v0.3.4): the runtime's own look at its CPU,
 // memory, GPU, disk and network (vmrt.Usage), and the renter's SSH sessions as
-// the forward carrying them has seen them. nil while no rental is running.
+// the forward carrying them has seen them. HostKeys are the rental's own SSH
+// host keys, read before the renter was let in, so the marketplace can show
+// the renter what their first connection must show (v0.3.15). nil while no
+// rental is running.
 type RentalReport struct {
-	Usage *vmrt.Usage        `json:"usage,omitempty"`
-	SSH   *vmrt.SessionStats `json:"ssh,omitempty"`
+	Usage    *vmrt.Usage        `json:"usage,omitempty"`
+	SSH      *vmrt.SessionStats `json:"ssh,omitempty"`
+	HostKeys *vmrt.HostKeys     `json:"host_keys,omitempty"`
 }
 
 type usageReader interface{ Usage() *vmrt.Usage }
+
+type hostKeyReader interface{ HostKeys() *vmrt.HostKeys }
 
 type sessionCounter interface{ Sessions() vmrt.SessionStats }
 
@@ -31,7 +37,10 @@ func (p *Provisioner) RentalReport() interface{} {
 		s := c.Sessions()
 		r.SSH = &s
 	}
-	if r.Usage == nil && r.SSH == nil {
+	if k, ok := machine.(hostKeyReader); ok {
+		r.HostKeys = k.HostKeys()
+	}
+	if r.Usage == nil && r.SSH == nil && r.HostKeys == nil {
 		return nil
 	}
 	return &r

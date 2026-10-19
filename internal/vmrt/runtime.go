@@ -233,6 +233,9 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	if err = rt.waitGuest(r); err != nil {
 		return err
 	}
+	// Its SSH host keys, as its sshd offers them, read before the renter's way
+	// in is opened (hostkeys.go).
+	recordHostKeys(st, save, rt.readHostKeys)
 	// The renter has the machine from here: its teardown leaves a record.
 	if st.Measure != nil {
 		st.Measure.Delivered = true

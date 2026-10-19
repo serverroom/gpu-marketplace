@@ -43,6 +43,9 @@ type State struct {
 	// teardown to compare (measure.go); nil for a test boot, which is not
 	// measured.
 	Measure *MeasureState `json:"measure,omitempty"`
+	// HostKeys are the rental's own SSH host keys (public halves only), read
+	// once its sshd answered and before the renter was let in (hostkeys.go).
+	HostKeys *HostKeys `json:"host_keys,omitempty"`
 	// Dirty is set when a teardown did not verify. The state stays on disk, so
 	// the machine refuses the next rental until it is cleaned up.
 	Dirty       bool     `json:"dirty"`

@@ -955,3 +955,37 @@ figures stale during a microVM rental) and nothing of the renter's sessions.
   unit's cgroup cpu.stat, du of disk.img, the tap's counters; nvidia-smi on the host fails
   while the GPU is the VM's, as expected).
 - Not checked yet: a whole rental through the relay reporting in the heartbeat.
+
+# v0.3.15: a rental reports its own SSH host keys
+
+Built on v0.3.14 (main 8a74ac2). A renter (chat 5920, 19 October 2026) asked for his rental's
+ED25519 host key, read on our side, before his first connection, and nobody could give it: no
+control route reported it, the marketplace has no login on a host's machine, and the key he
+named (/etc/ssh in the guest) is not the one a container serves (sshd uses the per-rental keys
+in /run/hostkeys).
+
+1. **Read once the rental's sshd answers, before the renter's forward opens** (vmrt/hostkeys.go):
+   a container's three `.pub` files with `podman exec <rental> cat` (the command names those
+   files and nothing else); a microVM's keys with `ssh-keyscan -T 5 -t ed25519,ecdsa,rsa` of the
+   guest. Each read has a 20-second limit. A container test boot reads them too (its Start waits
+   for sshd like a rental's); a microVM test boot is never waited for and is not asked.
+2. **Only public keys come out.** vmrt.ParseHostKeys keeps a line only when it is a host key type
+   whose data is exactly that key's shape (ed25519's 32 bytes, ecdsa's curve and point, rsa's e
+   and n, nothing after them), each once, ed25519 first (the order ssh asks in).
+3. **Kept in the rental's state** (`host_keys` in rental.json), so an agent restarted mid-rental
+   still reports them; an ended or dirty rental reports none. A read that fails costs the rental
+   nothing: it starts, and `problem` says why.
+4. **`/status` carries `rental.host_keys`** `{rental_id, keys: ["type base64", ...], at, problem}`
+   while the rental runs, beside `usage` and `ssh`. The `/provision` answer cannot: it is sent
+   before the guest exists (the rental starts in the background), and the marketplace reads
+   `/status` to see the rental delivered anyway.
+
+## Checked
+- Unit tests: both modes' reads (the commands, their limit, their order after the boot), the
+  fingerprints ssh-keygen printed for three real keys, ten kinds of text that must not come out
+  (a private key file and its body among them), a failed read, the state across Stop, and the
+  report.
+- ParseHostKeys and HostKeyFingerprint on real `ssh-keyscan` output from four of our servers
+  (OpenSSH 9.6 and 10.2): every fingerprint equal to the server's own `ssh-keygen -l`.
+- Not checked on a host yet when this was written: a rental through the relay on SID 2457.
+
