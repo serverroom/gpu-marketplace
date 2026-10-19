@@ -272,8 +272,9 @@ const gib = int64(1024 * 1024 * 1024)
 
 func TestTheRentalIsHeldToItsMemoryOnTheGPU(t *testing.T) {
 	// 2 GiB of its own plus 60 + 50 GiB on the GPU is past its ~109 GiB: the
-	// rental's biggest GPU process goes, the host's 30 GiB one stays.
-	rt, h := guardHost(t, 2*gib, "401, 61440\n402, 51200\n900, 30720\n", 20000)
+	// rental's biggest GPU process goes, the host's 3 GiB one stays. (The
+	// machine is then nearly full: 117 of its 121 GiB in use.)
+	rt, h := guardHost(t, 2*gib, "401, 61440\n402, 51200\n900, 3072\n", 7000)
 	v, err := rt.GuardMemory()
 	if err != nil {
 		t.Fatal(err)
@@ -339,8 +340,9 @@ func TestAModelMappedFromItsFileIsNotCountedTwice(t *testing.T) {
 
 	// A real overrun: the same cache, but 45 GiB of the rental's own (a big
 	// heap, and 5 GiB in /dev/shm, which is shmem and stays counted) and the GPU
-	// at 70 GiB: 115 GiB, past its ~109. The biggest GPU process goes.
-	rt, h = guardHost(t, 115*gib, "401, 40960\n402, 30720\n900, 4096\n", 30000)
+	// at 70 GiB: 115 GiB, past its ~109, and the machine has 119 GiB in use. The
+	// biggest GPU process goes.
+	rt, h = guardHost(t, 115*gib, "401, 40960\n402, 30720\n900, 4096\n", 5000)
 	memStat(h, 40*gib, 75*gib, 5*gib)
 	if v, _ = rt.GuardMemory(); v.KilledPID != 401 || !h.Ran("run kill -KILL 401") || h.Ran("run kill -KILL 900") {
 		t.Errorf("a real overrun: %+v; want 401 stopped", v)
@@ -354,6 +356,39 @@ func TestAModelMappedFromItsFileIsNotCountedTwice(t *testing.T) {
 	memStat(h, 4*gib, 70*gib, 0)
 	if v, _ = rt.GuardMemory(); v.KilledPID != 401 || !strings.Contains(v.Reason, "memory free") {
 		t.Errorf("machine nearly out: %+v", v)
+	}
+}
+
+func TestAGPUAllocationChargedToTheContainerIsNotCountedTwice(t *testing.T) {
+	// Rental #25 (2026-10-19): two models loaded without mmap (Ollama's runner,
+	// --load-mode dio), memory.current 82,394,537,984 B (78,577 MiB) of anon, and
+	// the GPU reporting the same models' 70 GiB: 148 GiB counted under a 109 GiB
+	// rental, while the machine had ~39 GiB free. The models are charged to the
+	// cgroup AND reported by nvidia-smi; the machine's own reading shows they are
+	// held once. The host's processes hold 2 GiB (the root cgroup's anon beside
+	// the rental's).
+	own := int64(82394537984)
+	rt, h := guardHost(t, own, "401, 40960\n402, 30720\n", 124000-78577-2048-3000)
+	memStat(h, own-100<<20, 0, 0)
+	h.Files["/sys/fs/cgroup/memory.stat"] = []byte(fmt.Sprintf("anon %d\nfile %d\nshmem 0\n", own-100<<20+2*gib, 9*gib))
+	v, err := rt.GuardMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.KilledPID != 0 || h.Ran("run kill") {
+		t.Errorf("models charged to the cgroup and on the GPU were stopped: %+v", v)
+	}
+	if want := int64(78577 + 3000); v.RentalMB != want || v.OwnMB != 78577 || v.GPUMB != 71680 {
+		t.Errorf("verdict %+v; want RentalMB %d (the machine's in-use reading)", v, want)
+	}
+
+	// The same rental growing for real: it is now held to the machine's reading,
+	// and stopped once that passes its limit.
+	rt, h = guardHost(t, 105*gib, "401, 40960\n402, 30720\n", 124000-105*1024-2048-6000)
+	memStat(h, 105*gib, 0, 0)
+	h.Files["/sys/fs/cgroup/memory.stat"] = []byte(fmt.Sprintf("anon %d\nshmem 0\n", 107*gib))
+	if v, _ = rt.GuardMemory(); v.KilledPID != 401 || !strings.Contains(v.Reason, "over its") {
+		t.Errorf("a real overrun charged to the cgroup: %+v", v)
 	}
 }
 

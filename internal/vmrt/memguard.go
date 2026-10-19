@@ -25,19 +25,28 @@ import (
 // GPU, so counting the cache would count each loaded model twice, and a renter
 // whose two models fit easily was stopped (2026-10-19). What stays counted is
 // what the rental holds: anonymous memory, the kernel's for it, and its tmpfs
-// (/dev/shm, /tmp: shmem, which nothing reclaims without swap). The GPU's
-// allocations are not in memory.current at all -- were they charged to the
-// cgroup, --memory would have stopped the 40 GiB -- so they are not counted
-// twice either. The machine's floor reads MemAvailable, which already counts the
-// cache as free.
+// (/dev/shm, /tmp: shmem, which nothing reclaims without swap).
+//
+// Whether a GPU allocation is also in memory.current depends on how it was made
+// (the 40 GiB above was not; a model loaded by Ollama's runner seemingly is), and
+// counted on both sides it stopped a renter's second model with the machine half
+// free (2026-10-19). So the sum is held to what the machine has in use: the
+// rental cannot hold more than MemTotal - MemAvailable, less what the host's own
+// processes hold (the root cgroup's anon and shmem beside the rental's). Both
+// readings are at least what the rental holds, so the smaller one is too, and
+// the double count goes. The machine's floor reads MemAvailable, which already
+// counts the cache as free.
 
 // MemoryVerdict is one look by GuardMemory: what the rental held, and the
 // process it stopped (0: none).
 type MemoryVerdict struct {
 	// RentalMB is the container's own memory (page cache left out) plus its
-	// GPU memory; -1 when
-	// the GPU does not say what a process holds.
+	// GPU memory, no more than the machine has in use beside the host's own
+	// processes; -1 when the GPU does not say what a process holds.
 	RentalMB  int64
+	OwnMB     int64 // the container's own memory
+	GPUMB     int64 // what its processes hold on the GPU
+	InUseMB   int64 // the machine's memory in use beside the host's processes; -1: unknown
 	LimitMB   int64
 	FreeMB    int64
 	FloorMB   int64
@@ -107,15 +116,24 @@ func (rt *ContainerRuntime) GuardMemory() (MemoryVerdict, error) {
 		}
 		mine = append(mine, gpuProc{pid: pid, mb: mb})
 	}
-	v.RentalMB = own/(1024*1024) + gpuMB
+	v.OwnMB, v.GPUMB = own/(1024*1024), gpuMB
+	v.FreeMB = memAvailableMB(rt.h)
+	v.InUseMB = -1
+	if total := memInfoMB(rt.h, "MemTotal:"); total > 0 && v.FreeMB >= 0 {
+		v.InUseMB = total - v.FreeMB - hostHeldMB(rt.h, "/sys/fs/cgroup"+cgroup)
+	}
+	v.RentalMB = v.OwnMB + v.GPUMB
+	if v.InUseMB >= 0 && v.InUseMB < v.RentalMB {
+		v.RentalMB = v.InUseMB
+	}
 	if !known {
 		v.RentalMB = -1
 	}
-	v.FreeMB = memAvailableMB(rt.h)
 
 	switch {
 	case known && v.RentalMB > v.LimitMB:
-		v.Reason = fmt.Sprintf("the rental's memory and GPU memory came to %d MiB, over its %d MiB", v.RentalMB, v.LimitMB)
+		v.Reason = fmt.Sprintf("the rental's memory and GPU memory came to %d MiB, over its %d MiB (%d MiB its own, %d MiB on the GPU, %d MiB in use on the machine beside the host's)",
+			v.RentalMB, v.LimitMB, v.OwnMB, v.GPUMB, v.InUseMB)
 	case v.FreeMB >= 0 && v.FreeMB < v.FloorMB:
 		v.Reason = fmt.Sprintf("the machine had %d MiB of memory free, under the %d MiB it keeps", v.FreeMB, v.FloorMB)
 	default:
@@ -145,24 +163,8 @@ func cgroupHeldBytes(h Host, dir string) (int64, error) {
 	if err != nil {
 		return cur, nil
 	}
-	var file, shmem int64
-	for _, line := range strings.Split(string(data), "\n") {
-		f := strings.Fields(line)
-		if len(f) != 2 {
-			continue
-		}
-		n, err := strconv.ParseInt(f[1], 10, 64)
-		if err != nil {
-			continue
-		}
-		switch f[0] {
-		case "file":
-			file = n
-		case "shmem":
-			shmem = n
-		}
-	}
-	if cache := file - shmem; cache > 0 {
+	st := memStatFields(data)
+	if cache := st["file"] - st["shmem"]; cache > 0 {
 		cur -= cache
 	}
 	if cur < 0 {
@@ -189,14 +191,53 @@ func procInCgroup(h Host, pid int, cgroup string) bool {
 	return false
 }
 
+// memStatFields reads a memory.stat: each counter by its name, in bytes.
+func memStatFields(data []byte) map[string]int64 {
+	st := map[string]int64{}
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		if n, err := strconv.ParseInt(f[1], 10, 64); err == nil {
+			st[f[0]] = n
+		}
+	}
+	return st
+}
+
+// hostHeldMB is what the host's own processes hold, in MiB: the root cgroup's
+// anon and shmem less the rental's (dir). 0 when the root cgroup does not say
+// (the bound it goes into is then only looser).
+func hostHeldMB(h Host, dir string) int64 {
+	root, err := h.ReadFile("/sys/fs/cgroup/memory.stat")
+	if err != nil {
+		return 0
+	}
+	mine, err := h.ReadFile(dir + "/memory.stat")
+	if err != nil {
+		return 0
+	}
+	r, m := memStatFields(root), memStatFields(mine)
+	held := (r["anon"] + r["shmem"]) - (m["anon"] + m["shmem"])
+	if held < 0 {
+		return 0
+	}
+	return held / (1024 * 1024)
+}
+
 // memAvailableMB is the machine's MemAvailable, in MiB; -1 when unknown.
-func memAvailableMB(h Host) int64 {
+func memAvailableMB(h Host) int64 { return memInfoMB(h, "MemAvailable:") }
+
+// memInfoMB is one of /proc/meminfo's lines (key "MemTotal:"), in MiB; -1
+// when unknown.
+func memInfoMB(h Host, key string) int64 {
 	data, err := h.ReadFile("/proc/meminfo")
 	if err != nil {
 		return -1
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		if f := strings.Fields(line); len(f) >= 2 && f[0] == "MemAvailable:" {
+		if f := strings.Fields(line); len(f) >= 2 && f[0] == key {
 			kb, err := strconv.ParseInt(f[1], 10, 64)
 			if err != nil {
 				return -1
