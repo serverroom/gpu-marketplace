@@ -987,5 +987,11 @@ in /run/hostkeys).
   report.
 - ParseHostKeys and HostKeyFingerprint on real `ssh-keyscan` output from four of our servers
   (OpenSSH 9.6 and 10.2): every fingerprint equal to the server's own `ssh-keygen -l`.
-- Not checked on a host yet when this was written: a rental through the relay on SID 2457.
+- On SID 2457 (Miami, microVM, v0.3.16, direct public IPv4), 19 October 2026: test rentals 27 and 28. Each
+  rental's keys reached the marketplace in the /status answer that delivered it; `ssh-keyscan -p 2222` of the
+  machine gave the same three keys; a first connection showed the reported ED25519 fingerprint; with only the
+  reported keys in known_hosts (under `gpu-<8>`, HostKeyAlias) and strict checking, the renter logged in, and the
+  guest's own /etc/ssh keys had the same fingerprints. Rental 28's keys were new, not 27's.
+- Not checked on hardware: the container read (no container host on v0.3.15 or later yet), and the relay route
+  (its known_hosts naming was checked with a real ssh client, not through a relay).
 
