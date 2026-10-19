@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,11 +18,11 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/autosetup"
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/direct"
 	"github.com/serverroom/gpu-marketplace/internal/hostctl"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/register"
 	"github.com/serverroom/gpu-marketplace/internal/server"
-	"github.com/serverroom/gpu-marketplace/internal/sshtunnel"
 	"github.com/serverroom/gpu-marketplace/internal/stats"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
@@ -33,7 +34,10 @@ var version = "v0.2.0-dev"
 type gpuAgent struct {
 	cfg          *config.Config
 	httpSrv      *server.Server
-	tunnelCancel context.CancelFunc
+	netMu        sync.Mutex         // tunnelCancel: the route can change it (direct.go)
+	tunnelCancel context.CancelFunc // nil on a direct machine
+	directMu     sync.Mutex         // one report of the public addresses at a time (direct.go)
+	direct       directState
 	bgCancel     context.CancelFunc // background work: capability report, speed test, automatic setup
 	bgDone       chan struct{}      // closed when that work has returned
 	controlSrv   *control.Server
@@ -62,18 +66,24 @@ func (a *gpuAgent) Start(s service.Service) error {
 		return nil
 	}
 
-	// Bring up the persistent reverse SSH tunnel to the relay, if registered.
+	// A machine whose own address is public is reached there, with no tunnel
+	// (internal/direct, direct.go); otherwise bring up the persistent reverse
+	// SSH tunnel to the relay, if registered.
+	dcfg, derr := direct.Load(config.ConfigDir())
+	if derr != nil {
+		a.warn("read the direct route: %v", derr)
+	}
 	tcfg, err := register.LoadTunnelConfig()
 	switch {
+	case dcfg != nil:
+		provisioner.SetSSHListen(dcfg.SSHAddrs()...)
+		a.say("%s: renters and the marketplace reach this machine at %s, with no tunnel", direct.Labels[dcfg.Connection], strings.Join(dcfg.Addrs(), " and "))
 	case err != nil:
 		a.warn("load tunnel config: %v", err)
 		a.ops.errs.Raise(control.AreaTunnel, "the agent could not read its relay settings, so rentals cannot reach this machine; "+
 			"run 'sudo gpu-agent select-location' to write them again, then restart the agent", err.Error())
 	case tcfg != nil:
-		ctx, cancel := context.WithCancel(context.Background())
-		a.tunnelCancel = cancel
-		go sshtunnel.SuperviseWith(ctx, *tcfg, tunnelWatch{errs: a.ops.errs, host: tcfg.RelayHost})
-		a.say("Reverse tunnel to %s started", tcfg.RelayHost)
+		a.startTunnel(*tcfg)
 	default:
 		// The state between installing and registering. It has no tunnel and
 		// no listening ports, so from the outside it is indistinguishable from
@@ -112,6 +122,14 @@ func (a *gpuAgent) Start(s service.Service) error {
 		} else {
 			a.ops.errs.Resolve(control.AreaAgent, "")
 		}
+		a.controlSrv.SetConnectionCheck(func() { a.checkDirect(true) })
+		if dcfg != nil {
+			if derr := a.openPublic(dcfg.ControlAddrs()); derr != nil {
+				a.warn("open the control channel on %s: %v", strings.Join(dcfg.Addrs(), " and "), derr)
+				a.ops.errs.Raise(control.AreaTunnel, fmt.Sprintf("the agent could not open port %d on this machine's public address %s, so the marketplace cannot reach it; "+
+					"check that no other program uses the port, then restart the agent", dcfg.ControlPort, strings.Join(dcfg.Addrs(), " and ")), derr.Error())
+			}
+		}
 		a.setup = a.autoSetup()
 		bg, cancel := context.WithCancel(context.Background())
 		a.bgCancel = cancel
@@ -138,6 +156,8 @@ func (a *gpuAgent) Start(s service.Service) error {
 		}()
 		go a.announcePeers(bg)
 		go a.reportLoop(bg)
+		// Whether the machine has a public address of its own, now and later (direct.go).
+		go a.directLoop(bg)
 		// The listing's network figures, measured again each day (speedtest.go).
 		go a.speedtestJob().daily(bg)
 		// A container rental on a GPU that shares the machine's memory (a GB10)
@@ -249,9 +269,7 @@ func (a *gpuAgent) Stop(s service.Service) error {
 	a.say("GPU Agent stopping...")
 
 	stopBy := time.Now().Add(stopGrace)
-	if a.tunnelCancel != nil {
-		a.tunnelCancel()
-	}
+	a.stopTunnel()
 	if a.bgCancel != nil {
 		a.bgCancel()
 		select {
@@ -478,6 +496,8 @@ func runStatus(svc service.Service) {
 
 	st := register.LoadState()
 	switch {
+	case st.Registered && !st.Unreadable && st.Direct != nil:
+		fmt.Printf("Registration: listing %s, %s, no tunnel\n", st.ListingID, st.Direct.Describe())
 	case st.Registered && !st.Unreadable && st.HasTunnel:
 		fmt.Printf("Registration: listing %s, location %s, tunnel configured\n", st.ListingID, locationOrUnassigned(config.LocationLabel(st.Location)))
 		return

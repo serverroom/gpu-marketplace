@@ -79,9 +79,7 @@ func (a *gpuAgent) stopHosting() {
 		case <-time.After(stopGrace):
 		}
 	}
-	if a.tunnelCancel != nil {
-		a.tunnelCancel()
-	}
+	a.stopTunnel()
 	if a.controlSrv != nil {
 		a.controlSrv.Stop()
 	}

@@ -8,7 +8,7 @@ A P2P GPU marketplace agent that lets you list your server for others to rent: a
 
 1. **Install the agent** on your Linux server — with a GPU or without one
 2. Generate a **one-time registration code** in your dashboard and run `gpu-agent register --code <code>`
-3. The agent registers, then **tests latency** to the available locations and **prompts you to pick one** (closest preselected) — under the hood it opens a **reverse SSH tunnel** to that location's relay. `register` restarts the agent service, so the machine is online at once
+3. The agent registers, then **tests latency** to the available locations and **prompts you to pick one** (closest preselected) — under the hood it opens a **reverse SSH tunnel** to that location's relay. `register` restarts the agent service, so the machine is online at once. A machine whose own address is public may need no tunnel and no location choice: see [How renters reach your machine](#how-renters-reach-your-machine-private-relay-or-your-own-public-ip)
 4. The agent **finishes the machine's setup by itself**: it installs the microVM runtime, builds the rental image and runs a test rental — about 25-45 minutes, nothing to type; the control panel shows each step ([Automatic setup after linking](#automatic-setup-after-linking))
 5. **Configure your listing** in your dashboard; nothing is published until you do
 6. Once configured **and** the machine passes its hosting checks, your server appears on the **marketplace listing** for renters
@@ -170,6 +170,33 @@ machine off the market until its test passed again. A pair's own test (`check --
 for the manual commands, which stay available for support:
 `sudo gpu-agent runtime prepare --install-deps` (packages and image) and
 `sudo gpu-agent check --boot` (the test rental).
+
+## How renters reach your machine: Private relay or your own public IP
+
+From v0.3.14 you choose, for each machine, in your dashboard under **Marketplace, My Machines,
+Connection**:
+
+| Route | What it means |
+|---|---|
+| **Private relay** | Renters connect through our nearest location. Your address stays hidden and it works behind any home router. |
+| **Public IPv4** | Renters connect straight to the machine's own public IPv4 address. |
+| **Public IPv6** | Renters connect straight to its public IPv6 address. Renters whose network has no IPv6 cannot reach it. |
+| **Public IPv4 + IPv6** | Both: renters use whichever their network has. |
+
+A public route needs that kind of address on the machine itself, not on a router in front of
+it. The agent finds them by itself: the addresses the machine leaves by for the marketplace, and
+for IPv6 a stable one, never a temporary privacy address. It looks when it starts, every 10
+minutes, and at once when you change the route. Until you choose, a machine uses both public
+addresses when it has both, IPv4 when it has only that, and the relay otherwise, also when it has
+only a public IPv6 address.
+
+On a public route the agent serves its control channel on port **9101** over TLS, with a
+certificate it makes itself and the marketplace pins, and renters connect to port **2222** with
+an ordinary `ssh` command; there is no tunnel. The marketplace uses an address only once it has
+reached port 9101 there from the internet, so **let TCP ports 9101 and 2222 in from the
+internet**. If they are closed, or another program uses one of them, the machine stays on the
+relay and the dashboard says why. A rented machine changes route only once its rental has ended,
+unless its address changes, which the route follows at once. `gpu-agent status` shows the route.
 
 ## Updates
 

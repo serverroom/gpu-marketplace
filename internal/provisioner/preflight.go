@@ -14,6 +14,7 @@ import (
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/direct"
 	"github.com/serverroom/gpu-marketplace/internal/interconnect"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
 	"github.com/serverroom/gpu-marketplace/internal/pcidev"
@@ -465,17 +466,25 @@ var StorageDir = func(dataDir string) string {
 }
 
 // RelayAddrs resolves the relay this agent tunnels to, so the pair preflight can
-// refuse a ConnectX-7 port that is the host's own route to it. A variable so
-// tests never read this machine's tunnel config or DNS.
+// refuse a ConnectX-7 port that is the host's own route to it. On a machine
+// whose own address is public (internal/direct) there is no relay, and the
+// route that matters is the one to the marketplace, where its control channel
+// is reached from. A variable so tests never read this machine's tunnel config
+// or DNS.
 var RelayAddrs = func() []string {
-	cfg, err := register.LoadTunnelConfig()
-	if err != nil || cfg == nil || cfg.RelayHost == "" {
+	host := ""
+	if d, err := direct.Load(config.ConfigDir()); err == nil && d != nil {
+		host = register.MarketplaceHost()
+	} else if cfg, err := register.LoadTunnelConfig(); err == nil && cfg != nil {
+		host = cfg.RelayHost
+	}
+	if host == "" {
 		return nil
 	}
-	if ip := net.ParseIP(cfg.RelayHost); ip != nil {
+	if ip := net.ParseIP(host); ip != nil {
 		return []string{ip.String()}
 	}
-	addrs, err := net.LookupHost(cfg.RelayHost)
+	addrs, err := net.LookupHost(host)
 	if err != nil {
 		return nil
 	}

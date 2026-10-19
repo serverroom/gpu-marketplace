@@ -1,6 +1,8 @@
 package control
 
 import (
+	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -300,17 +303,33 @@ var rentalIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
 // ValidRentalID reports whether id is safe to use in host paths and commands.
 func ValidRentalID(id string) bool { return rentalIDPattern.MatchString(id) }
 
-// Server is the agent control-channel HTTP server. It binds 127.0.0.1 only; the
+// Server is the agent control-channel HTTP server. It binds 127.0.0.1; the
 // control plane reaches it through the relay's reverse tunnel. Every command is
 // bearer-authenticated with the token shared at register time (end-to-end — the
 // relay carries it as opaque bytes).
+//
+// On a machine whose own address is public (internal/direct) the same channel
+// is also served on that address, over TLS with the agent's own certificate,
+// which the marketplace pins: StartPublic. Then nothing stands between the
+// internet and the channel but TLS and the token.
 type Server struct {
 	token      string
 	prov       Provisioner
 	host       Host
 	httpServer *http.Server
 	listenAddr string
+
+	publicMu        sync.Mutex
+	public          []*http.Server
+	publicListeners []net.Listener
+
+	// checkConnection runs when the marketplace asks the agent to report its
+	// addresses again (its host picked another route); nil: the action is 404.
+	checkConnection func()
 }
+
+// SetConnectionCheck is what POST /connection/check runs, in the background.
+func (s *Server) SetConnectionCheck(f func()) { s.checkConnection = f }
 
 // SetHost gives the channel the agent's own controls (update, withdrawn).
 func (s *Server) SetHost(h Host) { s.host = h }
@@ -338,6 +357,7 @@ func New(listenAddr, token string, prov Provisioner) *Server {
 	mux.HandleFunc("/update", s.auth(s.handleUpdate))
 	mux.HandleFunc("/withdrawn", s.auth(s.handleWithdrawn))
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/connection/check", s.auth(s.handleConnectionCheck))
 	// The pair endpoints exist only where the provisioner has the pair
 	// runtime; anywhere else they are 404, which the control plane reads as a
 	// refusal.
@@ -371,11 +391,87 @@ func (s *Server) Start() error {
 }
 
 // Stop shuts the server down.
-func (s *Server) Stop() error { return s.httpServer.Close() }
+func (s *Server) Stop() error {
+	s.StopPublic()
+	return s.httpServer.Close()
+}
+
+// StartPublic serves the channel on addrs (the machine's public addresses,
+// host:port each) over TLS, beside the loopback listener, replacing the public
+// listeners there were. Either every address listens or none does.
+func (s *Server) StartPublic(addrs []string, config *tls.Config) error {
+	s.StopPublic()
+	var listeners []net.Listener
+	for _, addr := range addrs {
+		ln, err := tls.Listen("tcp", addr, config)
+		if err != nil {
+			for _, l := range listeners {
+				l.Close()
+			}
+			return fmt.Errorf("listen %s: %w", addr, err)
+		}
+		listeners = append(listeners, ln)
+	}
+	var servers []*http.Server
+	for i, ln := range listeners {
+		srv := &http.Server{
+			Handler:           s.httpServer.Handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       s.httpServer.ReadTimeout,
+			WriteTimeout:      s.httpServer.WriteTimeout,
+			MaxHeaderBytes:    16 << 10,
+		}
+		servers = append(servers, srv)
+		log.Printf("Control channel listening on %s (TLS)", addrs[i])
+		go func(srv *http.Server, ln net.Listener) {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				log.Printf("public control server error: %v", err)
+			}
+		}(srv, ln)
+	}
+	s.publicMu.Lock()
+	s.public, s.publicListeners = servers, listeners
+	s.publicMu.Unlock()
+	return nil
+}
+
+// StopPublic closes the public listeners, if there are any: by hand as well
+// as through their servers, since a server closed before its Serve has
+// started does not know its listener.
+func (s *Server) StopPublic() {
+	s.publicMu.Lock()
+	old, oldListeners := s.public, s.publicListeners
+	s.public, s.publicListeners = nil, nil
+	s.publicMu.Unlock()
+	for _, srv := range old {
+		srv.Close()
+	}
+	for _, ln := range oldListeners {
+		ln.Close()
+	}
+}
+
+// handleConnectionCheck answers at once and looks again in the background:
+// the marketplace waits for the agent's report, not for this answer.
+func (s *Server) handleConnectionCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.checkConnection == nil {
+		http.Error(w, "not available", http.StatusNotFound)
+		return
+	}
+	go s.checkConnection()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"status": "checking"})
+}
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.token == "" || r.Header.Get("Authorization") != "Bearer "+s.token {
+		// Compared in constant time: on a public address anybody can try.
+		if s.token == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

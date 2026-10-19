@@ -247,7 +247,7 @@ func runCheck(svc service.Service, args []string) {
 	fmt.Println("  - every private and special range: 10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, 127/8, multicast, fc00::/7, fe80::/10")
 	fmt.Println("  - every network configured on this machine, whatever its addressing (your LAN, your NAS)")
 	fmt.Println("  - every connection to this machine itself, except DHCP and IPv6 neighbour discovery")
-	fmt.Println("  - every connection into the tenant from your network; the renter's SSH arrives through the agent's tunnel")
+	fmt.Println("  - every connection into the tenant from your network; the renter's SSH arrives through the agent, over its tunnel or at this machine's public address")
 	fmt.Println("and lets the tenant out to the internet only, through NAT.")
 	if nets, err := netguard.HostNetworks(); err == nil {
 		fmt.Println()

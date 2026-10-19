@@ -19,6 +19,7 @@ import (
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
 	"github.com/serverroom/gpu-marketplace/internal/control"
+	"github.com/serverroom/gpu-marketplace/internal/direct"
 	"github.com/serverroom/gpu-marketplace/internal/sshtunnel"
 	"github.com/serverroom/gpu-marketplace/internal/stats"
 	"github.com/serverroom/gpu-marketplace/internal/tunnel"
@@ -29,14 +30,19 @@ import (
 // No relay preference here: the code resolves to an account (and with it the
 // brand and its relay set) only server-side, so relay choice happens after.
 type RegisterRequest struct {
-	Code         string      `json:"code"`
-	AgentPubkey  string      `json:"agent_pubkey"`
-	Specs        interface{} `json:"specs"`
-	GPUModels    []string    `json:"gpu_models"`
-	Reachability string      `json:"reachability"`
+	Code        string      `json:"code"`
+	AgentPubkey string      `json:"agent_pubkey"`
+	Specs       interface{} `json:"specs"`
+	GPUModels   []string    `json:"gpu_models"`
+	// Reachability is "public" when the machine leaves by a public IPv4
+	// address of its own, else "nat".
+	Reachability string `json:"reachability"`
 	// Capability is whether this machine can host a rental, so the marketplace
 	// never offers one that cannot.
 	Capability *control.Capability `json:"capability,omitempty"`
+	// Direct reports the machine's public addresses, so it may need no tunnel
+	// (internal/direct); the agent answers /health on them while it waits.
+	Direct *direct.Report `json:"direct,omitempty"`
 }
 
 // DecodeCode unpacks the registration code into the POST URL and the inner
@@ -91,6 +97,14 @@ type RegisterResponse struct {
 	// planes older than this agent; endpointURL derives them from SelectURL.
 	CapabilityURL string `json:"capability_url,omitempty"`
 	DeregisterURL string `json:"deregister_url,omitempty"`
+	// Connection is the route the machine uses (relay, ipv4, ipv6, dual) and
+	// Direct its public addresses when it is not the relay: no tunnel then.
+	// DirectRefused says, per family, why a reported address could not be
+	// used. DirectURL is where the service reports its addresses later.
+	Connection    string            `json:"connection,omitempty"`
+	Direct        *direct.Route     `json:"direct,omitempty"`
+	DirectRefused map[string]string `json:"direct_refused,omitempty"`
+	DirectURL     string            `json:"direct_url,omitempty"`
 }
 
 // SelectRelayRequest tells the control plane which relay the provider picked.
@@ -104,6 +118,9 @@ type SelectRelayResponse struct {
 	Status       string      `json:"status"`
 	Tunnel       *TunnelInfo `json:"tunnel,omitempty"`
 	ControlToken string      `json:"control_token,omitempty"`
+	// Direct: the machine is direct, and the location is only its nearest.
+	Connection string        `json:"connection,omitempty"`
+	Direct     *direct.Route `json:"direct,omitempty"`
 }
 
 // Local ports the relay forwards expose back over the tunnel: the agent control
@@ -193,14 +210,31 @@ func Run(code string, capability control.Capability) error {
 		AgentPubkey:  pub,
 		Specs:        st,
 		GPUModels:    gpuModels(st),
-		Reachability: "unknown",
+		Reachability: "nat",
 		Capability:   &capability,
+	}
+
+	// A machine that leaves by public addresses of its own may need no
+	// tunnel: report them, and answer /health on them until the marketplace
+	// has decided whether it can reach the machine there.
+	stopHealth := func() {}
+	if ipv4, ipv6 := direct.Detect(direct.HostOf(postURL)); ipv4 != "" || ipv6 != "" {
+		req.Reachability = "public"
+		addrs := strings.Join(nonEmptyAddrs(ipv4, ipv6), " and ")
+		report, stop, oerr := reportAddresses(ipv4, ipv6)
+		if oerr != nil {
+			fmt.Printf("This machine has a public address (%s), but %v; it connects through one of our locations instead.\n", addrs, oerr)
+		} else {
+			req.Direct, stopHealth = report, stop
+			fmt.Printf("This machine has a public address (%s): asking the marketplace whether renters can reach it there.\n", addrs)
+		}
 	}
 
 	// The POST endpoint is decoded from the code (which also carries the owner's
 	// account, resolved server-side), so the agent hardcodes no URL.
 	fmt.Println("Registering ...")
 	resp, err := Submit(postURL, req)
+	stopHealth()
 	if err != nil {
 		return err
 	}
@@ -214,6 +248,7 @@ func Run(code string, capability control.Capability) error {
 		Relays:        resp.Relays,
 		CapabilityURL: resp.CapabilityURL,
 		DeregisterURL: resp.DeregisterURL,
+		DirectURL:     resp.DirectURL,
 	}
 	if err := saveRegistration(reg); err != nil {
 		return fmt.Errorf("save registration: %w", err)
@@ -224,6 +259,19 @@ func Run(code string, capability control.Capability) error {
 		if err := saveControlToken(resp.ControlToken); err != nil {
 			return fmt.Errorf("save control token: %w", err)
 		}
+	}
+
+	for _, family := range []string{"ipv4", "ipv6"} {
+		if why := resp.DirectRefused[family]; why != "" {
+			fmt.Printf("\nThe marketplace could not use this machine's public %s address: %s.\n", map[string]string{"ipv4": "IPv4", "ipv6": "IPv6"}[family], why)
+		}
+	}
+	if len(resp.DirectRefused) > 0 {
+		fmt.Printf("To have renters connect directly, let TCP ports %d and %d in from the internet; the agent reports the address again by itself.\n\n", direct.ControlPort, direct.SSHPort)
+	}
+	if resp.Direct != nil && resp.Connection != "" && resp.Connection != direct.Relay {
+		resp.Direct.Connection = resp.Connection
+		return finishDirect(reg, resp)
 	}
 
 	tun := resp.Tunnel
@@ -285,6 +333,80 @@ func Run(code string, capability control.Capability) error {
 		fmt.Println("Continue the setup on your dashboard.")
 	}
 	return nil
+}
+
+func nonEmptyAddrs(values ...string) []string {
+	var out []string
+	for _, v := range values {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// reportAddresses is the report of this machine's public addresses, with
+// /health answered on them until stop is called: both ports free on each, and
+// the agent's own certificate made (or read) for the control channel.
+func reportAddresses(ipv4, ipv6 string) (*direct.Report, func(), error) {
+	report := &direct.Report{IPv4: ipv4, IPv6: ipv6, ControlPort: direct.ControlPort, SSHPort: direct.SSHPort}
+	if err := direct.CanListen(report.Addrs(), direct.ControlPort, direct.SSHPort); err != nil {
+		return nil, nil, err
+	}
+	cert, fingerprint, err := direct.Cert(config.ConfigDir())
+	if err != nil {
+		return nil, nil, fmt.Errorf("its certificate could not be made: %w", err)
+	}
+	report.CertSHA256 = fingerprint
+	stop, err := direct.ServeHealth(direct.Route{IPv4: ipv4, IPv6: ipv6, ControlPort: direct.ControlPort}.ControlAddrs(), cert)
+	if err != nil {
+		return nil, nil, fmt.Errorf("port %d could not be opened: %w", direct.ControlPort, err)
+	}
+	return report, stop, nil
+}
+
+// finishDirect completes a register the marketplace answered with a direct
+// address: no tunnel and no question to the host. The nearest location is
+// still picked, without asking, for the speed test.
+func finishDirect(reg Registration, resp *RegisterResponse) error {
+	if err := direct.Save(config.ConfigDir(), *resp.Direct); err != nil {
+		return fmt.Errorf("save the direct address: %w", err)
+	}
+	if hubs := relayOptions(resp); resp.SelectURL != "" && len(hubs) > 0 {
+		if hub := closestHub(hubs); hub != nil {
+			if _, err := selectRelayWithRetry(resp.SelectURL, LoadControlToken(), resp.ListingID, hub.Name); err == nil {
+				reg.Hub = hub.Name
+			} else {
+				fmt.Printf("Note: the nearest location could not be recorded (%v); the speed test waits for it.\n", err)
+			}
+		}
+	}
+	if err := saveRegistration(reg); err != nil {
+		return fmt.Errorf("save registration: %w", err)
+	}
+	fmt.Printf("\nRegistered! listing_id=%s status=%s\n", resp.ListingID, resp.Status)
+	fmt.Printf("%s: renters connect straight to %s on port %d, with no tunnel through us.\n",
+		direct.Labels[resp.Direct.Connection], strings.Join(resp.Direct.Addrs(), " and "), resp.Direct.SSHPort)
+	fmt.Printf("Keep TCP ports %d and %d open to the internet. You can choose another route (Private relay, Public IPv4, Public IPv6, or both) in your dashboard, under Marketplace, My Machines.\n", resp.Direct.ControlPort, resp.Direct.SSHPort)
+	fmt.Println()
+	fmt.Println("Continue the setup on your dashboard.")
+	return nil
+}
+
+// closestHub is the location with the lowest latency, chosen without asking:
+// for a direct machine it only names where the speed test runs.
+func closestHub(hubs []config.Hub) *config.Hub {
+	results := tunnel.TestAllHubs(hubs)
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Success != results[j].Success {
+			return results[i].Success
+		}
+		return results[i].AvgMs < results[j].AvgMs
+	})
+	if len(results) == 0 {
+		return nil
+	}
+	return &results[0].Hub
 }
 
 // RetrySelection re-runs the location choice and assignment from the persisted
@@ -517,6 +639,7 @@ type Registration struct {
 
 	CapabilityURL string `json:"capability_url,omitempty"`
 	DeregisterURL string `json:"deregister_url,omitempty"`
+	DirectURL     string `json:"direct_url,omitempty"`
 }
 
 // RegistrationPath is where the register-time state is persisted.
@@ -554,8 +677,10 @@ func LoadRegistration() (*Registration, error) {
 type State struct {
 	Registered bool
 	HasTunnel  bool
-	ListingID  string
-	Location   string
+	// Direct: the machine is reached at its own public addresses, no tunnel.
+	Direct    *direct.Route
+	ListingID string
+	Location  string
 
 	// Unreadable is set when the registration exists but this process may not
 	// read it — `gpu-agent status` run without sudo, since the state files are
@@ -571,6 +696,7 @@ func LoadState() State {
 	var st State
 	st.Registered = fileExists(RegistrationPath())
 	st.HasTunnel = fileExists(TunnelConfigPath())
+	st.Direct, _ = direct.Load(config.ConfigDir())
 	if !st.Registered {
 		return st
 	}

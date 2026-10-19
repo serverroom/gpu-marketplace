@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/serverroom/gpu-marketplace/internal/control"
@@ -126,8 +127,54 @@ func (p *Provisioner) openForward(listen, target string) (stopper, error) {
 	return startForward(listen, target)
 }
 
-// SSHListen is where the renter's SSH arrives from the relay tunnel.
-var SSHListen = net.JoinHostPort("127.0.0.1", strconv.Itoa(register.MicroVMSSHPort))
+// LoopbackSSH is where the renter's SSH arrives from the relay tunnel.
+var LoopbackSSH = net.JoinHostPort("127.0.0.1", strconv.Itoa(register.MicroVMSSHPort))
+
+// sshListen is where the renter's SSH arrives: LoopbackSSH, or on a machine
+// whose own addresses are public (internal/direct) those addresses (IPv4,
+// IPv6 or both), where renters connect with no relay in between. Read when a
+// rental's forward opens, so a change reaches the next rental, never one
+// already running.
+var sshListen atomic.Value
+
+// SetSSHListen sets where the next rental's SSH forward listens; nothing is
+// LoopbackSSH.
+func SetSSHListen(addrs ...string) { sshListen.Store(append([]string(nil), addrs...)) }
+
+// SSHListen is where the next rental's SSH forward listens.
+func SSHListen() []string {
+	if addrs, ok := sshListen.Load().([]string); ok && len(addrs) > 0 {
+		return addrs
+	}
+	return []string{LoopbackSSH}
+}
+
+// forwards is the renter's SSH forward on several addresses, stopped together.
+type forwards []stopper
+
+func (f forwards) Stop() {
+	for _, s := range f {
+		s.Stop()
+	}
+}
+
+// openForwards opens the renter's SSH forward on every address in listen, or
+// on none of them.
+func (p *Provisioner) openForwards(listen []string, target string) (stopper, error) {
+	var opened forwards
+	for _, addr := range listen {
+		fwd, err := p.openForward(addr, target)
+		if err != nil {
+			opened.Stop()
+			return nil, err
+		}
+		opened = append(opened, fwd)
+	}
+	if len(opened) == 1 {
+		return opened[0], nil
+	}
+	return opened, nil
+}
 
 // machineNotes is what the host should know about this machine that does not
 // keep it from renting (control.Capability.Notes).
@@ -602,7 +649,7 @@ func (p *Provisioner) startNoting(machine Machine, o vmrt.StartOptions, noteInUs
 	}
 	var fwd stopper
 	if err == nil {
-		fwd, err = p.openForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
+		fwd, err = p.openForwards(SSHListen(), net.JoinHostPort(vmrt.GuestIP, "22"))
 		if err != nil {
 			err = fmt.Errorf("open the renter's SSH forward: %w", err)
 			machine.Stop()
@@ -728,7 +775,7 @@ func (p *Provisioner) resume() (freed bool) {
 		p.status = StatusDirty
 		p.dirtyLocked("a rental's cleanup from before the agent started did not verify")
 	case p.machine.Alive():
-		fwd, err := p.openForward(SSHListen, net.JoinHostPort(vmrt.GuestIP, "22"))
+		fwd, err := p.openForwards(SSHListen(), net.JoinHostPort(vmrt.GuestIP, "22"))
 		if err != nil {
 			p.lastErr = "reopen the renter's SSH forward: " + err.Error()
 		} else {
