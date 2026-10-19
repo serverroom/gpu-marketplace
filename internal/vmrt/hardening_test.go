@@ -3,6 +3,7 @@ package vmrt
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -305,6 +306,54 @@ func TestTheRentalIsHeldToItsMemoryOnTheGPU(t *testing.T) {
 	rt, h = guardHost(t, 2*gib, "401, [N/A]\n", 2000)
 	if v, _ = rt.GuardMemory(); v.KilledPID != 401 {
 		t.Errorf("unknown GPU memory, machine nearly out: %+v", v)
+	}
+}
+
+// memStat gives the rental's cgroup a memory.stat: file is its page cache,
+// shmem its tmpfs (part of file).
+func memStat(h *fakehost.Host, anon, file, shmem int64) {
+	const cg = "/machine.slice/libpod-abc.scope"
+	h.Files["/sys/fs/cgroup"+cg+"/memory.stat"] = []byte(fmt.Sprintf(
+		"anon %d\nfile %d\nkernel 104857600\nsock 0\nshmem %d\nfile_mapped %d\nactive_file %d\ninactive_file %d\n",
+		anon, file, shmem, file-shmem, (file-shmem)/2, (file-shmem)-(file-shmem)/2))
+}
+
+func TestAModelMappedFromItsFileIsNotCountedTwice(t *testing.T) {
+	// A renter with two llama-server models (40 + 30 GiB GGUF, mmap'd) under a
+	// ~109 GiB rental: the cgroup holds 4 GiB of its own and 70 GiB of the
+	// models' file pages; the GPU holds the 70 GiB the models were copied to.
+	// memory.current 74 GiB + 70 GiB on the GPU used to read as 144 GiB, and the
+	// second model was stopped. What the rental holds is 4 + 70: no kill.
+	rt, h := guardHost(t, 74*gib, "401, 40960\n402, 30720\n900, 4096\n", 30000)
+	memStat(h, 4*gib-100<<20, 70*gib, 0)
+	v, err := rt.GuardMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.KilledPID != 0 || h.Ran("run kill") {
+		t.Errorf("mapped models within the limit were stopped: %+v", v)
+	}
+	if v.RentalMB != 4*1024+70*1024 {
+		t.Errorf("RentalMB = %d, want %d (page cache left out)", v.RentalMB, 4*1024+70*1024)
+	}
+
+	// A real overrun: the same cache, but 45 GiB of the rental's own (a big
+	// heap, and 5 GiB in /dev/shm, which is shmem and stays counted) and the GPU
+	// at 70 GiB: 115 GiB, past its ~109. The biggest GPU process goes.
+	rt, h = guardHost(t, 115*gib, "401, 40960\n402, 30720\n900, 4096\n", 30000)
+	memStat(h, 40*gib, 75*gib, 5*gib)
+	if v, _ = rt.GuardMemory(); v.KilledPID != 401 || !h.Ran("run kill -KILL 401") || h.Ran("run kill -KILL 900") {
+		t.Errorf("a real overrun: %+v; want 401 stopped", v)
+	}
+	if v.RentalMB != 45*1024+70*1024 {
+		t.Errorf("RentalMB = %d, want %d", v.RentalMB, 45*1024+70*1024)
+	}
+
+	// The cache does not hide the machine running out: the floor still applies.
+	rt, h = guardHost(t, 74*gib, "401, 40960\n402, 30720\n", 3000)
+	memStat(h, 4*gib, 70*gib, 0)
+	if v, _ = rt.GuardMemory(); v.KilledPID != 401 || !strings.Contains(v.Reason, "memory free") {
+		t.Errorf("machine nearly out: %+v", v)
 	}
 }
 

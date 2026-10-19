@@ -18,11 +18,24 @@ import (
 // Either way the rental's biggest GPU process is stopped (SIGKILL), as the
 // kernel's out-of-memory killer stops a process that passes --memory. The host's
 // own processes are never touched.
+//
+// The container's own memory leaves out its page cache: memory.current counts
+// the files its processes have read, which the kernel drops whenever memory is
+// short. llama.cpp maps a model's weights from its file and copies them to the
+// GPU, so counting the cache would count each loaded model twice, and a renter
+// whose two models fit easily was stopped (2026-10-19). What stays counted is
+// what the rental holds: anonymous memory, the kernel's for it, and its tmpfs
+// (/dev/shm, /tmp: shmem, which nothing reclaims without swap). The GPU's
+// allocations are not in memory.current at all -- were they charged to the
+// cgroup, --memory would have stopped the 40 GiB -- so they are not counted
+// twice either. The machine's floor reads MemAvailable, which already counts the
+// cache as free.
 
 // MemoryVerdict is one look by GuardMemory: what the rental held, and the
 // process it stopped (0: none).
 type MemoryVerdict struct {
-	// RentalMB is the container's own memory plus its GPU memory; -1 when
+	// RentalMB is the container's own memory (page cache left out) plus its
+	// GPU memory; -1 when
 	// the GPU does not say what a process holds.
 	RentalMB  int64
 	LimitMB   int64
@@ -65,7 +78,7 @@ func (rt *ContainerRuntime) GuardMemory() (MemoryVerdict, error) {
 	if cgroup == "" {
 		return v, nil
 	}
-	own, err := readInt(rt.h, "/sys/fs/cgroup"+cgroup+"/memory.current")
+	own, err := cgroupHeldBytes(rt.h, "/sys/fs/cgroup"+cgroup)
 	if err != nil {
 		return v, fmt.Errorf("read the rental's memory: %w", err)
 	}
@@ -118,6 +131,44 @@ func (rt *ContainerRuntime) GuardMemory() (MemoryVerdict, error) {
 	}
 	v.KilledPID, v.KilledMB = victim.pid, victim.mb
 	return v, nil
+}
+
+// cgroupHeldBytes is what a cgroup holds: memory.current less its page cache
+// (memory.stat's file, less shmem, which is tmpfs and stays). Without
+// memory.stat it is memory.current, as before.
+func cgroupHeldBytes(h Host, dir string) (int64, error) {
+	cur, err := readInt(h, dir+"/memory.current")
+	if err != nil {
+		return 0, err
+	}
+	data, err := h.ReadFile(dir + "/memory.stat")
+	if err != nil {
+		return cur, nil
+	}
+	var file, shmem int64
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		n, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch f[0] {
+		case "file":
+			file = n
+		case "shmem":
+			shmem = n
+		}
+	}
+	if cache := file - shmem; cache > 0 {
+		cur -= cache
+	}
+	if cur < 0 {
+		cur = 0
+	}
+	return cur, nil
 }
 
 // procInCgroup reports whether a host process lives in cgroup (or below it).
