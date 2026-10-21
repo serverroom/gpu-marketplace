@@ -1052,3 +1052,13 @@ they rent.
   kinds of test boot and only for its version and kernel, the /provision route (limit passed on,
   a bad one refused, an empty one ignored, 501 without a LimitedProvisioner), and a machine that has
   not proven it refusing a limited rental. The existing suite passes unchanged.
+- On SID 6093 (Bucharest, a Dell of ours listed on Primcast, microVM, direct public IPv4), 21 October 2026: woken
+  for it, moved to v0.3.19 by name while it was a pre-release; its own test boot found the limit usable four minutes
+  later. Test rental 29 (free, renter uid 1) under 50 Mbit/s down, 20 up and 1 GB a month: seven 100 MB downloads
+  from our Amsterdam speed test inside the rental at 46.7 Mbit/s each; 40 MB pulled from the rental over the renter's
+  own SSH at 18.2 Mbit/s (SSH's own setup included); /status reported the use, and the rental page showed it. The
+  allowance ran out during the eighth download: that one averaged 22 Mbit/s, the ninth ran at 9.4, and an upload over
+  SSH at 8.6 (10 each way after the allowance); /status said slowed. Teardown clean. Our Bucharest speed test is in the
+  same public subnet as that server, which the fence keeps from a rental: measure from another location.
+- Not checked on hardware: a container rental (DGX Spark, Windows, macOS), the u32 fallback, the relay route (6093 is
+  direct), and the next 30 days giving the speed back (unit tests only).
