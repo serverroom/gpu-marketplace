@@ -198,6 +198,34 @@ internet**. If they are closed, or another program uses one of them, the machine
 relay and the dashboard says why. A rented machine changes route only once its rental has ended,
 unless its address changes, which the route follows at once. `gpu-agent status` shows the route.
 
+## Bandwidth: a speed limit and a monthly data allowance
+
+From v0.3.19 you can hold each machine's rentals to a speed and a monthly amount of data, in
+your dashboard under **Marketplace, My Machines, Rental bandwidth**. Renters see what you set on
+the machine's card and order page, beside its measured line speed, before they rent it.
+
+| Setting | What it does |
+|---|---|
+| **Download** | The most a rental receives, in Mbit/s: what it downloads, and what its renter uploads to it. |
+| **Upload** | The most a rental sends, in Mbit/s. |
+| **Monthly data allowance** | How much a rental may move in and out together in each 30 days of its rental, in GB (1 GB = 1,000,000,000 bytes). Once it is used, the rental runs at 10 Mbit/s each way (or your own limit, where that is slower) until its next 30 days begin. |
+
+Leave a field empty for no limit. A change applies to the machine's next rental: a rental that
+is running keeps what it was rented with.
+
+The agent holds a rental to these on the rental's own network device on your machine, which every
+byte the renter moves crosses: the internet, and the renter's SSH, through the relay or straight
+to your machine. The renter cannot change it: a rental's root user is root inside its own VM, and
+a container rental has no network admin rights at all. On Windows and macOS the same limit is set
+in the agent's own Linux (WSL 2, or the agent's VM), one layer above the rental.
+
+The setting is offered once your machine's test boot has shown that it can hold a rental to one:
+the agent sets a limit on its test rental's device and reads it back. It uses Linux's `tc`
+(part of iproute2) and the kernel's `tbf`, `ingress` and `police` traffic control. If a kernel
+lacks them, `gpu-agent check` says so under **Bandwidth**, and the dashboard says why the setting
+is not available. While a limited rental runs, `/status` reports how much of this month's
+allowance it has used and when the month ends.
+
 ## Updates
 
 From v0.2.0 the agent **keeps itself up to date**. Every capability report it sends

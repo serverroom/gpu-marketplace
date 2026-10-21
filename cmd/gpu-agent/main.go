@@ -164,6 +164,9 @@ func (a *gpuAgent) Start(s service.Service) error {
 		// A container rental on a GPU that shares the machine's memory (a GB10)
 		// is held to its memory by the agent, which --memory alone cannot do.
 		go a.prov.GuardMemory(bg, a.warn)
+		// A rental held to its host's monthly data allowance is counted, and
+		// slowed once it is used (provisioner/netlimit.go).
+		go a.prov.KeepNetLimits(bg, a.warn)
 	}
 
 	// Legacy local stats server (best-effort; superseded by push-over-tunnel).

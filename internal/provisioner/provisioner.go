@@ -592,6 +592,29 @@ func (p *Provisioner) Provision(rentalID, renterPubkey string) error {
 // refused), and the answer is the pending rental: the host is told on the
 // machine, and the rental starts as soon as the machine is free.
 func (p *Provisioner) ProvisionBy(rentalID, renterPubkey string, startBy int64) (*control.PendingRental, error) {
+	return p.provisionWith(rentalID, renterPubkey, startBy, nil)
+}
+
+// ProvisionLimited is ProvisionBy for a rental held to the host's bandwidth
+// limit (netlimit.go). A machine whose test boot has not shown it can hold a
+// rental to one refuses it: the host asked for a limit, and a rental without
+// it is not what they listed.
+func (p *Provisioner) ProvisionLimited(rentalID, renterPubkey string, startBy int64, limit control.NetLimit) (*control.PendingRental, error) {
+	if c := p.Capability(); c.NetLimits == nil || !c.NetLimits.Usable {
+		why := "its test boot has not tried yet"
+		if c.NetLimits != nil && c.NetLimits.Why != "" {
+			why = c.NetLimits.Why
+		}
+		return nil, control.Unavailable("this machine cannot hold a rental to a bandwidth limit: %s", why)
+	}
+	l := vmrt.NetLimit{DownMbps: limit.DownMbps, UpMbps: limit.UpMbps, MonthlyGB: limit.MonthlyGB, AfterMbps: limit.AfterMbps}
+	if err := l.Validate(); err != nil {
+		return nil, control.Invalid("net_limit: %v", err)
+	}
+	return p.provisionWith(rentalID, renterPubkey, startBy, &l)
+}
+
+func (p *Provisioner) provisionWith(rentalID, renterPubkey string, startBy int64, limit *vmrt.NetLimit) (*control.PendingRental, error) {
 	c := p.Capability()
 	p.mu.Lock()
 	vendor := p.vendor
@@ -629,7 +652,7 @@ func (p *Provisioner) ProvisionBy(rentalID, renterPubkey string, startBy int64) 
 		p.mu.Unlock()
 		return nil, fmt.Errorf("this machine is %s, not free", status)
 	}
-	req := &pendingRecord{RentalID: rentalID, RenterPubkey: renterPubkey, StartBy: startBy}
+	req := &pendingRecord{RentalID: rentalID, RenterPubkey: renterPubkey, StartBy: startBy, NetLimit: limit}
 	if use.Busy() || desktop {
 		view, err := p.waitLocked(req, use) // unlocks
 		if err == nil && desktop && p.desktopHold(req) {
@@ -648,7 +671,7 @@ func (p *Provisioner) ProvisionBy(rentalID, renterPubkey string, startBy int64) 
 	}
 	p.mu.Unlock()
 
-	o := vmrt.StartOptions{ID: rentalID, Pubkey: renterPubkey}
+	o := vmrt.StartOptions{ID: rentalID, Pubkey: renterPubkey, NetLimit: limit}
 	if !p.async {
 		return nil, p.start(machine, o)
 	}

@@ -231,6 +231,15 @@ func (rt *ContainerRuntime) Start(o StartOptions) (err error) {
 	if err != nil {
 		return fmt.Errorf("attach container network: %w", err)
 	}
+	if o.NetLimit != nil && !o.NetLimit.Empty() {
+		st.NetLimit, err = startNetLimit(rt.h, st.Net.VethHost, *o.NetLimit, time.Now())
+		if serr := save(); err == nil {
+			err = serr
+		}
+		if err != nil {
+			return err
+		}
+	}
 
 	if o.NoWait {
 		return nil

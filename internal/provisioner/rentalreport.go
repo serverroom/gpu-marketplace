@@ -13,11 +13,16 @@ type RentalReport struct {
 	Usage    *vmrt.Usage        `json:"usage,omitempty"`
 	SSH      *vmrt.SessionStats `json:"ssh,omitempty"`
 	HostKeys *vmrt.HostKeys     `json:"host_keys,omitempty"`
+	// NetLimit is the host's bandwidth limit the rental is held to and how
+	// much of this month's allowance it used (v0.3.19); absent without one.
+	NetLimit *vmrt.NetLimitReport `json:"net_limit,omitempty"`
 }
 
 type usageReader interface{ Usage() *vmrt.Usage }
 
 type hostKeyReader interface{ HostKeys() *vmrt.HostKeys }
+
+type netLimitReader interface{ NetLimitReport() *vmrt.NetLimitReport }
 
 type sessionCounter interface{ Sessions() vmrt.SessionStats }
 
@@ -40,7 +45,10 @@ func (p *Provisioner) RentalReport() interface{} {
 	if k, ok := machine.(hostKeyReader); ok {
 		r.HostKeys = k.HostKeys()
 	}
-	if r.Usage == nil && r.SSH == nil && r.HostKeys == nil {
+	if n, ok := machine.(netLimitReader); ok {
+		r.NetLimit = n.NetLimitReport()
+	}
+	if r.Usage == nil && r.SSH == nil && r.HostKeys == nil && r.NetLimit == nil {
 		return nil
 	}
 	return &r

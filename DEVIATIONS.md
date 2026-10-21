@@ -995,3 +995,60 @@ in /run/hostkeys).
 - Not checked on hardware: the container read (no container host on v0.3.15 or later yet), and the relay route
   (its known_hosts naming was checked with a real ssh client, not through a relay).
 
+
+# v0.3.19: a host holds its rentals to a speed and a monthly data allowance
+
+Built on v0.3.18 (main 0d6a55e). Asked for on 20 October 2026: a host whose machines share one
+line (a fleet of ARM boards behind a 2 Gbit/s uplink) wanted to know whether a rental's bandwidth
+can be held, per machine; the host sets the numbers in the dashboard and renters see them before
+they rent.
+
+1. **Held on the rental's own device on the host, which the renter cannot reach** (vmrt/netlimit.go):
+   the tap a microVM is attached to, the host's end of a container's veth. Every byte the renter
+   moves crosses it: the internet, the renter's SSH through the relay, and a direct connection.
+   Root in a microVM is root inside the VM only; a container has no network admin right. On
+   Windows and macOS the device is in the agent's own Linux (WSL 2, the agent's VM), and the same
+   commands run there through the runtime's host (vmrt.ExecHost).
+2. **To the rental: tbf; from it: an ingress police with a quarter of a second of burst.** Linux
+   can queue only what it sends, so the rental's upload, which the host receives, can only be
+   dropped over the rate. The burst decides how close TCP gets to the rate. Measured with a TCP
+   sender between two network namespaces on Linux 7.0 (buildv5, 21 October 2026): tbf 48.2 of 50
+   and 481 of 500 Mbit/s; police 19.6 of 20 and 294 of 300 with a quarter second of burst, 9.6 and
+   146 with a tenth, 20.8 and 308 with half. HTB was tried first and stalled a TCP stream on a veth
+   with segmentation offload on; tbf with a bucket of at least 64 KiB does not. An IFB device
+   shaping the upload gave 19.2 and 288: no better than the police, and one more kernel module.
+   The police's packet size limit is 64 KiB so a merged (GRO) packet is measured, not dropped.
+   matchall is used where the kernel has it (4.8 and later), u32 matching every packet otherwise.
+3. **The allowance is per 30 days of a rental, counted from its start, both directions together**
+   (1 GB = 10^9 bytes). A rental that has used it runs at `after_mbps` each way (10 when the
+   marketplace sends none, or the host's own limit where that is slower) until its next 30 days;
+   then its own limits come back. `KeepNetLimits` looks every 30 seconds. A rental shorter than 30
+   days has the whole allowance for its time.
+4. **The count is written to its own file, net-usage.json, never to rental.json.** A look that loses
+   a race with a teardown could otherwise write back a rental.json that says a rental is here, and
+   the machine would refuse its next renter. A net-usage.json of another rental is ignored, and the
+   rental is read again right before its speed is changed.
+5. **A rental whose limit cannot be put in place does not start** (the same order as the fence: the
+   limit is set before the VM boots, or before the container's sshd is waited for). The host asked
+   for it, and a rental without it is not what they listed. The marketplace sends a limit only to a
+   machine whose capability says it is usable, so this is the unexpected case.
+6. **Offered only once a test boot proved it** (`net-limit.json`, for that agent version and kernel,
+   like the CPU layout's record): the test rental's device is held to 900 Mbit/s each way, `tc`
+   shows both back, and the limit is taken off again. A failure never fails the test boot: the
+   machine rents without the setting. The capability carries `net_limits {usable, pending, why}`;
+   `gpu-agent check` prints it under **Bandwidth**.
+7. **No change to an existing interface.** `/provision` takes `net_limit` and calls the new
+   `control.LimitedProvisioner`; a provisioner without it answers 501 rather than ignoring the
+   limit. `/provision` still accepts fields it does not know, so the marketplace must not send a
+   limit to an agent up to v0.3.18, which would drop it silently: it reads `net_limits` first.
+8. **Not for linked pairs.** A pair's request (`/pair/provision`) is strict and carries no limit.
+
+## Checked
+- Unit tests (written for the change, run, and not committed): the tc arguments and their bursts,
+  the u32 fallback, no tc at all without a limit, a microVM's limit set after its tap and before it
+  boots, a container's after its veth, a start that fails when the limit cannot be set (and leaves
+  no state), the allowance (counted, slowed once, not again, kept across a device whose count went
+  back, given back at the next 30 days), another rental's count ignored, the proof recorded by both
+  kinds of test boot and only for its version and kernel, the /provision route (limit passed on,
+  a bad one refused, an empty one ignored, 501 without a LimitedProvisioner), and a machine that has
+  not proven it refusing a limited rental. The existing suite passes unchanged.

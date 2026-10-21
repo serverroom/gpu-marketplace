@@ -186,6 +186,11 @@ func (rt *ContainerRuntime) SelfTestContext(ctx context.Context, version string)
 		return fail(problem)
 	}
 	sshOpened := true
+	// Whether this machine can hold a rental to a host's bandwidth limit: the
+	// test container's own veth, held to one and read back (netlimit.go).
+	if st, _ := LoadState(rt.h, rt.spec.DataDir); st != nil && st.Net.VethHost != "" {
+		ProveNetLimit(rt.h, rt.spec.DataDir, version, st.Net.VethHost)
+	}
 
 	// Run the probe inside the live container and read its markers (its output
 	// is captured whether or not exec reports an error). Bounded by `timeout` so

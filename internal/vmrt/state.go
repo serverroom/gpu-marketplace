@@ -46,6 +46,9 @@ type State struct {
 	// HostKeys are the rental's own SSH host keys (public halves only), read
 	// once its sshd answered and before the renter was let in (hostkeys.go).
 	HostKeys *HostKeys `json:"host_keys,omitempty"`
+	// NetLimit is the host's bandwidth limit the rental is held to, and where
+	// (netlimit.go); nil for a rental without one.
+	NetLimit *NetLimitStart `json:"net_limit,omitempty"`
 	// Dirty is set when a teardown did not verify. The state stays on disk, so
 	// the machine refuses the next rental until it is cleaned up.
 	Dirty       bool     `json:"dirty"`

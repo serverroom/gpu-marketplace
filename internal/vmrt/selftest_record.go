@@ -371,6 +371,9 @@ func (rt *Runtime) selfTestOnce(ctx context.Context, version string, o TestOptio
 		res.neverBooted = !dirty
 		return res
 	}
+	// Whether this machine can hold a rental to a host's bandwidth limit: the
+	// test rental's own device, held to one and read back (netlimit.go).
+	ProveNetLimit(rt.h, rt.spec.DataDir, version, Tap)
 
 	r := NewRental(rt.spec.Storage(), id)
 	var rep SerialReport

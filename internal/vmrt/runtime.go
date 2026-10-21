@@ -89,6 +89,9 @@ type StartOptions struct {
 	// MemoryMB sizes the VM below what a rental gets (0: a rental's size): a
 	// test boot while the host uses much of the machine's memory.
 	MemoryMB int
+	// NetLimit is the host's bandwidth limit for this rental (netlimit.go);
+	// nil or empty: none.
+	NetLimit *NetLimit
 }
 
 // ErrRentalPresent is returned by Start while a rental (or a dirty leftover of
@@ -160,6 +163,15 @@ func (rt *Runtime) Start(o StartOptions) (err error) {
 	}
 	if err != nil {
 		return fmt.Errorf("rental network: %w", err)
+	}
+	if o.NetLimit != nil && !o.NetLimit.Empty() {
+		st.NetLimit, err = startNetLimit(rt.h, Tap, *o.NetLimit, time.Now())
+		if serr := save(); err == nil {
+			err = serr
+		}
+		if err != nil {
+			return err
+		}
 	}
 
 	st.Disk, err = CreateDisk(rt.h, rt.spec, r.Dir, o.ID)

@@ -67,6 +67,9 @@ type pendingRecord struct {
 	// DesktopWarnedAt: when the person logged in to the desktop was told it
 	// closes for the rental (desktopwarn.go).
 	DesktopWarnedAt int64 `json:"desktop_warned_at,omitempty"`
+	// NetLimit is the host's bandwidth limit the rental starts with
+	// (vmrt/netlimit.go).
+	NetLimit *vmrt.NetLimit `json:"net_limit,omitempty"`
 
 	// cancelled: torn down while it started; booting: past its test, the VM
 	// is being started (a teardown then waits for it, as for any start);
@@ -279,6 +282,7 @@ func (p *Provisioner) refreshTestView() {
 	if len(fp.GPUs) > 0 && len(gpus) > 0 {
 		p.capability.GPUs = gpus
 	}
+	p.capability.NetLimits = netLimitsCapability(p.host, rt.Spec())
 }
 
 // pendingConflictLocked answers a rental request while a rental is pending:
@@ -422,7 +426,7 @@ func (p *Provisioner) startPending(ctx context.Context, cancel context.CancelFun
 	machine := p.machine
 	p.mu.Unlock()
 
-	o := vmrt.StartOptions{ID: rec.RentalID, Pubkey: rec.RenterPubkey}
+	o := vmrt.StartOptions{ID: rec.RentalID, Pubkey: rec.RenterPubkey, NetLimit: rec.NetLimit}
 	unlock := func() {}
 	if rec.Pair != nil {
 		var err error

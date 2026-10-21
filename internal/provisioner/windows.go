@@ -234,6 +234,7 @@ func detectWindows(osHost vmrt.Host, arch, dataDir, version string) *Provisioner
 	}
 	if f.Ready {
 		cap.Notes = machineNotes(machine, spec)
+		cap.NetLimits = netLimitsCapability(machine, spec)
 		if t, err := vmrt.LoadContainerTest(machine, spec.DataDir); err == nil && t != nil {
 			cap.SelfTest = &control.SelfTestSummary{Passed: t.Passed, GPUVerified: t.GPUVerified, At: t.At, AgentVersion: t.AgentVersion}
 		}

@@ -425,6 +425,9 @@ func Detect(h vmrt.Host, goos, arch, dataDir, version string) *Provisioner {
 		Identity:      rep.Identity,
 		Interconnect:  ic,
 	}
+	if goos == "linux" {
+		p.capability.NetLimits = netLimitsCapability(h, spec)
+	}
 	for _, g := range rep.GPUs {
 		p.capability.GPUs = append(p.capability.GPUs, control.GPU{
 			Model: g.Model, PCIID: g.ID, MemoryMB: g.MemoryMB, Unified: g.Unified, Driver: g.Driver,

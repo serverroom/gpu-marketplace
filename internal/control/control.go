@@ -91,6 +91,9 @@ type Capability struct {
 	// rental's disk is made without waiting for it). Absent when there is
 	// nothing to say, and from agents up to v0.3.10.
 	Notes []string `json:"notes,omitempty"`
+	// NetLimits is whether a rental here can be held to the host's bandwidth
+	// limit and monthly allowance; absent from agents up to v0.3.18.
+	NetLimits *NetLimits `json:"net_limits,omitempty"`
 }
 
 // HostBusy is what the host is using of what a rental would take, and since
@@ -485,6 +488,8 @@ type provisionReq struct {
 	// StartBy (unix seconds) is how long the rental may wait for the host to
 	// free the machine; absent: it may not wait.
 	StartBy *int64 `json:"start_by,omitempty"`
+	// NetLimit is the host's bandwidth limit for the rental; absent: none.
+	NetLimit *NetLimit `json:"net_limit,omitempty"`
 }
 
 // WaitingProvisioner is a Provisioner that lets the host keep using the
@@ -547,6 +552,31 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.StartBy != nil && *req.StartBy <= 0 {
 		http.Error(w, "start_by must be a unix time", http.StatusBadRequest)
+		return
+	}
+	if req.NetLimit != nil && !req.NetLimit.Empty() {
+		if err := req.NetLimit.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		lp, ok := s.prov.(LimitedProvisioner)
+		if !ok {
+			http.Error(w, "this agent cannot hold a rental to a bandwidth limit", http.StatusNotImplemented)
+			return
+		}
+		var startBy int64
+		if req.StartBy != nil {
+			startBy = *req.StartBy
+		}
+		pending, err := lp.ProvisionLimited(req.RentalID, req.RenterPubkey, startBy, *req.NetLimit)
+		switch {
+		case err != nil:
+			writeError(w, err)
+		case pending != nil:
+			writeWaiting(w, pending)
+		default:
+			writeJSON(w, map[string]string{"status": "provisioning"})
+		}
 		return
 	}
 	if wp, ok := s.prov.(WaitingProvisioner); ok {

@@ -212,6 +212,7 @@ func detectContainer(h vmrt.Host, goos, arch, dataDir, version string, spec vmrt
 		VMUser:        "renter",
 		Excluded:      rep.Excluded,
 		Identity:      rep.Identity,
+		NetLimits:     netLimitsCapability(h, spec),
 	}
 	for _, model := range rep.Models {
 		cap.GPUs = append(cap.GPUs, control.GPU{Model: model, Unified: rep.Unified})

@@ -84,6 +84,9 @@ func printCapability(c control.Capability) {
 			fmt.Printf("Locked down:  no — %s\n", g.NotLockedDown)
 		}
 	}
+	if line := netLimitsLine(c.NetLimits); line != "" {
+		fmt.Println(line)
+	}
 	for _, note := range c.Notes {
 		fmt.Printf("Note:         %s\n", note)
 	}
@@ -116,6 +119,21 @@ func rentalCPUsLine(g *control.Guest) string {
 		return ""
 	}
 	return fmt.Sprintf("Rental CPUs:  %d, %s. %s%s", g.VCPUs, g.CPU, strings.ToUpper(g.CoresNote[:1]), g.CoresNote[1:])
+}
+
+// netLimitsLine says whether a rental here can be held to the bandwidth limit
+// and monthly allowance the host sets in the marketplace.
+func netLimitsLine(n *control.NetLimits) string {
+	switch {
+	case n == nil:
+		return ""
+	case n.Usable:
+		return "Bandwidth:    a rental can be held to the speed and monthly data allowance you set in the marketplace"
+	case n.Pending:
+		return "Bandwidth:    " + n.Why
+	default:
+		return "Bandwidth:    a rental cannot be held to a speed limit on this machine: " + n.Why
+	}
 }
 
 // rentalMemoryLine says how a machine's memory is split between a rental and
