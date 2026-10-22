@@ -47,6 +47,27 @@ func TestGptOss120bIsPinned(t *testing.T) {
 	}
 }
 
+func TestNemotronMini4bIsPinned(t *testing.T) {
+	m, ok := Lookup("nemotron-mini-4b")
+	if !ok {
+		t.Fatal("nemotron-mini-4b is not in the catalog")
+	}
+	if m.TotalBytes() != 8404151211 {
+		t.Errorf("nemotron-mini-4b weighs %d bytes; the pinned revision weighs 8404151211", m.TotalBytes())
+	}
+	for _, f := range m.Files {
+		if strings.HasPrefix(f.Path, "nemo/") {
+			t.Errorf("%s is an alternate format and must not be downloaded", f.Path)
+		}
+	}
+	if len(m.Files) != 8 {
+		t.Errorf("want 8 files for nemotron-mini-4b, got %d", len(m.Files))
+	}
+	if m.Servable() {
+		t.Errorf("nemotron-mini-4b names an image (%s) before one was published", m.Image)
+	}
+}
+
 func TestLookupUnknown(t *testing.T) {
 	if _, ok := Lookup("gpt-4o-mini"); ok {
 		t.Fatal("a model the catalog does not list was found")
