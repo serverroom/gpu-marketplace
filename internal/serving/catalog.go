@@ -106,6 +106,25 @@ var Catalog = []Model{
 			{"tokenizer_config.json", 4200, "9279e942392b742d633c7adbb89ebe002c98399db8926a7af5125c726f404070"},
 		},
 	},
+	{
+		ID:       "nemotron-mini-4b",
+		Repo:     "nvidia/Nemotron-Mini-4B-Instruct",
+		Revision: "791833e92ebddb0bc2c1007f6d2b6764f886a2ae",
+		License:  "nvidia-community-model-license-aug2024",
+		Engine:   "vllm",
+		MemoryGB: 16,
+		Kinds:    []string{kindContainerNV},
+		Files: []File{
+			{"README.md", 6197, "f78adafa4ba52c4abc447cc0cfdddb5b3c5329539b6cd1b16d2199312a5b9883"},
+			{"config.json", 646, "bcb0387b9886aaadbdc959c1b95b8426ca8e28c9b3cbc69cf7002d0f42efee3d"},
+			{"nvidia-community-model-license-aug2024.pdf", 145733, "f15d3857aba569ec4b22a5ba18c4d0afb1b20730b58413782dd92965e36bdcdd"},
+			{"pytorch_model.bin", 8381129342, "e851a12d65d56e90ed99659e7439f2b5fc080db478500ee3390f809131426854"},
+			{"special_tokens_map.json", 48, "6e1a2aa52ae51d34303033502b72604a8b921349ab093c9fe6e6c56d90e1ae49"},
+			{"tokenizer.json", 18143149, "83d0648daa0467fb02ddef7ff25460321dab2fbb20c280ae0bc1ea8052f7df90"},
+			{"tokenizer.model", 4545602, "6dfd8b970f437002fc445214304969fe59e64d4f48500bd0b77ba55340f2d811"},
+			{"tokenizer_config.json", 180494, "3d2a24359f4bf7a9db4767c383fdf8eedd30048ff6d011a6a871bc6f458c4dd6"},
+		},
+	},
 }
 
 var (
