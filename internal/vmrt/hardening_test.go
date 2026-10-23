@@ -400,3 +400,37 @@ func TestTheMemoryGuardIsIdleWithoutARental(t *testing.T) {
 		t.Errorf("no rental: %+v %v, calls %q", v, err, h.Calls)
 	}
 }
+
+func TestContainerSwapIsKeptOff(t *testing.T) {
+	const sw = "/sys/fs/cgroup/machine.slice/libpod-abc.scope/memory.swap.max"
+
+	// A daemon-reload reset memory.swap.max to "max": the guard writes 0 back.
+	rt, h := guardHost(t, 2*gib, "401, 20480\n900, 30720\n", 40000)
+	h.Files[sw] = []byte("max\n")
+	v, err := rt.GuardMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrote := false
+	for _, c := range h.Calls {
+		if c == "write "+sw+"=0" {
+			wrote = true
+		}
+	}
+	if !v.SwapReset || !wrote {
+		t.Errorf("drifted swap.max: SwapReset=%v wrote=%v; calls %v", v.SwapReset, wrote, h.Calls)
+	}
+
+	// Already 0: left alone, nothing written.
+	rt, h = guardHost(t, 2*gib, "401, 20480\n900, 30720\n", 40000)
+	h.Files[sw] = []byte("0\n")
+	v, _ = rt.GuardMemory()
+	for _, c := range h.Calls {
+		if strings.HasPrefix(c, "write "+sw) {
+			t.Errorf("wrote swap.max when already 0: %v", h.Calls)
+		}
+	}
+	if v.SwapReset {
+		t.Errorf("SwapReset should be false when already 0")
+	}
+}

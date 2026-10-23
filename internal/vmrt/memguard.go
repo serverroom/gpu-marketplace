@@ -52,6 +52,7 @@ type MemoryVerdict struct {
 	FloorMB   int64
 	KilledPID int
 	KilledMB  int64 // what the stopped process held on the GPU
+	SwapReset bool  // the container's memory.swap.max had drifted off 0 and was put back
 	Reason    string
 }
 
@@ -87,6 +88,15 @@ func (rt *ContainerRuntime) GuardMemory() (MemoryVerdict, error) {
 	if cgroup == "" {
 		return v, nil
 	}
+	// Keep the container's swap off. podman sets memory.swap.max to 0 at create
+	// (--memory-swap == --memory), but that lives only in the OCI spec, so a
+	// `systemctl daemon-reload` -- which an agent self-update or any service
+	// change triggers -- makes systemd reconcile the scope and reset it to `max`,
+	// re-enabling swap for the tenant mid-rental: the renter's pages then reach
+	// the host's swap, which is neither encrypted nor wiped with the rental's key
+	// (the no-swap guarantee in DEVIATIONS.md). This runs every tick and rewrites
+	// 0 only when it has drifted, so a reconcile is undone within half a second.
+	v.SwapReset = reassertNoSwap(rt.h, "/sys/fs/cgroup"+cgroup)
 	own, err := cgroupHeldBytes(rt.h, "/sys/fs/cgroup"+cgroup)
 	if err != nil {
 		return v, fmt.Errorf("read the rental's memory: %w", err)
@@ -149,6 +159,25 @@ func (rt *ContainerRuntime) GuardMemory() (MemoryVerdict, error) {
 	}
 	v.KilledPID, v.KilledMB = victim.pid, victim.mb
 	return v, nil
+}
+
+// reassertNoSwap keeps a container's swap off: memory.swap.max holds "max" or a
+// byte count, so it is read as text (readInt would choke on "max"). It is left
+// alone when already "0"; otherwise 0 is written back. Returns whether it had
+// drifted and was reset. Never fails the guard -- a swap limit that cannot be
+// read or written is logged by the caller through the verdict, not raised.
+func reassertNoSwap(h Host, dir string) bool {
+	data, err := h.ReadFile(dir + "/memory.swap.max")
+	if err != nil {
+		return false
+	}
+	if strings.TrimSpace(string(data)) == "0" {
+		return false
+	}
+	if err := h.WriteFile(dir+"/memory.swap.max", []byte("0"), 0644); err != nil {
+		return false
+	}
+	return true
 }
 
 // cgroupHeldBytes is what a cgroup holds: memory.current less its page cache
