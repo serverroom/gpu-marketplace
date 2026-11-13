@@ -6,11 +6,13 @@ import (
 	"github.com/serverroom/gpu-marketplace/internal/pcidev"
 )
 
-// A GPU built into the processor (an Intel iGPU, an AMD APU's Radeon) is never
-// rented: it draws the machine's own screen (pcidev.Integrated). The specs
-// still list it, marked integrated, so the marketplace can say what the
-// machine has and that it is not included ("Radeon 8060S graphics, not
-// included"). It shares the machine's memory.
+// A GPU built into the processor (an Intel iGPU, an AMD APU's Radeon) draws the
+// machine's own screen (pcidev.Integrated), and is rented only where it can be
+// passed through (pcidev.PassableAPU: Strix Halo's Radeon 8060S) and the
+// machine's own test boot has proven it. The specs list it, marked integrated,
+// either way: the marketplace says "built into the processor" when the
+// machine rents it and "not included" when it does not. It shares the
+// machine's memory.
 
 // amdgpuIDs is libdrm's table of AMD marketing names by device and revision:
 // the one place that tells a Radeon 8060S from an 8050S (both 1002:1586).
@@ -46,6 +48,10 @@ func integratedName(fs pcidev.FS, d pcidev.Device) string {
 	}
 	return pcidev.Name(fs, d)
 }
+
+// IntegratedName is integratedName for the rental runtime, which names the
+// processor's GPU it passes through the same way.
+func IntegratedName(fs pcidev.FS, d pcidev.Device) string { return integratedName(fs, d) }
 
 // integratedGPUs are the processor's own GPUs, marked: on the PCI bus (an x86
 // iGPU, an APU's Radeon) and in an ARM SoC's device tree (gpu_soc.go).

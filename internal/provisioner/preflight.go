@@ -171,10 +171,17 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	ours := ownRentalDevices(h, spec.DataDir)
 	var cards []pcidev.Device
 	var excluded []string
+	// apus are the processor's own GPUs that a rental may take, if this
+	// machine can give them (pcidev.PassableAPU). One that cannot stays with
+	// the host, and the machine rents as it did before: never refused for it.
+	apus := map[string]bool{}
 	for _, d := range pcidev.Display(h) {
 		if pcidev.Integrated(h, d) && !ours[d.BDF] {
-			excluded = append(excluded, fmt.Sprintf("GPU %s (%s) is the processor's integrated GPU; it stays with the host", d.BDF, gpuName(h, d, nv)))
-			continue
+			if why := apuProblem(h, d, len(groups) > 0, spec.DataDir, version); why != "" {
+				excluded = append(excluded, fmt.Sprintf("GPU %s (%s) is the processor's integrated GPU; %s", d.BDF, gpuName(h, d, nv), why))
+				continue
+			}
+			apus[d.BDF] = true
 		}
 		cards = append(cards, d)
 	}
@@ -187,6 +194,9 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 	// as the agent can close it, through the display manager.
 	desktopCloses := rep.DesktopOnDemand && vmrt.ActiveDisplayManager(h) != ""
 	rentable, left := rentableGPUs(h, cards, nv, len(groups) > 0, ours, desktopCloses)
+	// The processor's GPU that cannot go now (a desktop on it, its IOMMU
+	// group, the boot display beside a card) is no card of the machine's.
+	cards, left, excluded = keepAPUs(cards, rentable, left, excluded, apus)
 	switch {
 	case len(cards) == 0:
 		// No GPU a rental could take -- none at all, or only the processor's
@@ -215,6 +225,10 @@ func Preflight(h vmrt.Host, goos string, spec vmrt.Spec, version string) HostRep
 		rentsNVIDIA = rentsNVIDIA || d.Vendor == pcidev.NVIDIA
 	}
 	rep.Unified = hostUnified(nv, rep.BDFs)
+	for _, bdf := range rep.BDFs {
+		// The processor's GPU uses the machine's memory, as a GB10 does.
+		rep.Unified = rep.Unified || pcidev.Integrated(h, pcidev.Read(h, bdf))
+	}
 	// The IOMMU is what hands a GPU to a microVM; without a GPU it is not needed.
 	if rep.GPUCount > 0 && len(groups) == 0 {
 		add("the IOMMU is off, so no GPU can be handed to a microVM: enable VT-d / AMD-Vi (or the SMMU on Arm) in the firmware and on the kernel command line")
@@ -718,6 +732,60 @@ func rentableGPUs(h vmrt.Host, cards []pcidev.Device, nv map[string]nvidiaRow, i
 		}
 	}
 	return rentable, append(excluded, why...)
+}
+
+// apuProblem is why the processor's own GPU d stays with the host, or "" when
+// a rental may take it: a GPU that can be passed through (pcidev.PassableAPU),
+// with the IOMMU on, a VBIOS in the firmware's VFCT table to give the VM, and
+// no failed test boot with it by this agent on this kernel.
+func apuProblem(h vmrt.Host, d pcidev.Device, iommu bool, dataDir, version string) string {
+	arch, ok := pcidev.PassableAPU(d)
+	if !ok {
+		return "it stays with the host"
+	}
+	if !iommu {
+		return fmt.Sprintf("it stays with the host: a %s can be rented, but only with the IOMMU on (AMD-Vi in the firmware and on the kernel command line)", arch)
+	}
+	if _, err := vmrt.VFCTImage(h, d.BDF); err != nil {
+		return fmt.Sprintf("it stays with the host: a %s can be rented, but the VM needs its VBIOS and %v", arch, err)
+	}
+	if problems, failed := vmrt.APUTestFailed(h, dataDir, d.BDF, version); failed {
+		return fmt.Sprintf("it stays with the host: its test boot did not pass (%s); a new agent or kernel tries it again", strings.Join(problems, "; "))
+	}
+	return ""
+}
+
+// keepAPUs takes out of cards the processor's own GPUs (apus) that rentable
+// does not hold, and moves what rentableGPUs said of them from left to
+// excluded: such a GPU stays with the host and the machine rents as it did
+// before, with or without its other GPUs. A card it leaves alone.
+func keepAPUs(cards []pcidev.Device, rentable, left, excluded []string, apus map[string]bool) ([]pcidev.Device, []string, []string) {
+	going := map[string]bool{}
+	for _, bdf := range rentable {
+		going[bdf] = true
+	}
+	var kept []pcidev.Device
+	stays := map[string]bool{}
+	for _, d := range cards {
+		if apus[d.BDF] && !going[d.BDF] {
+			stays[d.BDF] = true
+			continue
+		}
+		kept = append(kept, d)
+	}
+	var rest []string
+	for _, why := range left {
+		bdf := ""
+		if f := strings.Fields(why); len(f) > 1 && f[0] == "GPU" {
+			bdf = f[1]
+		}
+		if stays[bdf] {
+			excluded = append(excluded, why)
+		} else {
+			rest = append(rest, why)
+		}
+	}
+	return kept, rest, excluded
 }
 
 // NormalizeBDF turns nvidia-smi's 8-digit PCI domain ("00000000:0F:01.0") into

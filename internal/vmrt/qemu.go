@@ -19,6 +19,9 @@ type Rental struct {
 	QMP        string   `json:"qmp"`
 	VFIO       []string `json:"vfio"`      // every PCI function handed to the VM
 	MemoryMB   int      `json:"memory_mb"` // 0 = Spec.GuestMemoryMB()
+	// ROMs are the VBIOS files QEMU shows the VM as these functions' ROMs,
+	// by PCI address: an APU's GPU has none of its own (vbios.go).
+	ROMs map[string]string `json:"roms,omitempty"`
 }
 
 // NewRental lays out a rental's working directory under dataDir.
@@ -91,9 +94,13 @@ func QEMUArgs(s Spec, r Rental) []string {
 	}
 	for i, dev := range r.VFIO {
 		port := fmt.Sprintf("rp%d", i)
+		device := fmt.Sprintf("vfio-pci,host=%s,bus=%s", dev, port)
+		if rom := r.ROMs[dev]; rom != "" {
+			device += ",romfile=" + rom
+		}
 		args = append(args,
 			"-device", fmt.Sprintf("pcie-root-port,id=%s,chassis=%d,slot=%d", port, i+1, i+1),
-			"-device", fmt.Sprintf("vfio-pci,host=%s,bus=%s", dev, port))
+			"-device", device)
 	}
 	args = append(args,
 		"-drive", "file="+r.Disk+",if=none,id=root,format="+format+",cache=none,aio=native",

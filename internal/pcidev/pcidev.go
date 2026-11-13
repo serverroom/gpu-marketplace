@@ -236,6 +236,26 @@ func Integrated(fs FS, d Device) bool {
 	return false
 }
 
+// passableAPUs are the integrated GPUs a rental can be given, by PCI device ID,
+// with the GPU's architecture name: the AMD APUs whose GPU sits in an IOMMU
+// group of its own and works in a VM given the VBIOS from the firmware's VFCT
+// table (vmrt/vbios.go). Strix Halo's Radeon 8060S, 8050S and 8040S are all
+// 1002:1586, gfx1151. Every other integrated GPU stays with the host.
+var passableAPUs = map[string]string{
+	"1586": "gfx1151",
+}
+
+// PassableAPU reports whether an integrated GPU is one a rental can be given,
+// and its architecture ("gfx1151"). It says nothing of whether this machine
+// can: its IOMMU group, its VBIOS and its test boot decide that.
+func PassableAPU(d Device) (arch string, ok bool) {
+	if d.Vendor != AMD {
+		return "", false
+	}
+	arch, ok = passableAPUs[d.Device]
+	return arch, ok
+}
+
 var shortVendor = map[string]string{NVIDIA: "NVIDIA", AMD: "AMD", Intel: "Intel"}
 
 // idDatabases are where distributions keep the PCI ID database.

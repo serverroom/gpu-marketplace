@@ -87,10 +87,16 @@ func groupProblems(h Host, gpus, going []string) []string {
 	}
 	slots := map[string]bool{}
 	nvidiaSlots := map[string]bool{}
+	apuSlots := map[string]bool{}
+	goingGPU := map[string]bool{}
 	for _, g := range going {
 		slots[slotOf(g)] = true
+		goingGPU[g] = true
 		if pcidev.Read(h, g).Vendor == pcidev.NVIDIA {
 			nvidiaSlots[slotOf(g)] = true
+		}
+		if IntegratedGPU(h, g) {
+			apuSlots[slotOf(g)] = true
 		}
 	}
 	var problems []string
@@ -98,6 +104,12 @@ func groupProblems(h Host, gpus, going []string) []string {
 		switch {
 		case !slots[slotOf(f)]:
 			problems = append(problems, fmt.Sprintf("PCI device %s shares an IOMMU group with the GPU, so passing the GPU through would take it from this machine too; move the GPU to another slot or enable ACS", f))
+		case apuSlots[slotOf(f)] && !goingGPU[f] && !apuDisplayAudio(h, f):
+			// An APU's slot is the processor's: beside the GPU and its HDMI/DP
+			// audio it holds the machine's own USB controllers, security
+			// processor, audio coprocessor and sound card. None may go.
+			problems = append(problems, fmt.Sprintf("PCI device %s (class %s) is part of the processor, not of its GPU, and shares the GPU's IOMMU group, so passing the GPU through would take it from this machine too", f, pcidev.Read(h, f).Class))
+		case apuSlots[slotOf(f)]:
 		case nvidiaSlots[slotOf(f)]:
 			// An NVIDIA GPU's slot holds only its own functions (audio, USB-C),
 			// as every version before this one took for granted.
@@ -120,6 +132,13 @@ func graphicsCardFunction(class string) bool {
 		}
 	}
 	return false
+}
+
+// apuDisplayAudio reports whether a function of an APU's slot is its GPU's
+// HDMI/DP audio: function 1, an audio device. The machine's own sound card is
+// an audio device too, further along the slot (function 6 on Strix Halo).
+func apuDisplayAudio(h Host, bdf string) bool {
+	return strings.HasSuffix(bdf, ".1") && strings.HasPrefix(pcidev.Read(h, bdf).Class, "0403")
 }
 
 // BindVFIO moves each function to vfio-pci. It returns what it bound so far

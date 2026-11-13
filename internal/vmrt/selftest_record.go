@@ -22,6 +22,7 @@ func SelfTestPath(dataDir string) string { return path.Join(dataDir, "selftest.j
 // machine's last full test; one run without them keeps the last full test of
 // the record before it.
 func SaveSelfTest(h Host, dataDir string, res SelfTestResult) error {
+	recordAPUTest(h, dataDir, res)
 	if res.WithoutGPU {
 		res.LastFull = nil
 		if prev, err := LoadSelfTest(h, dataDir); err == nil && prev != nil {

@@ -66,6 +66,8 @@ func (r SerialReport) LockedDown() bool {
 type HostGPU struct {
 	pcidev.Device
 	Name string // for people: "NVIDIA GeForce RTX 4090"
+	// Integrated: the processor's own GPU, whose memory is the machine's.
+	Integrated bool
 }
 
 // HostGPUs describes the GPUs a rental gets.
@@ -73,7 +75,11 @@ func HostGPUs(h Host, bdfs []string) []HostGPU {
 	out := make([]HostGPU, 0, len(bdfs))
 	for _, bdf := range bdfs {
 		d := pcidev.Read(h, bdf)
-		out = append(out, HostGPU{Device: d, Name: pcidev.Name(h, d)})
+		g := HostGPU{Device: d, Name: pcidev.Name(h, d), Integrated: pcidev.Integrated(h, d)}
+		if g.Integrated {
+			g.Name = stats.IntegratedName(h, d)
+		}
+		out = append(out, g)
 	}
 	return out
 }
@@ -409,7 +415,13 @@ func matchGPUs(rep SerialReport, host []HostGPU) (gpus []GuestGPU, missing []Hos
 		}
 		used[found] = true
 		g := rep.PCI[found]
-		gpu := GuestGPU{HostBDF: hg.BDF, ID: hg.ID(), Model: hg.Name, Driver: g.Driver, MemoryMB: g.MemoryMB, UnmappedBARs: g.Unmapped}
+		gpu := GuestGPU{HostBDF: hg.BDF, ID: hg.ID(), Model: hg.Name, Driver: g.Driver, MemoryMB: g.MemoryMB, UnmappedBARs: g.Unmapped,
+			Unified: hg.Integrated}
+		if hg.Integrated {
+			// amdgpu's figure for an APU is the firmware's carve-out, a small
+			// part of what the GPU uses: its memory is the VM's own.
+			gpu.MemoryMB = 0
+		}
 		if row, ok := nv[g.BDF]; ok {
 			gpu.Model = row.Name
 			if row.MemoryMB > 0 {
@@ -421,6 +433,17 @@ func matchGPUs(rep SerialReport, host []HostGPU) (gpus []GuestGPU, missing []Hos
 		gpus = append(gpus, gpu)
 	}
 	return gpus, missing
+}
+
+// integratedAMD reports whether bdf is, among the GPUs the host passed
+// through, an AMD processor's own GPU.
+func integratedAMD(host []HostGPU, bdf string) bool {
+	for _, hg := range host {
+		if hg.BDF == bdf {
+			return hg.Integrated && hg.Vendor == pcidev.AMD
+		}
+	}
+	return false
 }
 
 // Evaluate turns what the VM printed and what the teardown verified into a
@@ -451,6 +474,11 @@ func Evaluate(rep SerialReport, host []HostGPU, probes []string, sshOpened bool,
 		switch {
 		case g.UnmappedBARs > 0:
 			add("GPU %s (%s) reached the VM but %d of its memory windows could not be mapped there, so it cannot work in a rental", g.HostBDF, g.Model, g.UnmappedBARs)
+		case g.Driver == "" && g.Unified && integratedAMD(host, g.HostBDF):
+			// The VM's kernel carries amdgpu: an APU's GPU it did not take
+			// (no VBIOS, a GPU that did not come back from its last VM) is
+			// one a renter could not use either.
+			add("GPU %s (%s) reached the VM but its driver, amdgpu, did not take it there, so it cannot work in a rental", g.HostBDF, g.Model)
 		case g.Driver == "":
 			res.Notes = append(res.Notes, fmt.Sprintf("GPU %s (%s) reached the VM but no driver took it there; a renter would have to install one", g.HostBDF, g.Model))
 		}

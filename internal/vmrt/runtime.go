@@ -371,6 +371,11 @@ func (rt *Runtime) takeGPUs(st *State, r *Rental, save func() error) error {
 	if err != nil {
 		return err
 	}
+	// The VBIOS of a GPU that is the processor's own, read while it is still
+	// the host's: the VM cannot find one by itself.
+	if r.ROMs, err = writeROMs(rt.h, rt.spec.DataDir, rt.spec.GPUs); err != nil {
+		return fmt.Errorf("hand the GPU to the microVM: %w", err)
+	}
 	st.Devices, err = BindVFIO(rt.h, funcs, func(b []BoundDevice) error {
 		st.Devices = b
 		return save()
