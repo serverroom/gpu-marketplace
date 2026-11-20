@@ -47,6 +47,10 @@ func doing(a Attempt) string {
 // FailureLine is the one line a host sees after an attempt failed.
 func FailureLine(a Attempt) string {
 	s := a.CurrentStep()
+	if a.Restart {
+		return fmt.Sprintf("Automatic setup is waiting for Windows to restart (step %d of %d, %s): WSL 2 needs one restart to finish "+
+			"installing. Restart Windows and the setup carries on by itself.", a.Step, len(a.Steps), doing(a))
+	}
 	if stoppedByAgent(a) {
 		return fmt.Sprintf("Automatic setup was stopped when the agent stopped or restarted, while %s (step %d of %d). "+
 			"It runs again when the agent starts; nothing needs doing.", doing(a), a.Step, len(a.Steps))
@@ -79,6 +83,9 @@ func Describe(a *Attempt) string {
 			when(a.StartedAt), a.By, doing(*a), a.Step, len(a.Steps), clock(a.StepStartedAt))
 	case a.Passed:
 		return fmt.Sprintf("passed %s (run by the %s, agent %s, rental image driver %s)", when(a.FinishedAt), a.By, a.AgentVersion, a.Driver)
+	case a.Restart:
+		return fmt.Sprintf("waiting for Windows to restart since %s (run by the %s, step %d of %d: %s); it carries on by itself after the restart",
+			when(a.FinishedAt), a.By, a.Step, len(a.Steps), doing(*a))
 	case stoppedByAgent(*a):
 		return fmt.Sprintf("stopped %s (run by the %s) when the agent stopped or restarted, while %s (step %d of %d)",
 			when(a.FinishedAt), a.By, doing(*a), a.Step, len(a.Steps))

@@ -180,6 +180,13 @@ func runSetup(svc service.Service, args []string) {
 	release()
 	fmt.Println()
 	errs := agenterrors.Open(config.DataDir())
+	if a.Restart {
+		errs.Raise(autosetup.AreaOf(a.CurrentStep()), autosetup.FailureLine(a), a.Error)
+		fmt.Println("RESTART NEEDED: Windows must restart once to finish installing WSL 2.")
+		fmt.Println("Restart Windows; the agent service carries on with the setup by itself when Windows starts again")
+		fmt.Println("('gpu-agent setup --status' shows how far it is).")
+		return
+	}
 	if !a.Passed {
 		errs.Raise(autosetup.AreaOf(a.CurrentStep()), autosetup.FailureLine(a), a.Error)
 		fmt.Printf("FAILED while %s (step %d of %d):\n  %s\n", a.CurrentStep().Doing(), a.Step, len(a.Steps), a.Error)

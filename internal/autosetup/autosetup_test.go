@@ -934,3 +934,33 @@ func TestMain(m *testing.M) {
 	goos = "linux"
 	os.Exit(m.Run())
 }
+
+// A step that needs the OS restarted (Windows turning WSL 2 on) is recorded as
+// waiting for that restart, not as a failure, and said so.
+func TestARestartIsNotAFailure(t *testing.T) {
+	errRestart := errors.New("Windows must restart to finish installing WSL 2")
+	old := NeedsRestart
+	NeedsRestart = func(err error) bool { return errors.Is(err, errRestart) }
+	t.Cleanup(func() { NeedsRestart = old })
+
+	h := machine(t)
+	noImage(h)
+	r := newRig(t, h)
+	r.fail[StepImage] = []error{errRestart, errRestart}
+	var reported []string
+	r.onWait = func() { reported = r.d.Prov.Capability().Reasons }
+	r.run()
+	a := r.last()
+	if a == nil {
+		t.Fatal("no attempt recorded")
+	}
+	// The rig's retry passes in the end; the waiting line is what counted.
+	if len(reported) != 1 || !strings.HasPrefix(reported[0], "Automatic setup is waiting for Windows to restart (step 1 of 2") ||
+		strings.Contains(reported[0], "failed") {
+		t.Errorf("while waiting the machine reported %q", reported)
+	}
+	at := time.Date(2026, 11, 20, 4, 0, 0, 0, time.UTC).Unix()
+	if got := Describe(&Attempt{Steps: []string{"deps"}, Step: 1, FinishedAt: at, Restart: true, Error: errRestart.Error(), By: ByCommand}); !strings.HasPrefix(got, "waiting for Windows to restart since 2026-11-20 04:00 UTC") {
+		t.Errorf("Describe = %q", got)
+	}
+}

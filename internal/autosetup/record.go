@@ -17,6 +17,10 @@ import (
 // or network failure heals the same day.
 var RetryAfter = 6 * time.Hour
 
+// NeedsRestart says whether a step's error means the OS must restart before
+// the setup can go on (wsl.ErrRestart); cmd sets it.
+var NeedsRestart = func(error) bool { return false }
+
 // Attempt is the last setup attempt, kept on disk (autosetup.json in the data
 // directory, which `gpu-agent remove` deletes).
 type Attempt struct {
@@ -38,6 +42,9 @@ type Attempt struct {
 	FinishedAt int64  `json:"finished_at,omitempty"`
 	Passed     bool   `json:"passed"`
 	Error      string `json:"error,omitempty"`
+	// Restart: the attempt stopped because the OS must restart first (Windows,
+	// after turning WSL 2 on). Not a failure: it carries on at the next start.
+	Restart bool `json:"restart,omitempty"`
 	// By is who ran it: "agent" (automatically) or "setup command".
 	By string `json:"by"`
 }

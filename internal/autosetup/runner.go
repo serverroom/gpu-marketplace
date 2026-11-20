@@ -156,7 +156,7 @@ func (r *Runner) Run(ctx context.Context, a Attempt) (out Attempt) {
 	finish := func(err error) Attempt {
 		a.FinishedAt = r.now().Unix()
 		if err != nil {
-			a.Passed, a.Error = false, err.Error()
+			a.Passed, a.Error, a.Restart = false, err.Error(), NeedsRestart(err)
 		} else {
 			a.Passed, a.Error = true, ""
 		}

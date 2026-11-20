@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 
@@ -18,6 +19,7 @@ func init() {
 	provisioner.WindowsMemAvailableMB = wsl.MemAvailableMB
 	provisioner.ReadMac = mac.Facts
 	provisioner.MacMemAvailableMB = mac.MemAvailableMB
+	autosetup.NeedsRestart = func(err error) bool { return errors.Is(err, wsl.ErrRestart) }
 }
 
 // hostsRentals: this OS can host rentals -- Linux natively, Windows in WSL 2,
