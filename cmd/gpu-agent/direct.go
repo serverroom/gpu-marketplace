@@ -45,6 +45,13 @@ func (a *gpuAgent) startTunnel(cfg sshtunnel.Config) {
 	if old != nil {
 		old()
 	}
+	// A key registered by an agent before v0.3.24 on Windows has permissions
+	// ssh refuses when the service runs it: put them right before every start.
+	if cfg.IdentityFile != "" {
+		if err := sshtunnel.ProtectKey(cfg.IdentityFile); err != nil {
+			a.say("Could not protect the tunnel key: %v", err)
+		}
+	}
 	go sshtunnel.SuperviseWith(ctx, cfg, tunnelWatch{errs: a.ops.errs, host: cfg.RelayHost})
 	a.say("Reverse tunnel to %s started", cfg.RelayHost)
 }

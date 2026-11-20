@@ -143,6 +143,9 @@ func GenerateKey(keyPath string) (string, error) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("ssh-keygen: %w: %s", err, out)
 	}
+	if err := sshtunnel.ProtectKey(keyPath); err != nil {
+		return "", err
+	}
 	pub, err := os.ReadFile(keyPath + ".pub")
 	if err != nil {
 		return "", err
