@@ -4,8 +4,6 @@ package mac
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/serverroom/gpu-marketplace/internal/dl"
 )
 
 // Options size the agent's VM.
@@ -176,7 +176,7 @@ func ensureDisk(ctx context.Context, p vmPaths, o Options) error {
 		}
 		o.log("downloading Ubuntu 24.04 for the VM (%s)", name)
 		tarball := filepath.Join(p.dir, name)
-		if err := download(ctx, rootfsBase+name, tarball, sum); err != nil {
+		if err := dl.File(ctx, rootfsBase+name, tarball, sum, o.log); err != nil {
 			return err
 		}
 		defer os.Remove(tarball)
@@ -349,36 +349,6 @@ func fetch(ctx context.Context, url string) (string, error) {
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return string(b), err
-}
-
-func download(ctx context.Context, url, path, sum string) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	resp, err := (&http.Client{Timeout: 60 * time.Minute}).Do(req)
-	if err != nil {
-		return fmt.Errorf("download %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(f, h), resp.Body)
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		os.Remove(path)
-		return fmt.Errorf("download %s: %w", url, err)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); sum != "" && got != sum {
-		os.Remove(path)
-		return fmt.Errorf("download %s: SHA-256 %s, published %s", url, got, sum)
-	}
-	return nil
 }
 
 func tail(s string, n int) string {

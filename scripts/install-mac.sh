@@ -156,5 +156,6 @@ echo "  gpu-agent register --code <code>"
 echo "and restart the service to bring the tunnel up:"
 echo "  gpu-agent stop && gpu-agent start"
 echo
-echo "Note: macOS cannot host rentals (Apple Silicon has no GPU passthrough); 'sudo gpu-agent check' explains."
+echo "Rentals run in a hardened container inside the agent's own Linux VM (CPU, memory and disk; a Mac cannot share its GPU)."
+echo "'sudo gpu-agent check' shows what is still missing."
 echo "Remove the agent and withdraw the listing: sudo gpu-agent remove"

@@ -75,3 +75,27 @@ func TestWSLConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestShortExec(t *testing.T) {
+	args := []string{"-d", Distro, "-u", "root", "--exec", "podman", "run", "--name", "it's here", "--mount", "type=bind,src=/a b,dst=/c"}
+	short, env, ok := shortExec(args, "")
+	if !ok {
+		t.Fatal("ok = false")
+	}
+	want := []string{"-d", Distro, "-u", "root", "--exec", "/bin/sh", "-c", `eval "exec $GPU_AGENT_ARGV"`}
+	if strings.Join(short, "|") != strings.Join(want, "|") {
+		t.Fatalf("short = %q", short)
+	}
+	if env[0] != `GPU_AGENT_ARGV='podman' 'run' '--name' 'it'\''s here' '--mount' 'type=bind,src=/a b,dst=/c'` {
+		t.Errorf("argv env = %s", env[0])
+	}
+	if env[1] != "WSLENV=GPU_AGENT_ARGV" {
+		t.Errorf("wslenv = %s", env[1])
+	}
+	if _, env, _ := shortExec(args, "USERPROFILE/p"); env[1] != "WSLENV=USERPROFILE/p:GPU_AGENT_ARGV" {
+		t.Errorf("wslenv kept = %s", env[1])
+	}
+	if _, _, ok := shortExec([]string{"--import", Distro, `C:\x`, `C:\y.tar`}, ""); ok {
+		t.Error("a command without --exec was rewritten")
+	}
+}

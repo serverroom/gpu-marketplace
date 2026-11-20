@@ -10,8 +10,13 @@
 package autosetup
 
 import (
+	"runtime"
+
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 )
+
+// goos is runtime.GOOS, a variable so the tests can read every platform's words.
+var goos = runtime.GOOS
 
 // Step is one part of the setup.
 type Step string
@@ -34,6 +39,16 @@ func (s Step) Doing() string {
 	case StepStorage:
 		return "moving the rentals' disks to a disk with room"
 	case StepDeps:
+		// What the step installs differs by platform: apt packages on Linux, but
+		// on Windows and macOS the agent builds its own Linux first, and a host
+		// reading "QEMU, cloud-image-utils" on Windows is told about a step that
+		// is not happening on their machine.
+		switch goos {
+		case "windows":
+			return "installing WSL 2 and the rental runtime inside it"
+		case "darwin":
+			return "installing QEMU and the agent's Linux VM"
+		}
 		return "installing the rental runtime (QEMU, UEFI firmware, cloud-image-utils, cryptsetup, nftables)"
 	case StepImage:
 		return "building the rental image"

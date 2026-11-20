@@ -96,15 +96,35 @@ func (s *session) runWithToken(stdin []byte, args ...string) ([]byte, []byte, in
 		return nil, nil, -1, err
 	}
 
-	var line strings.Builder
-	line.WriteString(syscall.EscapeArg(Exe()))
-	for _, a := range args {
-		line.WriteByte(' ')
-		line.WriteString(syscall.EscapeArg(a))
+	commandLine := func(args []string) string {
+		var line strings.Builder
+		line.WriteString(syscall.EscapeArg(Exe()))
+		for _, a := range args {
+			line.WriteByte(' ')
+			line.WriteString(syscall.EscapeArg(a))
+		}
+		return line.String()
 	}
-	cmdline, _ := windows.UTF16FromString(line.String())
+	env := s.environ()
+	line := commandLine(args)
+	// CreateProcessWithTokenW refuses a command line over 1024 characters
+	// (wsl.go maxTokenCommandLine): a longer command rides in the environment.
+	if len(line) > maxTokenCommandLine {
+		wslenv, rest := "", env[:0:0]
+		for _, kv := range env {
+			if k, v, _ := strings.Cut(kv, "="); strings.EqualFold(k, "WSLENV") {
+				wslenv = v
+				continue
+			}
+			rest = append(rest, kv)
+		}
+		if short, extra, ok := shortExec(args, wslenv); ok {
+			line, env = commandLine(short), append(rest, extra...)
+		}
+	}
+	cmdline, _ := windows.UTF16FromString(line)
 	var envBlock []uint16
-	for _, kv := range s.environ() {
+	for _, kv := range env {
 		u, _ := windows.UTF16FromString(kv)
 		envBlock = append(envBlock, u...)
 	}
@@ -115,6 +135,16 @@ func (s *session) runWithToken(stdin []byte, args ...string) ([]byte, []byte, in
 	si.Cb = uint32(unsafe.Sizeof(si))
 	var pi windows.ProcessInformation
 	const logonWithProfile = 1
+	// wsl.exe starts on this process's window station and desktop, which the
+	// account may not use until it is let in (desktop_windows.go).
+	release, err := grantDesktop(s.sid)
+	if err != nil {
+		for _, h := range []windows.Handle{inW, inR, outR, outW, errR, errW} {
+			windows.CloseHandle(h)
+		}
+		return nil, nil, -1, fmt.Errorf("run wsl.exe as %s: %w", Account, err)
+	}
+	defer release()
 	r, _, callErr := procCreateProcessWithTokenW.Call(uintptr(s.token), logonWithProfile, uintptr(unsafe.Pointer(app)), uintptr(unsafe.Pointer(&cmdline[0])),
 		windows.CREATE_NO_WINDOW|windows.CREATE_UNICODE_ENVIRONMENT, uintptr(unsafe.Pointer(&envBlock[0])), uintptr(unsafe.Pointer(dir)),
 		uintptr(unsafe.Pointer(&si)), uintptr(unsafe.Pointer(&pi)))

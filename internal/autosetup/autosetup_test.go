@@ -913,3 +913,24 @@ func TestProgress(t *testing.T) {
 		t.Errorf("passed = %+v", p)
 	}
 }
+
+func TestDepsStepWordsPerPlatform(t *testing.T) {
+	defer func(saved string) { goos = saved }(goos)
+	for platform, want := range map[string]string{
+		"linux":   "installing the rental runtime (QEMU, UEFI firmware, cloud-image-utils, cryptsetup, nftables)",
+		"windows": "installing WSL 2 and the rental runtime inside it",
+		"darwin":  "installing QEMU and the agent's Linux VM",
+	} {
+		goos = platform
+		if got := StepDeps.Doing(); got != want {
+			t.Errorf("%s: StepDeps.Doing() = %q, want %q", platform, got, want)
+		}
+	}
+}
+
+// TestMain pins the platform words to Linux's: the expected strings above are
+// Linux's, and the tests run on Windows and macOS too.
+func TestMain(m *testing.M) {
+	goos = "linux"
+	os.Exit(m.Run())
+}

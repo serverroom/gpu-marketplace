@@ -171,3 +171,48 @@ func parseGateway(out string) string {
 	}
 	return ""
 }
+
+// maxTokenCommandLine is the longest command line CreateProcessWithTokenW
+// takes (1024 characters, Microsoft's documented limit; the call fails with
+// "The parameter is incorrect" beyond it). An administrator's run of the agent
+// starts wsl.exe that way, and a container rental's podman command alone is
+// longer, so 'gpu-agent check --boot' by hand failed where the service --
+// CreateProcessAsUser, 32767 characters -- passed (SID 4434, 2026-11-20).
+const maxTokenCommandLine = 1024
+
+// argvEnv carries a long command into the distribution: WSLENV shares the
+// Windows variable with Linux, and a short /bin/sh line runs it.
+const argvEnv = "GPU_AGENT_ARGV"
+
+// shortExec rewrites the wsl.exe arguments args (… --exec argv…) so the
+// command line stays short: argv moves into the returned environment entries
+// as one shell-quoted string that /bin/sh unquotes and runs. ok is false when
+// args has no --exec (a management command, always short).
+func shortExec(args []string, wslenv string) (short []string, env []string, ok bool) {
+	at := -1
+	for i, a := range args {
+		if a == "--exec" {
+			at = i
+			break
+		}
+	}
+	if at < 0 || at == len(args)-1 {
+		return nil, nil, false
+	}
+	quoted := make([]string, 0, len(args)-at-1)
+	for _, a := range args[at+1:] {
+		quoted = append(quoted, shellQuote(a))
+	}
+	short = append(append([]string(nil), args[:at+1]...), "/bin/sh", "-c", `eval "exec $`+argvEnv+`"`)
+	share := argvEnv
+	if wslenv != "" {
+		share = wslenv + ":" + argvEnv
+	}
+	return short, []string{argvEnv + "=" + strings.Join(quoted, " "), "WSLENV=" + share}, true
+}
+
+// shellQuote quotes s for /bin/sh: inside single quotes, each single quote in
+// s closes the quoting, is escaped, and opens it again.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}

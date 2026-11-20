@@ -4,8 +4,6 @@ package wsl
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +20,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
+	"github.com/serverroom/gpu-marketplace/internal/dl"
 	"github.com/serverroom/gpu-marketplace/internal/provisioner"
 	"github.com/serverroom/gpu-marketplace/internal/vmrt"
 )
@@ -131,7 +130,7 @@ func installPlatform(ctx context.Context, o Options) (restart bool, err error) {
 		return false, err
 	}
 	msi := filepath.Join(config.ConfigDir(), "wsl-install.msi")
-	if err := download(ctx, url, msi, ""); err != nil {
+	if err := dl.File(ctx, url, msi, "", o.log); err != nil {
 		return false, err
 	}
 	defer os.Remove(msi)
@@ -180,37 +179,6 @@ func latestWSL(ctx context.Context, arch string) (string, error) {
 	return "", fmt.Errorf("the WSL 2 release has no installer for %s", arch)
 }
 
-// download fetches url to path; with sum, it must have that SHA-256.
-func download(ctx context.Context, url, path, sum string) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	resp, err := (&http.Client{Timeout: 60 * time.Minute}).Do(req)
-	if err != nil {
-		return fmt.Errorf("download %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(f, h), resp.Body)
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		os.Remove(path)
-		return fmt.Errorf("download %s: %w", url, err)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); sum != "" && got != sum {
-		os.Remove(path)
-		return fmt.Errorf("download %s: SHA-256 %s, published %s", url, got, sum)
-	}
-	return nil
-}
-
 func fetch(ctx context.Context, url string) (string, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	resp, err := (&http.Client{Timeout: time.Minute}).Do(req)
@@ -249,7 +217,7 @@ func importDistro(ctx context.Context, s *session, o Options) error {
 	}
 	tar := filepath.Join(dir, "rootfs.tar.gz")
 	o.log("downloading Ubuntu 24.04 for WSL (%s)", name)
-	if err := download(ctx, rootfsBase+name, tar, sum); err != nil {
+	if err := dl.File(ctx, rootfsBase+name, tar, sum, o.log); err != nil {
 		return err
 	}
 	defer os.Remove(tar)
