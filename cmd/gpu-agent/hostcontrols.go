@@ -96,11 +96,11 @@ func runUpdate(args []string) {
 	auto := fs.String("auto", "", "'off' pauses the automatic updates, 'on' turns them back on (an update the marketplace pushes still applies)")
 	fs.Parse(args)
 
-	if runtime.GOOS != "linux" {
-		exitf("updating the agent this way works on Linux hosts; run the installer again instead")
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		exitf("updating the agent this way works on Linux and Windows hosts; run the installer again instead")
 	}
-	if os.Geteuid() != 0 {
-		exitf("update needs root: run 'sudo gpu-agent update'")
+	if !isAdmin() {
+		exitf("update needs administrator rights: %s", adminHint("update"))
 	}
 	if *auto != "" {
 		runAutoUpdate(*auto)
@@ -135,7 +135,25 @@ func runUpdate(args []string) {
 	}
 	fmt.Printf("Installed %s at %s; the previous version is kept as %s.prev.\n", rec.To, u.Binary, u.Binary)
 	fmt.Println("The agent restarts in a few seconds. Three minutes later the previous version checks that it is")
-	fmt.Println("running and puts itself back if it is not; 'sudo gpu-agent status' shows the outcome.")
+	fmt.Printf("running and puts itself back if it is not; %s shows the outcome.\n", strings.TrimPrefix(adminHint("status"), "run "))
+}
+
+// runUpdateRestart is the Windows half of an update that systemd does on
+// Linux: started detached from the old binary (<binary>.prev), it restarts
+// the service and, three minutes after the update, checks the new version and
+// puts the old one back if it did not come up.
+func runUpdateRestart(args []string) {
+	fs := flag.NewFlagSet("update-restart", flag.ExitOnError)
+	to := fs.String("to", "", "the version the update installed")
+	binary := fs.String("binary", "", "the agent's binary")
+	fs.Parse(args)
+	if *to == "" || *binary == "" {
+		exitf("update-restart needs --to and --binary")
+	}
+	rec := newUpdater(*binary).RestartAndVerify(*to)
+	if rec.Status != update.StatusOK {
+		os.Exit(1)
+	}
 }
 
 // runUpdateCheck is the check three minutes after an update, run by the
@@ -196,7 +214,7 @@ func runAutoUpdate(word string) {
 
 // autoUpdateSummary is the automatic updates' switch for `status`.
 func autoUpdateSummary() string {
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		return ""
 	}
 	if hostctl.AutoUpdateEnabled(config.ConfigDir()) {

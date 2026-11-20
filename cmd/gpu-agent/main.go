@@ -252,6 +252,11 @@ func (a *gpuAgent) reportCapability(ctx context.Context, c control.Capability) {
 		var ee *register.EndpointError
 		if errors.Is(err, register.ErrNotRegistered) || (errors.As(err, &ee) && ee.Code < 500) {
 			a.warn("report hosting capability: %v", err)
+			// A setup that stopped for Windows' restart carries on now, registered
+			// or not: the host was told it would.
+			if last, _ := autosetup.Load(vmrt.OSHost{}, config.DataDir()); last != nil && last.Restart {
+				a.setupDaemon().Run(ctx)
+			}
 			return
 		}
 		a.warn("report hosting capability (attempt %d): %v", attempt, err)
@@ -387,6 +392,12 @@ func main() {
 		case "update-check":
 			// Run by the previous binary, from a timer, three minutes after an update.
 			runUpdateCheck(args[1:])
+			return
+
+		case "update-restart":
+			// Windows: run detached by the previous binary right after an update; it
+			// restarts the service and checks it three minutes later.
+			runUpdateRestart(args[1:])
 			return
 
 		case "runtime":

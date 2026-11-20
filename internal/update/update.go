@@ -158,6 +158,11 @@ type Updater struct {
 	// Keys are the release keys a release must be signed by; nil means the
 	// ones compiled into this binary (PinnedKeys). Only tests set it.
 	Keys []*rsa.PublicKey
+	// Service is the Windows service manager (GOOS windows); nil means the
+	// real one (service_windows.go). Only tests set it.
+	Service ServiceControl
+	// Sleep waits; nil means time.Sleep. Only tests set it.
+	Sleep func(time.Duration)
 
 	mu      sync.Mutex
 	running bool
@@ -183,6 +188,38 @@ func (u *Updater) get(url string) ([]byte, error) {
 		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+}
+
+// ServiceControl is what an update needs of the Windows service manager. On
+// Windows there is no systemd to restart the agent and check it later, and a
+// running .exe cannot be replaced, only renamed: the new binary goes in by
+// rename and a detached process (the previous binary) restarts the service
+// and checks it.
+type ServiceControl interface {
+	// State says whether the agent's service is running, and its process.
+	State() (running bool, pid int, err error)
+	// Stop stops the service and waits until it has stopped.
+	Stop() error
+	Start() error
+	// Image is the executable a process runs.
+	Image(pid int) (string, error)
+	// Spawn starts a process that outlives the service's own.
+	Spawn(name string, args ...string) error
+}
+
+func (u *Updater) svc() ServiceControl {
+	if u.Service != nil {
+		return u.Service
+	}
+	return defaultService()
+}
+
+func (u *Updater) sleep(d time.Duration) {
+	if u.Sleep != nil {
+		u.Sleep(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 func (u *Updater) keys() ([]*rsa.PublicKey, error) {
@@ -257,12 +294,12 @@ func (u *Updater) save(r Record) error {
 	return err
 }
 
-// Check refuses what can never be updated from here: a platform without
-// systemd, a development build, a version that is not vX.Y.Z or not newer,
+// Check refuses what can never be updated from here: a platform other than
+// Linux (systemd) and Windows (its service manager), a development build, a version that is not vX.Y.Z or not newer,
 // and an update while another is under way.
 func (u *Updater) Check(to string) error {
-	if u.GOOS != "linux" {
-		return refuse(http.StatusNotImplemented, "updating from the panel works on Linux hosts")
+	if u.GOOS != "linux" && u.GOOS != "windows" {
+		return refuse(http.StatusNotImplemented, "updating from the panel works on Linux and Windows hosts")
 	}
 	if _, ok := Parse(to); !ok {
 		return refuse(http.StatusBadRequest, "%q is not a release version (vX.Y.Z)", to)
@@ -382,15 +419,28 @@ func (u *Updater) Run(rec Record) Record {
 	}
 	prev := u.Binary + ".prev"
 	_ = os.Remove(prev)
-	if err := os.Link(u.Binary, prev); err != nil {
-		if err := copyFile(u.Binary, prev); err != nil {
+	if u.GOOS == "windows" {
+		// A running .exe cannot be overwritten, but it can be renamed.
+		if err := os.Rename(u.Binary, prev); err != nil {
 			_ = os.Remove(next)
 			return fail("keep the running binary as %s: %v", prev, err)
 		}
-	}
-	if err := os.Rename(next, u.Binary); err != nil {
-		_ = os.Remove(next)
-		return fail("move the new binary into place: %v", err)
+		if err := os.Rename(next, u.Binary); err != nil {
+			_ = os.Rename(prev, u.Binary)
+			_ = os.Remove(next)
+			return fail("move the new binary into place: %v", err)
+		}
+	} else {
+		if err := os.Link(u.Binary, prev); err != nil {
+			if err := copyFile(u.Binary, prev); err != nil {
+				_ = os.Remove(next)
+				return fail("keep the running binary as %s: %v", prev, err)
+			}
+		}
+		if err := os.Rename(next, u.Binary); err != nil {
+			_ = os.Remove(next)
+			return fail("move the new binary into place: %v", err)
+		}
 	}
 
 	step(StatusRestarting)
@@ -417,6 +467,15 @@ const timerAccuracy = "--timer-property=AccuracySec=1s"
 // they run whatever happens to this process. If either cannot be scheduled,
 // the old binary goes back.
 func (u *Updater) schedule(rec Record) error {
+	if u.GOOS == "windows" {
+		// The previous binary, detached from the service, restarts it and
+		// checks it CheckDelay later (RestartAndVerify).
+		if err := u.svc().Spawn(u.Binary+".prev", "update-restart", "--to", rec.To, "--binary", u.Binary); err != nil {
+			u.restorePrev()
+			return err
+		}
+		return nil
+	}
 	stamp := strconv.FormatInt(u.now().Unix(), 10)
 	check := []string{"--on-active=" + seconds(CheckDelay), timerAccuracy, "--collect", "--unit=gpu-agent-update-check-" + stamp,
 		u.Binary + ".prev", "update-check", "--to", rec.To, "--binary", u.Binary}
@@ -434,6 +493,31 @@ func (u *Updater) schedule(rec Record) error {
 	return nil
 }
 
+// restorePrev puts <binary>.prev back as the binary. On Windows the new one
+// is renamed out of the way first: a file cannot be renamed over another
+// there while either is in use.
+func (u *Updater) restorePrev() error {
+	if u.GOOS == "windows" {
+		rejected := u.Binary + ".rejected"
+		_ = os.Remove(rejected)
+		_ = os.Rename(u.Binary, rejected)
+	}
+	return os.Rename(u.Binary+".prev", u.Binary)
+}
+
+// RestartAndVerify is the detached process an update starts on Windows
+// (`gpu-agent update-restart`, run from <binary>.prev): it restarts the
+// service RestartDelay from now, then checks it CheckDelay after the update,
+// as the systemd timers do on Linux.
+func (u *Updater) RestartAndVerify(to string) Record {
+	u.sleep(RestartDelay)
+	s := u.svc()
+	_ = s.Stop()
+	_ = s.Start() // a service that does not start is what Verify finds
+	u.sleep(CheckDelay - RestartDelay)
+	return u.Verify(to)
+}
+
 func seconds(d time.Duration) string { return strconv.Itoa(int(d / time.Second)) }
 
 // Verify is the check the old binary runs three minutes after an update
@@ -446,6 +530,20 @@ func (u *Updater) Verify(to string) Record {
 		rec = *r
 	}
 	problem := ""
+	if u.GOOS == "windows" {
+		running, pid, err := u.svc().State()
+		switch {
+		case err != nil || !running:
+			problem = "the agent was not running three minutes after the update"
+		default:
+			if out, _ := u.exec(u.Binary, "-version"); strings.TrimSpace(out) != "gpu-agent "+to {
+				problem = fmt.Sprintf("the installed binary reports %q, not gpu-agent %s", strings.TrimSpace(out), to)
+			} else if img, err := u.svc().Image(pid); err == nil && !strings.EqualFold(filepath.Clean(img), filepath.Clean(u.Binary)) {
+				problem = "the agent was not restarted on the new binary"
+			}
+		}
+		return u.settle(rec, problem)
+	}
 	if _, err := u.exec("systemctl", "is-active", "--quiet", ServiceUnit); err != nil {
 		problem = "the agent was not running three minutes after the update"
 	} else if out, _ := u.exec(u.Binary, "-version"); strings.TrimSpace(out) != "gpu-agent "+to {
@@ -455,17 +553,30 @@ func (u *Updater) Verify(to string) Record {
 			problem = "the agent was not restarted on the new binary"
 		}
 	}
+	return u.settle(rec, problem)
+}
+
+// settle records Verify's outcome and, on a problem, puts the previous
+// binary back and restarts the agent on it.
+func (u *Updater) settle(rec Record, problem string) Record {
 	rec.FinishedAt = u.now().Unix()
 	if problem == "" {
 		rec.Status, rec.Error = StatusOK, ""
 		_ = u.save(rec)
 		return rec
 	}
+	if u.GOOS == "windows" {
+		_ = u.svc().Stop()
+	}
 	rec.Status, rec.Error = StatusRolledBack, problem+"; the previous version is back"
-	if err := os.Rename(u.Binary+".prev", u.Binary); err != nil {
+	if err := u.restorePrev(); err != nil {
 		rec.Status, rec.Error = StatusFailed, problem+"; and the previous version could not be put back: "+err.Error()
 	}
-	_, _ = u.exec("systemctl", "restart", ServiceUnit)
+	if u.GOOS == "windows" {
+		_ = u.svc().Start()
+	} else {
+		_, _ = u.exec("systemctl", "restart", ServiceUnit)
+	}
 	_ = u.save(rec)
 	return rec
 }

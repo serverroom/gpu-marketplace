@@ -148,11 +148,11 @@ func TestUpdateRefusesWhatCanNeverBeUpdated(t *testing.T) {
 		to   string
 		code int
 	}{
-		"a dev build":   {func(a *agent) { a.Updater.Current = "dev" }, "v0.1.11", http.StatusConflict},
-		"an older one":  {func(*agent) {}, "v0.1.9", http.StatusConflict},
-		"the same one":  {func(*agent) {}, "v0.1.10", http.StatusConflict},
-		"not linux":     {func(a *agent) { a.Updater.GOOS = "windows" }, "v0.1.11", http.StatusNotImplemented},
-		"not a version": {func(*agent) {}, "latest", http.StatusBadRequest},
+		"a dev build":          {func(a *agent) { a.Updater.Current = "dev" }, "v0.1.11", http.StatusConflict},
+		"an older one":         {func(*agent) {}, "v0.1.9", http.StatusConflict},
+		"the same one":         {func(*agent) {}, "v0.1.10", http.StatusConflict},
+		"not linux or windows": {func(a *agent) { a.Updater.GOOS = "darwin" }, "v0.1.11", http.StatusNotImplemented},
+		"not a version":        {func(*agent) {}, "latest", http.StatusBadRequest},
 	} {
 		a := newAgent(t)
 		c.mod(a)
