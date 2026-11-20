@@ -513,6 +513,7 @@ func runStatus(svc service.Service) {
 	switch {
 	case st.Registered && !st.Unreadable && st.Direct != nil:
 		fmt.Printf("Registration: listing %s, %s, no tunnel\n", st.ListingID, st.Direct.Describe())
+		return
 	case st.Registered && !st.Unreadable && st.HasTunnel:
 		fmt.Printf("Registration: listing %s, location %s, tunnel configured\n", st.ListingID, locationOrUnassigned(config.LocationLabel(st.Location)))
 		return
