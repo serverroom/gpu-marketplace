@@ -194,8 +194,9 @@ On a public route the agent serves its control channel on port **9101** over TLS
 certificate it makes itself and the marketplace pins, and renters connect to port **2222** with
 an ordinary `ssh` command; there is no tunnel. The marketplace uses an address only once it has
 reached port 9101 there from the internet, so **let TCP ports 9101 and 2222 in from the
-internet**. If they are closed, or another program uses one of them, the machine stays on the
-relay and the dashboard says why. A rented machine changes route only once its rental has ended,
+internet** (on Windows the agent adds its own Windows Firewall rule for them, for its own program
+only; a router or firewall in front of the machine is still yours to open). If they are closed, or
+another program uses one of them, the machine stays on the relay and the dashboard says why. A rented machine changes route only once its rental has ended,
 unless its address changes, which the route follows at once. `gpu-agent status` shows the route.
 
 ## Bandwidth: a speed limit and a monthly data allowance

@@ -82,6 +82,9 @@ func (a *gpuAgent) openPublic(addrs []string) error {
 	if err != nil {
 		return fmt.Errorf("its certificate could not be read: %w", err)
 	}
+	if err := direct.AllowInbound(); err != nil {
+		a.warn("open Windows Firewall for the agent on ports %d and %d: %v", direct.ControlPort, direct.SSHPort, err)
+	}
 	return a.controlSrv.StartPublic(addrs, direct.TLSConfig(cert))
 }
 

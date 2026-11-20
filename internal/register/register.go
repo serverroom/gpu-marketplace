@@ -361,6 +361,10 @@ func reportAddresses(ipv4, ipv6 string) (*direct.Report, func(), error) {
 		return nil, nil, fmt.Errorf("its certificate could not be made: %w", err)
 	}
 	report.CertSHA256 = fingerprint
+	if err := direct.AllowInbound(); err != nil {
+		fmt.Printf("Windows Firewall could not be opened for the agent on ports %d and %d (%v); renters will connect through our relay.\n",
+			direct.ControlPort, direct.SSHPort, err)
+	}
 	stop, err := direct.ServeHealth(direct.Route{IPv4: ipv4, IPv6: ipv6, ControlPort: direct.ControlPort}.ControlAddrs(), cert)
 	if err != nil {
 		return nil, nil, fmt.Errorf("port %d could not be opened: %w", direct.ControlPort, err)

@@ -14,6 +14,7 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/serverroom/gpu-marketplace/internal/config"
+	"github.com/serverroom/gpu-marketplace/internal/direct"
 	"github.com/serverroom/gpu-marketplace/internal/mac"
 	"github.com/serverroom/gpu-marketplace/internal/netguard"
 	"github.com/serverroom/gpu-marketplace/internal/register"
@@ -128,6 +129,7 @@ func runRemove(svc service.Service, args []string) {
 			fmt.Println("VM:       the agent's Linux VM is stopped and deleted.")
 		}
 	}
+	_ = direct.RemoveFirewallRule()
 	if runtime.GOOS == "linux" {
 		if _, err := exec.LookPath("nft"); err == nil {
 			_ = exec.Command("nft", "delete", "table", "inet", netguard.Table).Run()
