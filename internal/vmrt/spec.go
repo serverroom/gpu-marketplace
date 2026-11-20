@@ -43,8 +43,13 @@ type Spec struct {
 	// back after; on any other machine a desktop on the GPU refuses the rental.
 	DesktopOnDemand bool
 	TotalMemMB      int
-	CPUs            int
-	DiskGB          int
+	// OSReserveMB is memory the host's own OS keeps on top of the usual tenth
+	// (GuestMemoryMB): a Windows desktop idles at several GB, more than a
+	// tenth of a 64 GB machine, so a rental sized to the tenth would never
+	// find its memory free and the machine would read as busy forever.
+	OSReserveMB int
+	CPUs        int
+	DiskGB      int
 	// GuestCores pins the VM to these host CPUs (one core type on a machine
 	// with big and little cores, ChooseGuestCPUs, unless HomeCores says they
 	// are the wider layout); nil: not pinned.
@@ -98,7 +103,8 @@ func (s Spec) QEMUBinary() string {
 // of less than 8 GB such as a small ARM board). On a unified-memory machine
 // this is ALSO the GPU's memory -- inside the VM, as on the bare machine, the
 // GPU works in the same pool the system does. VFIO pins every page of it for
-// the life of the VM. 0 means the machine is too small (under 2 GB for the VM).
+// the life of the VM. OSReserveMB comes off on top (a Windows host). 0 means the
+// machine is too small (under 2 GB for the VM).
 func (s Spec) GuestMemoryMB() int {
 	floor := 4096
 	if s.TotalMemMB/2 < floor {
@@ -108,7 +114,7 @@ func (s Spec) GuestMemoryMB() int {
 	if reserve < floor {
 		reserve = floor
 	}
-	m := s.TotalMemMB - reserve
+	m := s.TotalMemMB - reserve - s.OSReserveMB
 	if m < 2048 {
 		return 0
 	}

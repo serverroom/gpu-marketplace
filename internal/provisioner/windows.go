@@ -78,6 +78,12 @@ type WinFacts struct {
 // build that cannot read Windows.
 var ReadWindows func() WinFacts
 
+// WindowsOSReserveMB is what Windows keeps for itself beyond the usual tenth
+// of the machine's memory. An idle Windows 11 desktop with the agent's WSL VM
+// up uses ~8.6 GB of 64 GB (SID 4434, 2026-11-20): sized to the tenth alone,
+// a rental needed 2 GB more than was free and the machine read as busy.
+const WindowsOSReserveMB = 4096
+
 // WindowsMemAvailableMB is the memory Windows has free now; cmd sets it.
 var WindowsMemAvailableMB func() int
 
@@ -154,8 +160,8 @@ func detectWindows(osHost vmrt.Host, arch, dataDir, version string) *Provisioner
 		disk = 0
 	}
 	spec := vmrt.Spec{
-		Arch: arch, DataDir: WSLDataDir, TotalMemMB: f.TotalMemMB, CPUs: f.CPUs, DiskGB: disk,
-		SharedGPU: true, AgentVersion: version,
+		Arch: arch, DataDir: WSLDataDir, TotalMemMB: f.TotalMemMB, OSReserveMB: WindowsOSReserveMB,
+		CPUs: f.CPUs, DiskGB: disk, SharedGPU: true, AgentVersion: version,
 	}
 	for _, g := range f.GPUs {
 		spec.GPUs = append(spec.GPUs, g.BusID)
