@@ -1,6 +1,7 @@
 package provisioner
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -63,6 +64,30 @@ func TestWindowsMachineReady(t *testing.T) {
 	spec, ok := p.RuntimeSpec()
 	if !ok || !spec.SharedGPU || spec.DataDir != WSLDataDir || spec.DiskGB != 900-WindowsKeepGB {
 		t.Errorf("spec = %+v", spec)
+	}
+}
+
+// The rental's disk is in WSL's own virtual disk: sized from what is free in
+// there (as on Linux, at most 500 GB unless the host chose), never from drive
+// C:'s free space alone (SID 4434 advertised 7,072 GB; the rental saw 1 TB).
+func TestWindowsRentalDiskIsWhatWSLHasFree(t *testing.T) {
+	old := RentalDiskChoice
+	t.Cleanup(func() { RentalDiskChoice = old })
+	for name, c := range map[string]struct {
+		wslFreeGB, chosen, want int
+	}{
+		"a big drive, WSL's 1 TB disk, no choice": {1000, 0, 500},
+		"the host chose 800 GB":                   {1000, 800, 800},
+		"WSL's disk nearly full":                  {120, 0, 100},
+	} {
+		f, h := winMachine(t)
+		f.StorageFreeGB = 7600
+		h.Outputs["df --output=avail -B1G "+WSLDataDir] = "Avail\n" + strconv.Itoa(c.wslFreeGB) + "G\n"
+		RentalDiskChoice = func() int { return c.chosen }
+		spec, _ := detectWin(t, f).RuntimeSpec()
+		if spec.DiskGB != c.want {
+			t.Errorf("%s: disk = %d GB, want %d", name, spec.DiskGB, c.want)
+		}
 	}
 }
 

@@ -100,6 +100,20 @@ func TestTheProfileStartsFromTheHostsDefault(t *testing.T) {
 	}
 }
 
+// WSL 2 (a shared GPU, no listed cores): the rental is pinned to the first
+// GuestCPUs CPUs of the VM, so nproc inside says what was rented.
+func TestAWSLRentalSeesTheCPUsItRents(t *testing.T) {
+	h := newContainerHost()
+	rt, _ := newContainerRuntime(h, nil)
+	rt.spec.SharedGPU, rt.spec.CPUs, rt.spec.GuestCores = true, 16, nil
+	if err := rt.Start(StartOptions{ID: "R1", Pubkey: key(t)}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if line := runLine(t, h); !strings.Contains(line, "--cpus 14 ") || !strings.Contains(line, "--cpuset-cpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13") {
+		t.Errorf("podman run = %s", line)
+	}
+}
+
 func runLine(t *testing.T, h *fakehost.Host) string {
 	t.Helper()
 	for _, c := range h.Calls {

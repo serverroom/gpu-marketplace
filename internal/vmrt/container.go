@@ -327,6 +327,15 @@ func (rt *ContainerRuntime) runArgs(name, akFile, volume, resolv, seccomp string
 	// nproc oversubscribe the --cpus quota.
 	if len(rt.spec.GuestCores) > 0 {
 		args = append(args, "--cpuset-cpus", cpuList(rt.spec.GuestCores))
+	} else if n := rt.spec.GuestCPUs(); rt.spec.SharedGPU && n > 0 && n < rt.spec.CPUs {
+		// WSL 2: the VM has exactly the machine's CPUs, numbered from 0. The
+		// renter gets the first n of them, so nproc says what was rented; the
+		// rest are left to the distribution and podman beside the rental.
+		cores := make([]int, n)
+		for i := range cores {
+			cores[i] = i
+		}
+		args = append(args, "--cpuset-cpus", cpuList(cores))
 	}
 	// The GPU(s), shared over CDI. Absent on a self-test that runs without the
 	// GPU, and on a machine renting CPU only.

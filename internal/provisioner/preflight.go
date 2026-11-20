@@ -562,17 +562,22 @@ func rentalDiskGB(h vmrt.Host, dataDir string, chosenGB int) int {
 		return 0
 	}
 	gb := avail - 20
-	limit := defaultRentalDiskCapGB
-	if chosenGB > 0 {
-		limit = chosenGB
-	}
-	if gb > limit {
+	if limit := rentalDiskLimitGB(chosenGB); gb > limit {
 		gb = limit
 	}
 	if gb < 0 {
 		gb = 0
 	}
 	return gb
+}
+
+// rentalDiskLimitGB is the most a rental's disk is given: the host's own
+// choice, or 500 GB.
+func rentalDiskLimitGB(chosenGB int) int {
+	if chosenGB > 0 {
+		return chosenGB
+	}
+	return defaultRentalDiskCapGB
 }
 
 // nvidiaRow is one GPU as nvidia-smi on the host describes it.

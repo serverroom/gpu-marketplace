@@ -159,6 +159,17 @@ func detectWindows(osHost vmrt.Host, arch, dataDir, version string) *Provisioner
 	if disk < 0 {
 		disk = 0
 	}
+	// The rental's disk lives in the WSL distribution's own virtual disk (1 TB
+	// at most by default, whatever drive C: has free): size it as on Linux, from
+	// what is free in there, at most 500 GB unless the host chose a size, and
+	// never more than Windows has to grow that virtual disk into.
+	if f.Ready && f.Machine != nil {
+		if gb := rentalDiskGB(f.Machine, WSLDataDir, RentalDiskChoice()); gb > 0 && gb < disk {
+			disk = gb
+		}
+	} else if limit := rentalDiskLimitGB(RentalDiskChoice()); disk > limit {
+		disk = limit
+	}
 	spec := vmrt.Spec{
 		Arch: arch, DataDir: WSLDataDir, TotalMemMB: f.TotalMemMB, OSReserveMB: WindowsOSReserveMB,
 		CPUs: f.CPUs, DiskGB: disk, SharedGPU: true, AgentVersion: version,
